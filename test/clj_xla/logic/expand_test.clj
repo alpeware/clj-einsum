@@ -44,7 +44,30 @@
     ;; 3 terms should decompose into 2 binary contraction equations
     (is (= 2 (count expanded)))
     (is (every? ast/eqn? expanded))
-    ;; The final equation produces :out
-    (is (= :out (first (second (last expanded)))))
+    ;; The intermediate equation retains :i and :k (contracting :j)
+    (let [eq1 (first expanded)]
+      (is (= [:i :k] (vec (rest (ast/head eq1)))))
+      (is (= [[:a :i :j] [:b :j :k]] (ast/body-terms eq1))))
+    ;; The final equation produces :out with :i and :l (contracting :k)
+    (let [eq2 (second expanded)]
+      (is (= [:out :i :l] (ast/head eq2)))
+      (is (= [:c :k :l] (second (ast/body-terms eq2)))))
     ;; Each equation has at most 2 body terms
     (is (every? (fn [eqn] (<= (count (ast/body-terms eqn)) 2)) expanded))))
+
+(deftest test-relation-embedding-decomposition
+  (let [ast [:= [:EmbR :i :j]
+             [:R :x :y]
+             [:E :x :i]
+             [:E :y :j]]
+        expanded (expand/expand-ast {} ast)]
+    (is (= 2 (count expanded)))
+    (is (every? ast/valid-node? expanded))
+    ;; Step 1: contracts :x, keeps :y and :i
+    (let [eq1 (first expanded)]
+      (is (= [:y :i] (vec (rest (ast/head eq1)))))
+      (is (= [[:R :x :y] [:E :x :i]] (ast/body-terms eq1))))
+    ;; Step 2: contracts :y, keeps :i and :j
+    (let [eq2 (second expanded)]
+      (is (= [:EmbR :i :j] (ast/head eq2)))
+      (is (= [:E :y :j] (second (ast/body-terms eq2)))))))

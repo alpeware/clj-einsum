@@ -1441,5 +1441,6 @@
           graph {:name graph-name
                  :invars invars
                  :outvars outvars
+                 :known-shapes known-shapes
                  :eqns @eqns-atom}]
       (shlo/validate-graph graph))))

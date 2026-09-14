@@ -21,33 +21,26 @@
         body (ast/body-terms eqn-node)]
     (if (<= (count body) 2)
       nil ;; Already binary or unary, no decomposition needed
-      (let [counter (or (:synth-counter ctx) (atom 0))
-            [_first-two & remaining] (partition-all 2 body)
-            ;; We fold pairwise
-            steps
-            (reduce
-             (fn [[acc prev-term] next-term]
-               (let [prev-idxs (vec (rest prev-term))
-                     next-idxs (vec (rest next-term))
-                     rem-indices (set (mapcat rest remaining))
-                     needed-later (set/union rem-indices (set head-idxs))
-                     synth-idxs (vec (filter #(contains? needed-later %)
-                                             (distinct (concat prev-idxs next-idxs))))
-                     synth-id (keyword (str "synth_" (swap! counter inc)))
-                     synth-head (into [synth-id] synth-idxs)
-                     step-eqn [:= synth-head prev-term next-term]]
-                 [(conj acc step-eqn) synth-head]))
-             [[] (first body)]
-             (rest body))
-            [acc _final-term] steps
-            ;; Replace the last synthetic head with the actual head and attributes
-            last-eqn (last acc)
-            last-body (drop 2 last-eqn)
-            final-eqn (cond-> [:= (into [head-name] head-idxs)]
-                        attrs (conj attrs)
-                        true (into last-body))
-            all-eqns (conj (vec (butlast acc)) final-eqn)]
-        all-eqns))))
+      (let [counter (or (:synth-counter ctx) (atom 0))]
+        (loop [acc []
+               prev-term (first body)
+               remaining (vec (rest body))]
+          (if (empty? remaining)
+            acc
+            (let [next-term (first remaining)
+                  rest-remaining (subvec remaining 1)
+                  is-last? (empty? rest-remaining)
+                  rem-indices (set (mapcat rest rest-remaining))
+                  needed-later (set/union rem-indices (set head-idxs))
+                  synth-idxs (vec (filter #(contains? needed-later %)
+                                          (distinct (concat (rest prev-term) (rest next-term)))))
+                  synth-head (if is-last?
+                               (into [head-name] head-idxs)
+                               (into [(keyword (str "synth_" (swap! counter inc)))] synth-idxs))
+                  eqn (if (and is-last? attrs)
+                        [:= synth-head attrs prev-term next-term]
+                        [:= synth-head prev-term next-term])]
+              (recur (conj acc eqn) synth-head rest-remaining))))))))
 
 (defmethod expand-node := [node ctx]
   (decompose-n-ary-eqn node ctx))
