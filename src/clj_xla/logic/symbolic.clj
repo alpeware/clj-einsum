@@ -338,92 +338,146 @@
 ;; ==============================================================================
 
 (defn forward-chain
-  "Executes host-driven forward-chaining fixpoint reasoning.
+  "Executes host-driven per-relation forward-chaining fixpoint reasoning.
    Compiles execution graph once and iterates host-side fact updates until fixpoint or max-iters.
    `opts`: {:rules [...]
-            :facts #{[0 1] ...}
+            :facts {rel-kw #{[0 1] ...} ...}
             :n 5
             :d 512
             :seed 42
             :max-iters 10 (optional, default 10)
             :threshold 0.5 (optional, default 0.5)
             :objects [:alice :bob ...] (optional)}
-   Returns {:facts #{...} :iterations k :trace [{:iter k :new #{...}}] :head-facts {head-kw #{...}}}."
-  [{:keys [rules facts n d seed max-iters threshold objects base-rel] :as _opts}]
+   Returns {:facts {rel-kw #{...}} :head-facts {head-kw #{...}} :iterations k :trace [{:iter k :new {rel-kw #{...}}}]}."
+  [{:keys [rules facts n d seed max-iters threshold objects] :as _opts}]
   (let [n-long (long n)
         d-long (long d)
         thresh (float (or threshold 0.5))
-        max-it (long (or max-iters 10))
-        base-r-kw (or base-rel :parent)
-        base-emb-kw (keyword (str "Emb_" (name base-r-kw)))
+        max-it (long (or max-iters 10))]
 
-        ;; 1. Build initial embeddings and fact tensor on host
-        emb (random-embeddings n-long d-long (or seed 42))
-        e-data (:data emb)
+    ;; 1. Validations: binary arity, duplicate heads, and valid facts map
+    (when-not (map? facts)
+      (throw (ex-info "Facts must be a map of {relation-kw #{[x y] ...}}"
+                      {:type :invalid-facts :facts facts})))
+    (doseq [r rules]
+      (let [h (:head r)
+            h-args (rest h)]
+        (when-not (= (count h-args) 2)
+          (throw (ex-info (str "Unsupported rule head arity (must be binary): " h)
+                          {:type :unsupported-arity :head h}))))
+      (doseq [atom (:body r)]
+        (let [atom-args (rest atom)]
+          (when-not (= (count atom-args) 2)
+            (throw (ex-info (str "Unsupported rule body atom arity (must be binary): " atom)
+                            {:type :unsupported-arity :atom atom}))))))
+    (doseq [[rel tuples] facts
+            tuple tuples]
+      (when-not (= (count tuple) 2)
+        (throw (ex-info (str "Unsupported fact tuple arity (must be binary): " tuple " in relation " rel)
+                        {:type :unsupported-arity :rel rel :tuple tuple}))))
+    (let [head-rels (mapv (comp first :head) rules)]
+      (when-not (= (count head-rels) (count (set head-rels)))
+        (throw (ex-info (str "Duplicate rule heads detected: " head-rels)
+                        {:type :duplicate-rule-head :heads head-rels}))))
 
-        ;; 2. Determine target heads and compile graph ONCE
-        ;; Map head rel names
-        rel-embs {base-r-kw base-emb-kw}
-        rule-nodes (mapv (fn [r] (embed-rule (assoc r :rel-embs (merge rel-embs (:rel-embs r))))) rules)
-        head-q-names (mapv #(keyword (str "Dq_" (name (first (:head %))))) rules)
+    ;; 2. Determine all distinct relations (EDB and IDB)
+    (let [input-relations (set (keys facts))
+          body-relations (set (mapcat (fn [r] (map first (:body r))) rules))
+          head-relations (set (map (comp first :head) rules))
+          all-relations (vec (distinct (concat input-relations body-relations head-relations)))
+          rel->emb (into {} (map (fn [r] [r (keyword (str "Emb_" (name r)))]) all-relations))
 
-        invars [[:R [:tensor [n-long n-long] :f32]]
-                [:E [:tensor [n-long d-long] :f32]]]
+          ;; Embed equations: one per relation
+          embed-eqns (mapv (fn [r]
+                             (let [emb-name (get rel->emb r)
+                                   invar-name (keyword (str "R_" (name r)))]
+                               (embed-relation emb-name invar-name :E [:x :y] [:i :j])))
+                           all-relations)
 
-        ast (vec (concat
-                  [:block {:name :forward-chain-step}
-                   (embed-relation base-emb-kw :R :E [:x :y] [:i :j])]
-                  rule-nodes
-                  (mapv (fn [r q-name]
-                          (let [h-emb (symbol->emb-head (first (:head r)))]
-                            (query-relation q-name h-emb :E [:a :b] [:se0 :se1])))
-                        rules
-                        head-q-names)))
+          ;; Rule nodes with rel-embs covering every relation
+          rule-nodes (mapv (fn [r]
+                             (embed-rule (assoc r :rel-embs rel->emb)))
+                           rules)
 
-        target-heads (vec head-q-names)
-        exec (compile-query "forward_chain_graph" invars ast target-heads)
-        obj->idx (when objects (into {} (map-indexed (fn [i o] [o i]) objects)))
-        init-facts (set (map (fn [tuple]
-                               (if (and obj->idx (not (number? (first tuple))))
-                                 (mapv obj->idx tuple)
-                                 (mapv long tuple)))
-                             facts))]
+          ;; Query nodes: one per rule head
+          query-nodes (mapv (fn [r]
+                              (let [head-rel (first (:head r))
+                                    q-name (keyword (str "Dq_" (name head-rel)))
+                                    h-emb (symbol->emb-head head-rel)]
+                                (query-relation q-name h-emb :E [:a :b] [:se0 :se1])))
+                            rules)
 
-    ;; 3. Fixpoint loop on host
-    (loop [curr-facts init-facts
-           iter 1
-           trace []]
-      (let [r-tensor (fact-tensor curr-facts n-long)
-            r-data (:data r-tensor)
-            outputs (run-query! exec {:R r-data :E e-data})
+          target-heads (mapv (fn [r] (keyword (str "Dq_" (name (first (:head r)))))) rules)
+          invars (into [[:E [:tensor [n-long d-long] :f32]]]
+                       (map (fn [r] [(keyword (str "R_" (name r))) [:tensor [n-long n-long] :f32]])
+                            all-relations))
 
-            ;; Decode newly inferred facts from all head queries (as integer pairs)
-            new-facts-by-head (into {}
-                                    (map (fn [r q-name]
-                                           (let [head-rel (first (:head r))
-                                                 scores (get outputs q-name)
-                                                 pairs (decode-pairs scores n-long thresh nil)]
-                                             [head-rel pairs]))
-                                         rules
-                                         head-q-names))
-            all-new-pairs (apply set/union (vals new-facts-by-head))
-            truly-new (set/difference all-new-pairs curr-facts)
-            updated-facts (set/union curr-facts all-new-pairs)
-            step-trace (conj trace {:iter iter :new truly-new :facts-by-head new-facts-by-head})]
-        (if (or (empty? truly-new) (>= iter max-it))
-          (let [map-obj-pair (if objects
-                               (fn [[i j]] [(nth objects i) (nth objects j)])
-                               identity)
-                map-obj-set (fn [s] (into #{} (map map-obj-pair) s))]
-            {:facts (map-obj-set updated-facts)
-             :iterations iter
-             :trace (mapv (fn [t]
-                            (-> t
-                                (update :new map-obj-set)
-                                (update :facts-by-head (fn [m] (into {} (map (fn [[k v]] [k (map-obj-set v)]) m))))))
-                          step-trace)
-             :head-facts (into {} (map (fn [[k v]] [k (map-obj-set v)]) new-facts-by-head))})
-          (recur updated-facts (inc iter) step-trace))))))
+          chain-ast (vec (concat
+                          [:block {:name :forward-chain-step}]
+                          embed-eqns
+                          rule-nodes
+                          query-nodes))
+
+          exec (compile-query "forward_chain_graph" invars chain-ast target-heads)
+          emb (random-embeddings n-long d-long (or seed 42))
+          e-data (:data emb)
+
+          obj->idx (when objects (into {} (map-indexed (fn [i o] [o i]) objects)))
+          init-facts (into {}
+                           (map (fn [r]
+                                  [r (set (map (fn [tuple]
+                                                 (if (and obj->idx (not (number? (first tuple))))
+                                                   (mapv obj->idx tuple)
+                                                   (mapv long tuple)))
+                                               (get facts r #{})))])
+                                all-relations))]
+
+      ;; 3. Host-side fixpoint loop
+      (loop [curr-facts init-facts
+             iter 1
+             trace []]
+        (let [inputs (into {:E e-data}
+                           (map (fn [r]
+                                  [(keyword (str "R_" (name r)))
+                                   (:data (fact-tensor (get curr-facts r #{}) n-long))])
+                                all-relations))
+              outputs (run-query! exec inputs)
+
+              ;; Decode newly inferred facts from all head queries (as integer pairs)
+              new-facts-by-head (into {}
+                                      (map (fn [r]
+                                             (let [head-rel (first (:head r))
+                                                   q-name (keyword (str "Dq_" (name head-rel)))
+                                                   scores (get outputs q-name)
+                                                   pairs (decode-pairs scores n-long thresh nil)]
+                                               [head-rel pairs]))
+                                           rules))
+              truly-new-by-head (into {}
+                                      (map (fn [[head-rel pairs]]
+                                             [head-rel (set/difference pairs (get curr-facts head-rel #{}))])
+                                           new-facts-by-head))
+              updated-facts (reduce (fn [acc [head-rel pairs]]
+                                      (update acc head-rel (fnil set/union #{}) pairs))
+                                    curr-facts
+                                    new-facts-by-head)
+              step-trace (conj trace {:iter iter
+                                      :new truly-new-by-head})]
+          (if (or (every? empty? (vals truly-new-by-head)) (>= iter max-it))
+            (let [map-obj-pair (if objects
+                                 (fn [[i j]] [(nth objects i) (nth objects j)])
+                                 identity)
+                  map-obj-set (fn [s] (into #{} (map map-obj-pair) s))
+                  map-rel-map (fn [m] (into {} (map (fn [[k v]] [k (map-obj-set v)]) m)))]
+              {:facts (map-rel-map updated-facts)
+               :head-facts (into {} (map (fn [r]
+                                           (let [hr (first (:head r))]
+                                             [hr (map-obj-set (get updated-facts hr #{}))]))
+                                         rules))
+               :iterations iter
+               :trace (mapv (fn [t]
+                              (update t :new map-rel-map))
+                            step-trace)})
+            (recur updated-facts (inc iter) step-trace)))))))
 
 ;; ==============================================================================
 ;; 3.5 Backward Chaining Query Planner (Helper)
