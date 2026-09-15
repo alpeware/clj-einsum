@@ -160,7 +160,10 @@
             mul-out-var (if (or needs-perm? has-post-act?)
                           (gen-id "t_mul" counter)
                           final-out-var)
-            mul-eqn {:op :stablehlo/multiply
+            op-kw (if (or (= (:op attrs) :add) (= (:op attrs) :+) (:add? attrs))
+                    :stablehlo/add
+                    :stablehlo/multiply)
+            mul-eqn {:op op-kw
                      :invars [primary-name secondary-v]
                      :outvars [mul-out-var]}]
         (swap! eqns-atom conj mul-eqn)
@@ -1451,12 +1454,36 @@
 
           (= op :compare)
           (let [h-name (if (vector? head) (first head) head)
+                in0 (first (first body))
+                in1 (first (second body))
+                in0-shape (get known-shapes in0)
+                in1-shape (get known-shapes in1)
                 dir (or (:direction attrs) (:comparison_direction attrs) "LT")
                 dir-str (if (keyword? dir) (name dir) (str dir))]
-            (swap! eqns-atom conj {:op :stablehlo/compare
-                                   :invars [(first (first body)) (first (second body))]
-                                   :outvars [h-name]
-                                   :attrs {:comparison_direction dir-str}}))
+            (if (and in0-shape in1-shape (not= in0-shape in1-shape))
+              (let [[target-shape bcast-var other-var other-is-first?]
+                    (if (>= (count in0-shape) (count in1-shape))
+                      [in0-shape in1 in0 true]
+                      [in1-shape in0 in1 false])
+                    bcast-shape (get known-shapes bcast-var [])
+                    bcast-dims (if (empty? bcast-shape)
+                                 []
+                                 (vec (range (- (count target-shape) (count bcast-shape))
+                                             (count target-shape))))
+                    out-b (gen-id "t_cmp_bcast" counter)
+                    bcast-eqn {:op :stablehlo/broadcast_in_dim
+                               :invars [bcast-var]
+                               :outvars [out-b]
+                               :attrs {:broadcast_dimensions bcast-dims :target_shape target-shape}}
+                    invars (if other-is-first? [other-var out-b] [out-b other-var])]
+                (swap! eqns-atom conj bcast-eqn {:op :stablehlo/compare
+                                                 :invars invars
+                                                 :outvars [h-name]
+                                                 :attrs {:comparison_direction dir-str}}))
+              (swap! eqns-atom conj {:op :stablehlo/compare
+                                     :invars [in0 in1]
+                                     :outvars [h-name]
+                                     :attrs {:comparison_direction dir-str}})))
 
           (= op :not)
           (let [h-name (if (vector? head) (first head) head)]

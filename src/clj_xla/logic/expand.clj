@@ -51,6 +51,12 @@
                    (rest node))]
     (vec children)))
 
+(defmethod expand-node :relational-grounding [node _ctx]
+  (let [children (if (map? (second node))
+                   (drop 2 node)
+                   (rest node))]
+    (vec children)))
+
 (defmethod expand-node :residual [node _ctx]
   ;; [:residual [:out ...] [:in ...] & children]
   ;; Automatically handles residual addition by emitting implicit accumulation or sum

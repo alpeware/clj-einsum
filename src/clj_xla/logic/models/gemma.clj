@@ -1,5 +1,6 @@
 (ns clj-xla.logic.models.gemma
-  "Declarative Gemma 1, Gemma 2, and Gemma 4 Architecture definitions in pure Tensor Logic Hiccup AST.")
+  "Declarative Gemma 1, Gemma 2, and Gemma 4 Architecture definitions in pure Tensor Logic Hiccup AST."
+  (:require [clj-xla.logic.memory.relation :as mem]))
 
 (def DEFAULT_GEMMA_CONFIG
   {:hidden-dim 2048
@@ -464,20 +465,41 @@
      ;; 4. Final RMSNorm
      [:rms-norm [:normed :b :p :d] [h-final :b :p :d] [:final_norm_w :d] {:eps 1e-6}]
 
-     ;; 5. Tied LM Head with optional final logit softcapping (30.0 * tanh(x / 30.0))
-     (if (:last-token-only? cfg)
-       [:block {:name :last_token_head}
-        [:dynamic-slice [:normed_last :b :one :d] [:normed :b :p :d]
-         {:slice-sizes [1 1 hidden-dim]
-          :start-indices [0 :pos 0]}]
-        [:= [:logits :b :one :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
-                                   {:softcap (double final-logit-softcap)}
-                                   {})
-         [:normed_last :b :one :d] [:embed_tokens :v :d]]]
-       [:= [:logits :b :p :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
-                                {:softcap (double final-logit-softcap)}
-                                {})
-        [:normed :b :p :d] [:embed_tokens :v :d]])]))
+     ;; 5. Tied LM Head with optional final logit softcapping and relational grounding
+     (let [has-rel-mem? (boolean (or (:relational-memory cfg) (:relational-memory? cfg)))
+           rel-cfg (or (:relational-memory cfg) {})
+           mem-dim (long (or (:dim rel-cfg) (:memory-dim rel-cfg) 256))
+           entity-count (long (or (:entity-count rel-cfg) 1000))
+           vocab-size (long (or (:vocab-size cfg) 262144))]
+       (if (:last-token-only? cfg)
+         [:block {:name :last_token_head}
+          [:dynamic-slice [:normed_last :b :one :d] [:normed :b :p :d]
+           {:slice-sizes [1 1 hidden-dim]
+            :start-indices [0 :pos 0]}]
+          (if has-rel-mem?
+            [:block {:name :relational_grounded_head}
+             [:= [:raw_logits :b :one :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
+                                            {:softcap (double final-logit-softcap)}
+                                            {})
+              [:normed_last :b :one :d] [:embed_tokens :v :d]]
+             (mem/relational-grounding-ast hidden-dim mem-dim vocab-size entity-count)
+             [:= [:logits :b :one :v] [:logits_grounded :b :one :v]]]
+            [:= [:logits :b :one :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
+                                       {:softcap (double final-logit-softcap)}
+                                       {})
+             [:normed_last :b :one :d] [:embed_tokens :v :d]])]
+         (if has-rel-mem?
+           [:block {:name :relational_grounded_seq_head}
+            [:= [:raw_logits :b :p :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
+                                         {:softcap (double final-logit-softcap)}
+                                         {})
+             [:normed :b :p :d] [:embed_tokens :v :d]]
+            (mem/relational-grounding-ast hidden-dim mem-dim vocab-size entity-count)
+            [:= [:logits :b :one :v] [:logits_grounded :b :one :v]]]
+           [:= [:logits :b :p :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
+                                    {:softcap (double final-logit-softcap)}
+                                    {})
+            [:normed :b :p :d] [:embed_tokens :v :d]])))]))
 
 (defn gemma4-prefill-outvars
   "Constructs output variable list for Gemma 4 prefill: [:logits (k_ro_sl_i | k_ro_i) (v_heads_sl_i | v_heads_i) ...]."

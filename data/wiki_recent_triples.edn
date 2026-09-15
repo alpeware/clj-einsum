@@ -1,0 +1,18 @@
+{:entities
+ ["Anthropic" "Dario Amodei"
+  "OpenAI" "Sam Altman"
+  "Google DeepMind" "Demis Hassabis"
+  "Tesla" "Elon Musk"
+  "Apple" "Tim Cook"
+  "Microsoft" "Satya Nadella"
+  "Alpeware" "Simon Pure"]
+ :relations
+ [:ceo_of :founder_of :headquarters_in]
+ :triples
+ [["Anthropic" :ceo_of "Dario Amodei"]
+  ["OpenAI" :ceo_of "Sam Altman"]
+  ["Google DeepMind" :ceo_of "Demis Hassabis"]
+  ["Tesla" :ceo_of "Elon Musk"]
+  ["Apple" :ceo_of "Tim Cook"]
+  ["Microsoft" :ceo_of "Satya Nadella"]
+  ["Alpeware" :ceo_of "Simon Pure"]]}
