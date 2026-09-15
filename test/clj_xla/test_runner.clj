@@ -28,6 +28,7 @@
             [clj-xla.logic.quip-test]
             [clj-xla.logic.shape-test]
             [clj-xla.logic.memory.relation-test]
+            [clj-xla.logic.memory.poc-builders-test]
             [clj-xla.logic.semiring-test]
             [clj-xla.logic.smollm-test]
             [clj-xla.logic.stratified-negation-test]
@@ -98,6 +99,7 @@
                            'clj-xla.logic.symbolic-e2e-test
                            'clj-xla.logic.symbolic-scaling-test
                            'clj-xla.logic.memory.relation-test
+                           'clj-xla.logic.memory.poc-builders-test
                            'clj-xla.core-test)
         rocm-res (isolated-runner/run-isolated-test 'clj-xla.integration.rocm-e2e-test {"HIP_VISIBLE_DEVICES" "0" "ROCR_VISIBLE_DEVICES" "0"})
         sycl-res (isolated-runner/run-isolated-test 'clj-xla.integration.sycl-e2e-test)

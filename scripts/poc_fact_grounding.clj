@@ -21,7 +21,10 @@
    :relation :ceo_of
    :dim 256
    :threshold 0.5
+   :memory-seed 2026
+   :proj-seed 2026
    :max-new-tokens 15
+   :grounded-tokens 5
    :temperature 0.7
    :top-k 10})
 
@@ -80,11 +83,54 @@
           (and (= flag "--threshold") val)
           (recur (subvec remaining 2) (assoc opts :threshold (Double/parseDouble val)))
 
+          (and (= flag "--memory-seed") val)
+          (recur (subvec remaining 2) (assoc opts :memory-seed (Long/parseLong val)))
+
+          (and (= flag "--proj-seed") val)
+          (recur (subvec remaining 2) (assoc opts :proj-seed (Long/parseLong val)))
+
+          (and (= flag "--seed") val)
+          (let [s (Long/parseLong val)]
+            (recur (subvec remaining 2) (assoc opts :proj-seed s :memory-seed s)))
+
           (and (= flag "--max-new-tokens") val)
           (recur (subvec remaining 2) (assoc opts :max-new-tokens (Long/parseLong val)))
 
+          (and (= flag "--grounded-tokens") val)
+          (recur (subvec remaining 2) (assoc opts :grounded-tokens (Long/parseLong val)))
+
           :else
           (recur (subvec remaining 1) opts))))))
+
+(defn build-random-projection
+  "Generates a fixed [in-dim x d] random projection matrix from Gaussian samples
+   scaled by 1/sqrt(in-dim) using a seeded RNG. Pure function of (in-dim, d, seed)."
+  [in-dim d seed]
+  (let [in-dim (long in-dim)
+        d (long d)
+        scale (float (/ 1.0 (Math/sqrt (double in-dim))))
+        rnd (java.util.Random. (long seed))
+        arr (float-array (* in-dim d))]
+    (dotimes [i (* in-dim d)]
+      (aset-float arr i (float (* (.nextGaussian rnd) scale))))
+    arr))
+
+(defn build-entity-token-table
+  "Constructs a static [n_entities x vocab_size] float array mapping each entity
+   to its constituent tokens uniformly with 1.0 weight."
+  [tokenizer entities vocab-size]
+  (let [n (count entities)
+        v (long vocab-size)
+        table (float-array (* n v))]
+    (dotimes [i n]
+      (let [entity-name (nth entities i)
+            token-ids (encode tokenizer (str " " entity-name))
+            row-offset (* i v)]
+        (doseq [tid token-ids]
+          (let [t-idx (long tid)]
+            (when (and (>= t-idx 0) (< t-idx v))
+              (aset-float table (+ row-offset t-idx) (float 1.0)))))))
+    table))
 
 (defn run-poc [opts]
   (println "==================================================================")
@@ -96,6 +142,8 @@
   (println (str "Target Query Head: [\"" (:head opts) "\"]"))
   (println (str "Target Relation:   [" (:relation opts) "]"))
   (println (str "Memory Dim D:      [" (:dim opts) "]"))
+  (println (str "Memory Init Seed:  [" (or (:memory-seed opts) 2026) "]"))
+  (println (str "Projection Seed:   [" (or (:proj-seed opts) 2026) "]"))
   (println "==================================================================\n")
 
   (let [triples-file (io/file (:triples opts))]
@@ -112,16 +160,14 @@
           n (count entities)
           d (long (:dim opts))
           k (count relations)
-          mem (mem/init-relation-memory n d k 2026)
+          mem (mem/init-relation-memory n d k (or (:memory-seed opts) 2026))
           ^floats cores (:cores mem)
           ^floats e-table (:entity-table mem)
           target-head (:head opts)
           target-rel (:relation opts)
-          head-id (get entity->id target-head)
           rel-id (get rel->id target-rel 0)
           matching-facts (filter (fn [[h r _t]] (and (= h target-head) (= r target-rel))) (:triples kb-data))
-          expected-tail (second (first (map (fn [[_h _r t]] [nil t]) matching-facts)))
-          expected-tail-id (get entity->id expected-tail)
+          target-tail (second (first (map (fn [[_h _r t]] [nil t]) matching-facts)))
 
           _ (println (str "Entity universe: " n " entities, " k " relation types, resident D=" d))
           _ (println "Loading Gemma 4 E2B weights and compiling execution graph...")
@@ -161,166 +207,206 @@
       (println " Accelerator VRAM State: Relational Core R_CEO = 0 (Unseeded)")
 
       ;; Allocate unseeded relational buffers (R_CEO = 0, W_proj = 0, W_vocab = 0)
-      (let [h-probe
-            (let [rel-bufs1 (g4/allocate-relational-buffers session mem {:rel-id rel-id})
-                  in-arr (int-array max-seq-len)
-                  _ (dotimes [i prompt-len] (aset in-arr i (int (nth prompt-ids i))))
-                  in-b (xla/buffer-from-host-buffer ctx (:client ctx) in-arr [1 max-seq-len] 4)
-                  pos-arr (int-array [(dec prompt-len)])
-                  pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4)
-                  args1 (into [in-b pos-b] (concat device-weights rel-bufs1))
-                  out1 (xla/execute exec args1)
-                  ^floats scores1 (xla/to-host-slice (nth out1 1) 0 n n :bf16)
-                  max-score1 (apply max (vec scores1))
-                  ^floats hp (xla/to-host-slice (nth out1 2) 0 1536 1536 :bf16)]
-              (println (format " Contraction v_q * R_CEO: max entity similarity score = %.4f", max-score1))
-              (println " Result: Zero factual grounding signal (Vanilla parametric state)")
+      (let [rel-bufs1 (g4/allocate-relational-buffers session mem {:rel-id rel-id})
+            in-arr (int-array max-seq-len)
+            _ (dotimes [i prompt-len] (aset in-arr i (int (nth prompt-ids i))))
+            in-b (xla/buffer-from-host-buffer ctx (:client ctx) in-arr [1 max-seq-len] 4)
+            pos-arr (int-array [(dec prompt-len)])
+            pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4)
+            args1 (into [in-b pos-b] (concat device-weights rel-bufs1))
+            out1 (xla/execute exec args1)
+            ^floats scores1 (xla/to-host-slice (nth out1 1) 0 n n :bf16)
+            max-score1 (apply max (vec scores1))]
+        (println (format " Contraction v_q * R_CEO: max entity similarity score = %.4f", max-score1))
+        (println " Result: Zero factual grounding signal (Vanilla parametric state)")
 
-              ;; Run autoregressive generation for vanilla response
-              (print " Generating vanilla response: ")
-              (flush)
-              (let [vanilla-cur (atom (vec prompt-ids))]
-                (loop [step 0
-                       cur-in-b in-b
-                       cur-pos-b pos-b]
-                  (if (>= step 15)
-                    (do
-                      (xla/destroy-buffer! ctx cur-in-b)
-                      (xla/destroy-buffer! ctx cur-pos-b))
-                    (let [args-step (into [cur-in-b cur-pos-b] (concat device-weights rel-bufs1))
-                          out-step (xla/execute exec args-step)
-                          out-logits (if (sequential? out-step) (first out-step) out-step)
-                          logits-slice (xla/to-host-slice out-logits 0 262144 262144 :bf16)
-                          next-id (g4/sample-next-token logits-slice (assoc opts :temperature 0.7 :top-k 10) prompt-ids (subvec @vanilla-cur prompt-len))]
-                      (if (sequential? out-step)
-                        (doseq [b out-step] (xla/destroy-buffer! ctx b))
-                        (xla/destroy-buffer! ctx out-step))
-                      (xla/destroy-buffer! ctx cur-in-b)
-                      (xla/destroy-buffer! ctx cur-pos-b)
-                      (swap! vanilla-cur conj next-id)
-                      (print (decode tokenizer [next-id]))
-                      (flush)
-                      (if (or (= next-id 1) (= next-id 106))
-                        nil
-                        (let [new-in (int-array max-seq-len)
-                              _ (dotimes [i (min (count @vanilla-cur) max-seq-len)]
-                                  (aset new-in i (int (nth @vanilla-cur i))))
-                              new-in-b (xla/buffer-from-host-buffer ctx (:client ctx) new-in [1 max-seq-len] 4)
-                              new-pos-b (xla/buffer-from-host-buffer ctx (:client ctx) (int-array [(dec (count @vanilla-cur))]) [1] 4)]
-                          (recur (inc step) new-in-b new-pos-b)))))))
-              (println "\n")
-              (g4/destroy-relational-buffers! ctx rel-bufs1)
-              (doseq [b out1] (xla/destroy-buffer! ctx b))
-              hp)]
+        ;; Run autoregressive generation for vanilla response
+        (print " Generating vanilla response: ")
+        (flush)
+        (let [vanilla-cur (atom (vec prompt-ids))]
+          (loop [step 0
+                 cur-in-b in-b
+                 cur-pos-b pos-b]
+            (if (>= step 15)
+              (do
+                (xla/destroy-buffer! ctx cur-in-b)
+                (xla/destroy-buffer! ctx cur-pos-b))
+              (let [args-step (into [cur-in-b cur-pos-b] (concat device-weights rel-bufs1))
+                    out-step (xla/execute exec args-step)
+                    out-logits (if (sequential? out-step) (first out-step) out-step)
+                    logits-slice (xla/to-host-slice out-logits 0 262144 262144 :bf16)
+                    next-id (g4/sample-next-token logits-slice (assoc opts :temperature 0.7 :top-k 10) prompt-ids (subvec @vanilla-cur prompt-len))]
+                (if (sequential? out-step)
+                  (doseq [b out-step] (xla/destroy-buffer! ctx b))
+                  (xla/destroy-buffer! ctx out-step))
+                (xla/destroy-buffer! ctx cur-in-b)
+                (xla/destroy-buffer! ctx cur-pos-b)
+                (swap! vanilla-cur conj next-id)
+                (print (decode tokenizer [next-id]))
+                (flush)
+                (if (or (= next-id 1) (= next-id 106))
+                  nil
+                  (let [new-in (int-array max-seq-len)
+                        _ (dotimes [i (min (count @vanilla-cur) max-seq-len)]
+                            (aset new-in i (int (nth @vanilla-cur i))))
+                        new-in-b (xla/buffer-from-host-buffer ctx (:client ctx) new-in [1 max-seq-len] 4)
+                        new-pos-b (xla/buffer-from-host-buffer ctx (:client ctx) (int-array [(dec (count @vanilla-cur))]) [1] 4)]
+                    (recur (inc step) new-in-b new-pos-b)))))))
+        (println "\n")
+        (g4/destroy-relational-buffers! ctx rel-bufs1)
+        (doseq [b out1] (xla/destroy-buffer! ctx b)))
 
         ;; ------------------------------------------------------------------------
         ;; STAGE 2: Zero-Gradient Memory Ingestion
         ;; ------------------------------------------------------------------------
-        (println "------------------------------------------------------------------")
-        (println " STAGE 2: Zero-Gradient Memory Ingestion")
-        (println "------------------------------------------------------------------")
-        (println (str " Ingesting fact triple: (\"" target-head "\" " target-rel " \"" expected-tail "\")"))
+      (println "------------------------------------------------------------------")
+      (println " STAGE 2: Zero-Gradient Memory Ingestion")
+      (println "------------------------------------------------------------------")
+      (println (str " Ingesting fact triple: (\"" target-head "\" " target-rel " \"" target-tail "\")"))
 
-        (let [facts (:triples kb-data)
-              t-start (System/nanoTime)]
-          (doseq [[h r t] facts]
-            (let [h-i (get entity->id h)
-                  r-i (get rel->id r)
-                  t-i (get entity->id t)]
-              (when (and h-i r-i t-i)
-                (mem/accumulate-fact! cores e-table h-i r-i t-i d))))
-          (let [elapsed-us (/ (- (System/nanoTime) t-start) 1000.0)]
-            (println (format " Superposition DMA complete in %.2f microseconds", (double elapsed-us)))
-            (println " Backprop / gradient computation: ZERO steps (Instantaneous DMA)")
-            (println " Context window prompt token inflation: 0 tokens added\n")))
+      (let [facts (:triples kb-data)
+            t-start (System/nanoTime)]
+        (doseq [[h r t] facts]
+          (let [h-i (get entity->id h)
+                r-i (get rel->id r)
+                t-i (get entity->id t)]
+            (when (and h-i r-i t-i)
+              (mem/accumulate-fact! cores e-table h-i r-i t-i d))))
+        (let [elapsed-us (/ (- (System/nanoTime) t-start) 1000.0)]
+          (println (format " Superposition DMA complete in %.2f microseconds", (double elapsed-us)))
+          (println " Backprop / gradient computation: ZERO steps (Instantaneous DMA)")
+          (println " Context window prompt token inflation: 0 tokens added\n")))
 
         ;; ------------------------------------------------------------------------
-        ;; STAGE 3: In-Tensor Grounded Generation
+        ;; STAGE 3: In-Tensor Grounded Generation (De-Oracled Retrieval Evaluation)
         ;; ------------------------------------------------------------------------
-        (println "------------------------------------------------------------------")
-        (println " STAGE 3: In-Tensor Grounded Generation")
-        (println "------------------------------------------------------------------")
-        (println (str " Query: \"" clean-prompt "\""))
-        (println " Accelerator VRAM State: Superposed R_CEO active in OpenXLA graph")
+      (println "------------------------------------------------------------------")
+      (println " STAGE 3: In-Tensor Grounded Generation (De-Oracled Retrieval)")
+      (println "------------------------------------------------------------------")
+      (println " Accelerator VRAM State: Superposed R_CEO active in OpenXLA graph")
+      (println (str " Projection Matrix: Fixed Gaussian random projection (Seed " (or (:proj-seed opts) 2026) ")"))
+      (println (str " Entity Token Table: Static uniform mapping for all " n " entities"))
+      (println " Evaluating memory-driven retrieval across all factual queries...\n")
 
-        ;; 1. Construct dynamic W_mem_proj projection helper:
-        ;;    W_mem_proj = (h_probe / ||h_probe||_2^2)^T \otimes e_head
-        (let [build-w-proj (fn [^floats hp]
-                             (let [norm-sq (loop [i 0 s 0.0]
-                                             (if (>= i 1536)
-                                               s
-                                               (let [v (double (aget hp i))]
-                                                 (recur (inc i) (+ s (* v v))))))
-                                   wp (float-array (* 1536 d))]
-                               (dotimes [i 1536]
-                                 (let [hi (/ (double (aget hp i)) norm-sq)]
-                                   (dotimes [j d]
-                                     (let [ej (double (aget e-table (+ (* head-id d) j)))]
-                                       (aset-float wp (+ (* i d) j) (float (* hi ej)))))))
-                               wp))
+        ;; 1. Fixed random projection built ONCE per run:
+      (let [w-proj (build-random-projection 1536 d (or (:proj-seed opts) 2026))
 
-              ;; 2. Determine target entity tokens
-              tail-tokens (encode tokenizer (str " " expected-tail))
-              clean-tail-tokens (if (= (first tail-tokens) (bos-id tokenizer))
-                                  (vec (rest tail-tokens))
-                                  (vec tail-tokens))
-              vocab-size (long (or (:vocab-size config) 262144))]
+              ;; 2. Static entity->token table built ONCE per run:
+            vocab-size (long (or (:vocab-size config) 262144))
+            w-entity-token-table (build-entity-token-table tokenizer entities vocab-size)
+            grounded-step-limit (long (or (:grounded-tokens opts) 5))
 
-          ;; Generate grounded entity tokens
-          (print " Running grounded forward pass: ")
-          (flush)
-          (let [grounded-cur (atom (vec prompt-ids))
-                cur-hp (atom h-probe)]
-            (doseq [tok-idx (range (count clean-tail-tokens))]
-              (let [target-token-id (nth clean-tail-tokens tok-idx)
-                    w-vocab (float-array (* n vocab-size))
-                    _ (aset-float w-vocab (+ (* expected-tail-id vocab-size) target-token-id) (float 100.0))
-                    w-proj (build-w-proj @cur-hp)
-                    grounded-bufs (g4/allocate-relational-buffers session mem
-                                                                  {:rel-id rel-id
-                                                                   :w-mem-proj w-proj
-                                                                   :w-entity-to-vocab w-vocab})
-                    s-len (count @grounded-cur)
-                    step-in (int-array max-seq-len)
-                    _ (dotimes [i (min s-len max-seq-len)]
-                        (aset step-in i (int (nth @grounded-cur i))))
-                    step-in-b (xla/buffer-from-host-buffer ctx (:client ctx) step-in [1 max-seq-len] 4)
-                    step-pos-b (xla/buffer-from-host-buffer ctx (:client ctx) (int-array [(dec s-len)]) [1] 4)
-                    args3 (into [step-in-b step-pos-b] (concat device-weights grounded-bufs))
-                    out3 (xla/execute exec args3)
-                    out-logits (if (sequential? out3) (first out3) out3)
-                    logits-slice (xla/to-host-slice out-logits 0 vocab-size vocab-size :bf16)
-                    ^floats scores3 (when (sequential? out3)
-                                      (xla/to-host-slice (nth out3 1) 0 n n :bf16))
-                    ^floats next-hp (when (and (sequential? out3) (> (count out3) 2))
-                                      (xla/to-host-slice (nth out3 2) 0 1536 1536 :bf16))
-                    next-id (g4/sample-next-token logits-slice (assoc opts :temperature 0.0 :top-k 1 :repetition-penalty 1.0) prompt-ids [])]
-                (when next-hp (reset! cur-hp next-hp))
-                (when (zero? tok-idx)
-                  (let [target-score (double (aget scores3 (int expected-tail-id)))
-                        sorted-scored (vec (sort-by (fn [[_idx sc]] (- sc))
-                                                    (map-indexed (fn [idx sc] [idx (double sc)]) scores3)))
-                        [top-id top-score] (first sorted-scored)
-                        top-entity (get id->entity top-id)]
-                    (println (format "\n OpenXLA In-Tensor Contraction: target entity [\"%s\"] score = %.4f", expected-tail, target-score))
-                    (println (format " Top predicted grounded entity: [\"%s\"] (score = %.4f)", top-entity, top-score))
-                    (println " ClampingMask threshold at T=0 applied -> Logits clamped to grounded entity!")))
-                (swap! grounded-cur conj next-id)
-                (print (decode tokenizer [next-id]))
-                (flush)
-                (xla/destroy-buffer! ctx step-in-b)
-                (xla/destroy-buffer! ctx step-pos-b)
-                (if (sequential? out3)
-                  (doseq [b out3] (xla/destroy-buffer! ctx b))
-                  (xla/destroy-buffer! ctx out3))
-                (g4/destroy-relational-buffers! ctx grounded-bufs)))
+            all-triples (:triples kb-data)
+            num-queries (count all-triples)
+            results
+            (mapv
+             (fn [idx [head rel expected-tail]]
+               (let [head-clean (str/trim head)
+                     query-prompt (str "Who is the CEO of " head-clean "?")
+                     raw-q-ids (encode tokenizer query-prompt)
+                     clean-q-ids (if (= (first raw-q-ids) (bos-id tokenizer))
+                                   (vec (rest raw-q-ids))
+                                   (vec raw-q-ids))
+                     prefix [(bos-id tokenizer) 105 2364 107]
+                     suffix [106 107 105 4368 107]
+                     q-prompt-ids (vec (concat prefix clean-q-ids suffix))
+                     q-prompt-len (count q-prompt-ids)
+                     q-rel-id (get rel->id rel 0)
 
-            (let [grounded-tokens (subvec @grounded-cur prompt-len)
-                  grounded-emission (str/trim (decode tokenizer grounded-tokens))]
-              (println (str "\n Grounded emission: \"" grounded-emission "\""))
-              (println "==================================================================")
-              (println " POC Pipeline Completed Successfully!")
-              (println "==================================================================")))))
+                       ;; Allocate relational buffers ONCE for this query:
+                     grounded-bufs (g4/allocate-relational-buffers session mem
+                                                                   {:rel-id q-rel-id
+                                                                    :w-mem-proj w-proj
+                                                                    :w-entity-to-vocab w-entity-token-table})
+
+                       ;; Initial prompt forward pass
+                     in-arr (int-array max-seq-len)
+                     _ (dotimes [i q-prompt-len] (aset in-arr i (int (nth q-prompt-ids i))))
+                     in-b (xla/buffer-from-host-buffer ctx (:client ctx) in-arr [1 max-seq-len] 4)
+                     pos-arr (int-array [(dec q-prompt-len)])
+                     pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4)
+                     args (into [in-b pos-b] (concat device-weights grounded-bufs))
+                     out (xla/execute exec args)
+                     ^floats scores (when (sequential? out)
+                                      (xla/to-host-slice (nth out 1) 0 n n :bf16))
+                     sorted-entities (vec (sort-by (fn [[_idx sc]] (- sc))
+                                                   (map-indexed (fn [i sc] [i (double sc)]) scores)))
+                     top-1-id (first (first sorted-entities))
+                     top-1-name (get id->entity top-1-id)
+                     top-3 (mapv (fn [[i sc]] [(get id->entity i) sc]) (take 3 sorted-entities))
+                     hit? (= top-1-name expected-tail)]
+
+                 (println (format "[Query %d/%d] \"%s\"" (inc idx) num-queries query-prompt))
+                 (println (format "  Expected Tail: \"%s\"" expected-tail))
+                 (println "  Top-3 Retrieved Entities:")
+                 (doseq [[rank [ename sc]] (map-indexed vector top-3)]
+                   (println (format "    %d. %-18s (score: %8.4f)" (inc rank) (str "\"" ename "\"") (double sc))))
+                 (println (format "  Outcome:       %s (Top-1: \"%s\")"
+                                  (if hit? "HIT [CORRECT]" "MISS")
+                                  top-1-name))
+
+                   ;; Decode loop with fixed relational buffers (No per-token buffer allocation!)
+                 (print "  Grounded emission: ")
+                 (flush)
+                 (let [cur-tokens (atom (vec q-prompt-ids))]
+                   (loop [step 0
+                          cur-in-b in-b
+                          cur-pos-b pos-b
+                          cur-out out]
+                     (let [out-logits (if (sequential? cur-out) (first cur-out) cur-out)
+                           logits-slice (xla/to-host-slice out-logits 0 vocab-size vocab-size :bf16)
+                           next-id (g4/sample-next-token logits-slice
+                                                         (assoc opts :temperature 0.0 :top-k 1 :repetition-penalty 1.0)
+                                                         q-prompt-ids
+                                                         (subvec @cur-tokens q-prompt-len))]
+                       (if (sequential? cur-out)
+                         (doseq [b cur-out] (xla/destroy-buffer! ctx b))
+                         (xla/destroy-buffer! ctx cur-out))
+                       (xla/destroy-buffer! ctx cur-in-b)
+                       (xla/destroy-buffer! ctx cur-pos-b)
+                       (swap! cur-tokens conj next-id)
+                       (print (decode tokenizer [next-id]))
+                       (flush)
+                       (if (or (<= grounded-step-limit 1) (>= step (dec grounded-step-limit)) (= next-id 1) (= next-id 106))
+                         nil
+                         (let [s-len (count @cur-tokens)
+                               new-in (int-array max-seq-len)
+                               _ (dotimes [i (min s-len max-seq-len)]
+                                   (aset new-in i (int (nth @cur-tokens i))))
+                               new-in-b (xla/buffer-from-host-buffer ctx (:client ctx) new-in [1 max-seq-len] 4)
+                               new-pos-b (xla/buffer-from-host-buffer ctx (:client ctx) (int-array [(dec s-len)]) [1] 4)
+                               step-args (into [new-in-b new-pos-b] (concat device-weights grounded-bufs))
+                               step-out (xla/execute exec step-args)]
+                           (recur (inc step) new-in-b new-pos-b step-out))))))
+                 (println "\n")
+
+                   ;; Cleanup query relational buffers
+                 (g4/destroy-relational-buffers! ctx grounded-bufs)
+
+                 {:head head
+                  :expected expected-tail
+                  :top-1 top-1-name
+                  :hit? hit?}))
+             (range num-queries)
+             all-triples)
+
+            total-hits (count (filter :hit? results))
+            accuracy (/ (double total-hits) (double num-queries))
+            chance-prob (/ 1.0 (double n))]
+
+        (println "==================================================================")
+        (println " SUMMARY: De-Oracled Memory-Driven Retrieval Evaluation")
+        (println "==================================================================")
+        (println (format " Total Queries:     %d" num-queries))
+        (println (format " Entity Universe:   %d entities" n))
+        (println (format " Top-1 Hits:        %d / %d" total-hits num-queries))
+        (println (format " Top-1 Accuracy:    %.1f%% (%d/%d)" (* 100.0 accuracy) total-hits num-queries))
+        (println (format " Chance Baseline:   %.1f%% (1/%d ≈ %.4f)" (* 100.0 chance-prob) n (double chance-prob)))
+        (println (format " Result Summary:    top-1 accuracy: %d/%d (chance: 1/%d ≈ %.1f%%)"
+                         total-hits num-queries n (* 100.0 chance-prob)))
+        (println "==================================================================")
+        (println " PoC Pipeline Completed Successfully!")
+        (println "=================================================================="))
 
       ;; Cleanup persistent device weights
       (doseq [w device-weights]
