@@ -766,30 +766,26 @@
 
 (defn superposition-relation-matrix
   "Computes relation transformation matrix via Tensor Logic superposition construction:
-   R_r = E^T * A_r * E = sum_{(h, t) in facts(r)} e_h (x) e_t (Paper Exp 3, §3.3.2).
+   R_r = E^T * A_r * E = sum_{(h, t) in facts(r)} e_h (x) e_t (Shah & Zadrozny, arXiv:2601.17188v1 Exp 3, §3.3.2; Domingos §5).
+   Compiled through OpenXLA PJRT into optimized StableHLO dot_general contractions (Rule 4).
    `entity-embeddings`: {:shape [n d] :data float-array}.
    `facts`: sequence or set of [h t] integer entity index pairs.
    Returns {:shape [d d] :data float-array}."
-  [entity-embeddings facts]
-  (let [{:keys [shape data]} entity-embeddings
-        [_n d] shape
-        d-long (long d)
-        ^floats e-arr data
-        total (* d-long d-long)
-        r-arr (float-array total)]
-    (doseq [tuple facts]
-      (let [h (long (first tuple))
-            t (long (second tuple))
-            h-off (* h d-long)
-            t-off (* t d-long)]
-        (dotimes [i d-long]
-          (let [hi (aget e-arr (int (+ h-off i)))
-                i-off (* i d-long)]
-            (dotimes [j d-long]
-              (let [tj (aget e-arr (int (+ t-off j)))
-                    idx (int (+ i-off j))]
-                (aset-float r-arr idx (+ (aget r-arr idx) (* hi tj)))))))))
-    {:shape [d-long d-long] :data r-arr}))
+  ([entity-embeddings facts]
+   (superposition-relation-matrix (xla/get-context) entity-embeddings facts))
+  ([ctx entity-embeddings facts]
+   (let [{:keys [shape data]} entity-embeddings
+         [n d] shape
+         n-long (long n)
+         d-long (long d)
+         a-tensor (fact-tensor facts n-long)
+         ast [:block {:name :superposition-matrix}
+              (embed-relation :R :A :E [:h :t] [:i :j])]
+         invars [[:A [:tensor [n-long n-long] :f32]]
+                 [:E [:tensor [n-long d-long] :f32]]]
+         exec (compile-query ctx "superposition_rel_matrix" invars ast [:R])
+         out (run-query! exec {:A (:data a-tensor) :E data})]
+     {:shape [d-long d-long] :data (get out :R)})))
 
 (defn predict-tail-query
   "Evaluates tail prediction query (h, r, ?) via OpenXLA PJRT (Paper Exp 3, §3.3.3):

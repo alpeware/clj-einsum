@@ -34,7 +34,9 @@
           (emit-post-activation! eqns-atom counter mul-var out-var (dissoc attrs :scale) dtype)
           mul-var))
 
-      (or (:clamp attrs) (= act :clamp) (= act :step) (= act :heaviside))
+      ;; Clamp / ramp activation: clamp(x, low, high) = min(max(x, low), high)
+      ;; Datalog continuous relaxation uses clamp(A + A x P, 0.0, 1.0)
+      (or (:clamp attrs) (= act :clamp))
       (let [[low high] (cond
                          (vector? (:clamp attrs)) (:clamp attrs)
                          (sequential? (:clamp attrs)) (vec (:clamp attrs))

@@ -73,7 +73,7 @@
                            i (range 99)]
                        [(+ (* tree 100) i)
                         (+ (* tree 100) (inc i))]))
-          res (sym/datalog-transitive-closure {:facts edges :n n :max-iters 150})]
+          res (sym/datalog-transitive-closure {:facts edges :n n :max-iters 100})]
       (is (true? (:converged? res)))
       (is (sym/containment? edges (:facts res)))
       (is (sym/closure? edges (:facts res) n))
@@ -210,6 +210,31 @@
                   (aset-float expected idx (+ (aget expected idx) (* hi tj))))))))
         (dotimes [k (* d d)]
           (is (< (Math/abs (- (aget r-data k) (aget expected k))) 1e-5)))))))
+
+(defspec prop-superposition-relation-matrix-parity 20
+  (prop/for-all [n (gen/choose 3 6)
+                 d (gen/choose 4 8)
+                 seed gen/nat]
+                (let [rnd (java.util.Random. (long seed))
+                      emb (sym/random-embeddings n d seed)
+                      all-pairs (for [i (range n) j (range n)] [i j])
+                      sampled-facts (set (filter (fn [_] (< (.nextDouble rnd) 0.5)) all-pairs))
+                      r-mat (sym/superposition-relation-matrix emb sampled-facts)
+                      ^floats r-data (:data r-mat)
+                      e-data ^floats (:data emb)
+                      expected (float-array (* d d))]
+                  (doseq [[h t] sampled-facts]
+                    (dotimes [i d]
+                      (let [hi (aget e-data (+ (* h d) i))]
+                        (dotimes [j d]
+                          (let [tj (aget e-data (+ (* t d) j))
+                                idx (+ (* i d) j)]
+                            (aset-float expected idx (+ (aget expected idx) (* hi tj))))))))
+                  (loop [k 0 max-diff 0.0]
+                    (if (>= k (* d d))
+                      (< max-diff 1e-4)
+                      (let [diff (Math/abs (- (double (aget r-data k)) (double (aget expected k))))]
+                        (recur (inc k) (Math/max max-diff diff))))))))
 
 (deftest test-bidirectional-link-prediction-pjrt
   (testing "superposition relation matrix predicts tail and head correctly via OpenXLA PJRT"

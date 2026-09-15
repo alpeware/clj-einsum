@@ -39,6 +39,37 @@
     (let [ops (mapv :op (:eqns graph))]
       (is (some #(= :stablehlo/multiply %) ops)))))
 
+(deftest test-lower-post-activation-clamp
+  (let [invars [[:x [:tensor [2 16 32] :f32]]
+                [:w [:tensor [32 64] :f32]]]
+        ast [:= [:y :b :m :n] {:clamp [0.0 1.0]} [:x :b :m :k] [:w :k :n]]
+        graph (lower/ast->graph "clamped_gemm" invars ast #{:y})]
+    (is (shlo/validate-graph graph))
+    (let [ops (mapv :op (:eqns graph))]
+      (is (some #(= :stablehlo/maximum %) ops))
+      (is (some #(= :stablehlo/minimum %) ops)))))
+
+(defspec prop-lower-clamp-activation-invariants
+  30
+  (prop/for-all [low-int (gen/choose -10 0)
+                 range-int (gen/choose 1 10)]
+                (let [low (double low-int)
+                      high (+ low (double range-int))
+                      ctx (xla/get-context)
+                      invars [[:x [:tensor [5] :f32]]]
+                      ast [:= [:y :i] {:clamp [low high]} [:x :i]]
+                      graph (lower/ast->graph "clamp_test" invars ast #{:y})
+                      compiled (xla/compile-graph ctx graph)
+                      test-inputs (float-array [(- low 5.0) low (+ low (/ (- high low) 2.0)) high (+ high 5.0)])
+                      out-buf (xla/execute compiled test-inputs)
+                      res (xla/to-host-slice out-buf 0 5 4)
+                      _ (xla/destroy-buffer! out-buf)]
+                  (and (<= (nth res 0) low (+ (nth res 0) 1e-5))
+                       (<= (Math/abs (- (nth res 1) low)) 1e-5)
+                       (<= (Math/abs (- (nth res 2) (+ low (/ (- high low) 2.0)))) 1e-5)
+                       (<= (Math/abs (- (nth res 3) high)) 1e-5)
+                       (<= (nth res 4) high (+ (nth res 4) 1e-5))))))
+
 (deftest test-end-to-end-pjrt-execution-parity
   (let [ctx (xla/get-context)
         invars [[:x [:tensor [2 4] :f32]]
