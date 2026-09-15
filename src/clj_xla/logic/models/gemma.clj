@@ -470,7 +470,8 @@
            rel-cfg (or (:relational-memory cfg) {})
            mem-dim (long (or (:dim rel-cfg) (:memory-dim rel-cfg) 256))
            entity-count (long (or (:entity-count rel-cfg) 1000))
-           vocab-size (long (or (:vocab-size cfg) 262144))]
+           vocab-size (long (or (:vocab-size cfg) 262144))
+           norm-dtype (if (or (:is-int8 cfg) (:is-int4 cfg)) :bf16 (or (:weight-dtype cfg) :f32))]
        (if (:last-token-only? cfg)
          [:block {:name :last_token_head}
           [:dynamic-slice [:normed_last :b :one :d] [:normed :b :p :d]
@@ -482,7 +483,7 @@
                                             {:softcap (double final-logit-softcap)}
                                             {})
               [:normed_last :b :one :d] [:embed_tokens :v :d]]
-             (mem/relational-grounding-ast hidden-dim mem-dim vocab-size entity-count)
+             (mem/relational-grounding-ast hidden-dim mem-dim vocab-size entity-count {:dtype norm-dtype :sequence? false})
              [:= [:logits :b :one :v] [:logits_grounded :b :one :v]]]
             [:= [:logits :b :one :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
                                        {:softcap (double final-logit-softcap)}
@@ -494,12 +495,28 @@
                                          {:softcap (double final-logit-softcap)}
                                          {})
              [:normed :b :p :d] [:embed_tokens :v :d]]
-            (mem/relational-grounding-ast hidden-dim mem-dim vocab-size entity-count)
-            [:= [:logits :b :one :v] [:logits_grounded :b :one :v]]]
+            (mem/relational-grounding-ast hidden-dim mem-dim vocab-size entity-count {:dtype norm-dtype :sequence? true})
+            [:= [:logits :b :p :v] [:logits_grounded :b :p :v]]]
            [:= [:logits :b :p :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
                                     {:softcap (double final-logit-softcap)}
                                     {})
             [:normed :b :p :d] [:embed_tokens :v :d]])))]))
+
+(defn gemma4-relational-invars
+  "Returns the relational memory invars definitions matching relational-grounding-ast."
+  ([config]
+   (gemma4-relational-invars config :f32))
+  ([config dtype]
+   (let [rel-cfg (or (:relational-memory config) {})
+         hidden-dim (long (or (:hidden-dim config) 1536))
+         mem-dim (long (or (:dim rel-cfg) (:memory-dim rel-cfg) 256))
+         entity-count (long (or (:entity-count rel-cfg) 1000))
+         vocab-size (long (or (:vocab-size config) 262144))]
+     [[:w_mem_proj [:tensor [hidden-dim mem-dim] dtype]]
+      [:r_active [:tensor [mem-dim mem-dim] dtype]]
+      [:entity_table [:tensor [entity-count mem-dim] dtype]]
+      [:threshold_const [:tensor [1 1 entity-count] dtype]]
+      [:w_entity_to_vocab [:tensor [entity-count vocab-size] dtype]]])))
 
 (defn gemma4-prefill-outvars
   "Constructs output variable list for Gemma 4 prefill: [:logits (k_ro_sl_i | k_ro_i) (v_heads_sl_i | v_heads_i) ...]."

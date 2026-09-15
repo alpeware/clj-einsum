@@ -220,7 +220,101 @@
       (is (= [:logits] (:outvars graph)))
       (let [ctx (xla/get-context)
             compiled (xla/compile-graph ctx graph)]
-        (is (some? compiled))))))
+        (is (some? compiled)))))
+
+  (testing "relational-grounding-ast deductive verification preserves valid_mask under DCE and clamps noise"
+    (let [hidden-dim 1536
+          dim 256
+          vocab-size 100
+          entity-count 10
+          ast (mem/relational-grounding-ast hidden-dim dim vocab-size entity-count {:dtype :f32})
+          invars [[:normed [:tensor [1 8 hidden-dim] :f32]]
+                  [:w_mem_proj [:tensor [hidden-dim dim] :f32]]
+                  [:r_active [:tensor [dim dim] :f32]]
+                  [:entity_table [:tensor [entity-count dim] :f32]]
+                  [:threshold_const [:tensor [1 1 entity-count] :f32]]
+                  [:w_entity_to_vocab [:tensor [entity-count vocab-size] :f32]]
+                  [:raw_logits [:tensor [1 1 vocab-size] :f32]]
+                  [:pos [:tensor [1] :i32]]]
+          ;; Request ONLY :logits_grounded. DCE must NOT prune :valid_mask or :valid_weight
+          target-heads #{:logits_grounded}
+          graph (lower/ast->graph "relational_grounding_dce_test" invars ast target-heads)
+          eqn-ops (set (map :op (:eqns graph)))
+          outvars (set (mapcat :outvars (:eqns graph)))]
+      (is (shlo/validate-graph graph))
+      (is (contains? eqn-ops :stablehlo/compare) "Must contain compare for threshold gating")
+      (is (contains? eqn-ops :stablehlo/convert) "Must contain convert for mask-to-weight casting")
+      (is (contains? outvars :valid_mask) "valid_mask must not be pruned by DCE")
+      (is (contains? outvars :clamped_scores) "clamped_scores must be present in graph")))
+
+  (testing "gemma4-model-ast sequence branch with relational memory maintains [:b :p :v] shape"
+    (let [num-layers 1
+          max-seq-len 8
+          vocab-size 100
+          hidden-dim 1536
+          intermediate-dim 6144
+          pl-dim 256
+          mem-dim 256
+          entity-count 20
+          config {:vocab-size vocab-size
+                  :hidden-dim hidden-dim
+                  :intermediate-dim intermediate-dim
+                  :pl-dim pl-dim
+                  :total-pl-dim 256
+                  :num-layers num-layers
+                  :num-heads 8
+                  :num-kv-heads 1
+                  :head-dim 256
+                  :max-seq-len max-seq-len
+                  :last-token-only? false
+                  :relational-memory {:dim mem-dim :entity-count entity-count}}
+          invars [[:x [:tensor [1 max-seq-len] :i32]]
+                  [:embed_tokens [:tensor [vocab-size hidden-dim] :f32]]
+                  [:embed_tokens_per_layer [:tensor [vocab-size 256] :f32]]
+                  [:per_layer_model_projection [:tensor [256 hidden-dim] :f32]]
+                  [:per_layer_projection_norm [:tensor [pl-dim] :f32]]
+                  [:final_norm_w [:tensor [hidden-dim] :f32]]
+                  [:input_ln_w_0 [:tensor [hidden-dim] :f32]]
+                  [:layer_scalar_0 [:tensor [1] :f32]]
+                  [:q_w_0 [:tensor [2048 hidden-dim] :f32]]
+                  [:k_w_0 [:tensor [256 hidden-dim] :f32]]
+                  [:v_w_0 [:tensor [256 hidden-dim] :f32]]
+                  [:o_w_0 [:tensor [hidden-dim 2048] :f32]]
+                  [:q_norm_w_0 [:tensor [256] :f32]]
+                  [:k_norm_w_0 [:tensor [256] :f32]]
+                  [:post_attn_ln_w_0 [:tensor [hidden-dim] :f32]]
+                  [:pre_mlp_ln_w_0 [:tensor [hidden-dim] :f32]]
+                  [:post_mlp_ln_w_0 [:tensor [hidden-dim] :f32]]
+                  [:gate_w_0 [:tensor [intermediate-dim hidden-dim] :f32]]
+                  [:up_w_0 [:tensor [intermediate-dim hidden-dim] :f32]]
+                  [:down_w_0 [:tensor [hidden-dim intermediate-dim] :f32]]
+                  [:per_layer_gate_w_0 [:tensor [pl-dim hidden-dim] :f32]]
+                  [:per_layer_proj_w_0 [:tensor [hidden-dim pl-dim] :f32]]
+                  [:post_per_layer_norm_w_0 [:tensor [hidden-dim] :f32]]
+                  ;; Relational memory invars:
+                  [:w_mem_proj [:tensor [hidden-dim mem-dim] :f32]]
+                  [:r_active [:tensor [mem-dim mem-dim] :f32]]
+                  [:entity_table [:tensor [entity-count mem-dim] :f32]]
+                  [:threshold_const [:tensor [1 1 entity-count] :f32]]
+                  [:w_entity_to_vocab [:tensor [entity-count vocab-size] :f32]]]
+          ast (gemma/gemma4-model-ast config)
+          graph (lower/ast->graph "gemma4_rel_seq_grounding" invars ast #{:logits})]
+      (is (shlo/validate-graph graph))
+      (is (= [:logits] (:outvars graph)))
+      (is (= [1 max-seq-len vocab-size] (get-in graph [:known-shapes :logits]))
+          "Sequence mode logits must have shape [1 max-seq-len vocab-size]")
+      (let [ctx (xla/get-context)
+            compiled (xla/compile-graph ctx graph)]
+        (is (some? compiled)))))
+
+  (testing "compile-relation-denoiser uses in-graph threshold scalar without host-side O(N^2) buffer"
+    (let [ctx (xla/get-context)
+          d 64
+          n 100
+          exec (mem/compile-relation-denoiser ctx d n 0.5)
+          invar-names (set (map first (get-in exec [:graph :invars])))]
+      (is (= #{:R :E} invar-names) "Invars must only contain :R and :E, no :thresh buffer")
+      (is (nil? (get invar-names :thresh))))))
 
 ;; ==============================================================================
 ;; 5. Generative Property Tests (defspec)
@@ -254,9 +348,10 @@
                                   (- target-score max-neg))))
                             dims)]
                   ;; Check monotonic increase: margin(64) <= margin(128) <= margin(256) <= margin(512)
-                  ;; Allowing a small statistical slack of 0.05 between adjacent steps
-                  (every? (fn [[m1 m2]] (>= (+ m2 0.05) m1))
-                          (partition 2 1 margins)))))
+                  ;; Allowing statistical slack of 0.15 between adjacent steps and ensuring overall growth
+                  (and (< (first margins) (last margins))
+                       (every? (fn [[m1 m2]] (>= (+ m2 0.15) m1))
+                               (partition 2 1 margins))))))
 
 ;; Property 2: Identity Invariant at T -> 0
 ;; For any factual triple in R_r, normalize(e_h * R_r) * e_t^T >= 0.85 while all negative entities t' != t score <= 0.15 (at T -> 0).

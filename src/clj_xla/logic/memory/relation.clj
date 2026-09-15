@@ -104,31 +104,34 @@
 ;; ==============================================================================
 
 (defn- denoise-core-ast
-  []
-  [:block {:name :denoise_relation_core}
-   ;; 1. ER = E * R  [n, d] x [d, d] -> [n, d]
-   [:= [:ER :n :d] [:E :n :k] [:R :k :d]]
-   ;; 2. S = ER * E^T  [n, d] x [n, d] -> [n, n]
-   [:= [:S :h :t] [:ER :h :d] [:E :t :d]]
-   ;; 3. Deductive verification at T -> 0: crisp indicator A = step(S - threshold)
-   [:compare [:mask :h :t] [:S :h :t] [:thresh :h :t] {:comparison_direction "GE"}]
-   [:convert [:A_crisp :h :t] {:target-dtype :f32} [:mask :h :t]]
-   ;; 4. Re-embed: R_clean = E^T * A_crisp * E  [d, n] x [n, n] x [n, d] -> [d, d]
-   [:= [:ETA :i :t] [:E :h :i] [:A_crisp :h :t]]
-   [:= [:R_clean :i :j] [:ETA :i :t] [:E :t :j]]])
+  ([] (denoise-core-ast 0.5))
+  ([thresh-val]
+   [:block {:name :denoise_relation_core}
+    ;; 1. ER = E * R  [n, d] x [d, d] -> [n, d]
+    [:= [:ER :n :d] [:E :n :k] [:R :k :d]]
+    ;; 2. S = ER * E^T  [n, d] x [n, d] -> [n, n]
+    [:= [:S :h :t] [:ER :h :d] [:E :t :d]]
+    ;; 3. Deductive verification at T -> 0: crisp indicator A = step(S - threshold)
+    [:constant [:thresh] {:value (double (or thresh-val 0.5)) :type [:tensor [] :f32] :shape []}]
+    [:compare [:mask :h :t] [:S :h :t] [:thresh] {:comparison_direction "GE"}]
+    [:convert [:A_crisp :h :t] {:target-dtype :f32} [:mask :h :t]]
+    ;; 4. Re-embed: R_clean = E^T * A_crisp * E  [d, n] x [n, n] x [n, d] -> [d, d]
+    [:= [:ETA :i :t] [:E :h :i] [:A_crisp :h :t]]
+    [:= [:R_clean :i :j] [:ETA :i :t] [:E :t :j]]]))
 
 (defn compile-relation-denoiser
   "Compiles an OpenXLA PJRT executable for algebraic denoising (Section 2.4):
    A_crisp = step(E * R * E^T - 0.5), R_clean = E^T * A_crisp * E."
   ([dim entity-count]
-   (compile-relation-denoiser (xla/get-context) dim entity-count))
+   (compile-relation-denoiser (xla/get-context) dim entity-count 0.5))
   ([ctx dim entity-count]
+   (compile-relation-denoiser ctx dim entity-count 0.5))
+  ([ctx dim entity-count threshold]
    (let [d (long dim)
          n (long entity-count)
          invars [[:R [:tensor [d d] :f32]]
-                 [:E [:tensor [n d] :f32]]
-                 [:thresh [:tensor [n n] :f32]]]
-         ast (denoise-core-ast)]
+                 [:E [:tensor [n d] :f32]]]
+         ast (denoise-core-ast threshold)]
      (sym/compile-query ctx "denoise_relation_core" invars ast [:R_clean :A_crisp]))))
 
 (defn denoise-relation-core
@@ -139,13 +142,10 @@
   ([ctx {:keys [relation-core entity-table entity-count dim threshold]}]
    (let [d (long dim)
          n (long entity-count)
-         thresh-val (float (or threshold 0.5))
-         thresh-arr (float-array (* n n))
-         _ (java.util.Arrays/fill thresh-arr thresh-val)
-         exec (compile-relation-denoiser ctx d n)
+         thresh-val (double (or threshold 0.5))
+         exec (compile-relation-denoiser ctx d n thresh-val)
          out (sym/run-query! exec {:R relation-core
-                                   :E entity-table
-                                   :thresh thresh-arr})]
+                                   :E entity-table})]
      {:clean-core (get out :R_clean)
       :crisp-indicator (get out :A_crisp)})))
 
@@ -176,34 +176,45 @@
    Integrates into Gemma 4 forward graph right before or alongside token logit projection."
   ([hidden-dim dim vocab-size entity-count]
    (relational-grounding-ast hidden-dim dim vocab-size entity-count {}))
-  ([hidden-dim _dim _vocab-size _entity-count _opts]
-   [:block {:name :relational_grounding}
-    ;; 1. Extract probe vector from last-token hidden state
-    [:dynamic-slice [:h_probe :b :one :dim] [:normed :b :p :dim]
-     {:slice-sizes [1 1 (long hidden-dim)] :start-indices [0 :pos 0]}]
+  ([hidden-dim _dim _vocab-size _entity-count opts]
+   (let [target-dt (or (:dtype opts) :f32)
+         seq? (boolean (:sequence? opts))
+         pos-dim (if seq? :p :one)]
+     [:block {:name (if seq? :relational_grounding_seq :relational_grounding)}
+      ;; 1. Extract probe vector:
+      ;; In last-token mode, dynamic slice from [:normed :b :p :dim] at :pos -> [:h_probe :b :one :dim].
+      ;; In sequence mode, probe vector is the full sequence [:h_probe :b :p :dim] = [:normed :b :p :dim].
+      (if seq?
+        [:= [:h_probe :b :p :dim] [:normed :b :p :dim]]
+        [:dynamic-slice [:h_probe :b :one :dim] [:normed :b :p :dim]
+         {:slice-sizes [1 1 (long hidden-dim)] :start-indices [0 :pos 0]}])
 
-    ;; 2. Project from transformer hidden-dim to memory dim D
-    [:= [:v_q :b :one :d]
-     [:h_probe :b :one :dim] [:w_mem_proj :dim :d]]
+      ;; 2. Project from transformer hidden-dim to memory dim D
+      [:= [:v_q :b pos-dim :d]
+       [:h_probe :b pos-dim :dim] [:w_mem_proj :dim :d]]
 
-    ;; 3. Contraction across the active relation core: v_target = v_q * R_r
-    [:= [:v_target :b :one :d]
-     [:v_q :b :one :k] [:r_active :k :d]]
-    [:rms-norm [:v_target_norm :b :one :d] [:v_target :b :one :d]]
+      ;; 3. Contraction across the active relation core: v_target = v_q * R_r
+      [:= [:v_target :b pos-dim :d]
+       [:v_q :b pos-dim :k] [:r_active :k :d]]
+      [:rms-norm [:v_target_norm :b pos-dim :d] [:v_target :b pos-dim :d]]
 
-    ;; 4. Entity scoring: Scores = v_target_norm * E^T
-    [:= [:entity_scores :b :one :n_entities]
-     [:v_target_norm :b :one :d] [:entity_table :n_entities :d]]
+      ;; 4. Entity scoring: Scores = v_target_norm * E^T
+      [:= [:entity_scores :b pos-dim :n_entities]
+       [:v_target_norm :b pos-dim :d] [:entity_table :n_entities :d]]
 
-    ;; 5. Deductive verification at T -> 0: step(Scores - 0.5)
-    [:compare [:valid_mask :b :one :n_entities]
-     [:entity_scores :b :one :n_entities] [:threshold_const :one]
-     {:comparison_direction "GT"}]
+      ;; 5. Deductive verification at T -> 0: step(Scores - threshold)
+      [:compare [:valid_mask :b pos-dim :n_entities]
+       [:entity_scores :b pos-dim :n_entities] [:threshold_const :one]
+       {:comparison_direction "GT"}]
+      [:convert [:valid_weight :b pos-dim :n_entities] {:target-dtype target-dt}
+       [:valid_mask :b pos-dim :n_entities]]
+      [:= [:clamped_scores :b pos-dim :n_entities]
+       [:entity_scores :b pos-dim :n_entities] [:valid_weight :b pos-dim :n_entities]]
 
-    ;; 6. Back-projection into vocab space for logit clamping
-    [:= [:vocab_bias :b :one :v]
-     [:entity_scores :b :one :n_entities] [:w_entity_to_vocab :n_entities :v]]
+      ;; 6. Back-projection into vocab space for logit clamping
+      [:= [:vocab_bias :b pos-dim :v]
+       [:clamped_scores :b pos-dim :n_entities] [:w_entity_to_vocab :n_entities :v]]
 
-    ;; 7. Fused logit addition
-    [:+ [:logits_grounded :b :one :v]
-     [:raw_logits :b :one :v] [:vocab_bias :b :one :v]]]))
+      ;; 7. Fused logit addition
+      [:+ [:logits_grounded :b pos-dim :v]
+       [:raw_logits :b pos-dim :v] [:vocab_bias :b pos-dim :v]]])))

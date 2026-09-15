@@ -548,7 +548,16 @@
                                  [(keyword (str "per_layer_proj_w_" i)) [:tensor [hidden-dim pl-dim] norm-dtype]]
                                  [(keyword (str "post_per_layer_norm_w_" i)) [:tensor [hidden-dim] norm-dtype]]]))))
                          (range num-layers))
-                 [[:final_norm_w [:tensor [hidden-dim] norm-dtype]]]))))
+                 [[:final_norm_w [:tensor [hidden-dim] norm-dtype]]]
+                 (when (or (:relational-memory config) (:relational-memory? config))
+                   (let [rel-cfg (or (:relational-memory config) {})
+                         mem-dim (long (or (:dim rel-cfg) (:memory-dim rel-cfg) 256))
+                         entity-count (long (or (:entity-count rel-cfg) 1000))]
+                     [[:w_mem_proj [:tensor [hidden-dim mem-dim] norm-dtype]]
+                      [:r_active [:tensor [mem-dim mem-dim] norm-dtype]]
+                      [:entity_table [:tensor [entity-count mem-dim] norm-dtype]]
+                      [:threshold_const [:tensor [1 1 entity-count] norm-dtype]]
+                      [:w_entity_to_vocab [:tensor [entity-count vocab-size] norm-dtype]]]))))))
 
 (defn allocate-device-weights
   "Loads individual weight tensors for Gemma 4 into PJRT device buffers matching build-tensor-logic-invars."
@@ -597,6 +606,59 @@
 
 (def allocate-tensor-logic-weights allocate-device-weights)
 
+(defn floats->bf16-shorts
+  "Converts float array to short array of bfloat16 bit-patterns."
+  ^shorts [^floats fa]
+  (let [n (alength fa)
+        sa (short-array n)]
+    (dotimes [i n]
+      (aset-short sa i (exl3/float->bf16-short (aget fa i))))
+    sa))
+
+(defn allocate-relational-buffers
+  "Allocates device PJRT buffers for relational memory tensors:
+   w_mem_proj, r_active, entity_table, threshold_const, w_entity_to_vocab."
+  [{:keys [ctx config]} mem & [{:keys [w-mem-proj w-entity-to-vocab threshold rel-id]}]]
+  (let [{:keys [norm-enum is-int8 is-int4 weight-dtype]} config
+        norm-dt (if (or is-int8 is-int4) :bf16 weight-dtype)
+        is-bf16? (= norm-dt :bf16)
+        to-dev-buf (fn [data shape]
+                     (if is-bf16?
+                       (let [sa (if (instance? (Class/forName "[S") data)
+                                  ^shorts data
+                                  (floats->bf16-shorts ^floats data))]
+                         (pjrt/buffer-from-host-buffer ctx (:client ctx) sa shape 13))
+                       (pjrt/buffer-from-host-buffer ctx (:client ctx) data shape (or norm-enum 11))))
+        rel-cfg (or (:relational-memory config) {})
+        hidden-dim (long (or (:hidden-dim config) 1536))
+        mem-dim (long (or (:dim rel-cfg) (:memory-dim rel-cfg) 256))
+        entity-count (long (or (:entity-count rel-cfg) 1000))
+        vocab-size (long (or (:vocab-size config) 262144))
+        rel-idx (long (or rel-id 0))
+        w-mem-proj (or w-mem-proj (float-array (* hidden-dim mem-dim)))
+        cores ^floats (:cores mem)
+        r-active (let [arr (float-array (* mem-dim mem-dim))]
+                   (when cores
+                     (System/arraycopy cores (int (* rel-idx mem-dim mem-dim)) arr 0 (int (* mem-dim mem-dim))))
+                   arr)
+        e-table (or (:entity-table mem) (float-array (* entity-count mem-dim)))
+        thresh-val (float (or threshold (:threshold rel-cfg) 0.5))
+        threshold-arr (let [arr (float-array entity-count)]
+                        (java.util.Arrays/fill arr thresh-val)
+                        arr)
+        w-vocab (or w-entity-to-vocab (float-array (* entity-count vocab-size)))]
+    [(to-dev-buf w-mem-proj [hidden-dim mem-dim])
+     (to-dev-buf r-active [mem-dim mem-dim])
+     (to-dev-buf e-table [entity-count mem-dim])
+     (to-dev-buf threshold-arr [1 1 entity-count])
+     (to-dev-buf w-vocab [entity-count vocab-size])]))
+
+(defn destroy-relational-buffers!
+  "Releases device PJRT buffers for relational memory."
+  [ctx buffers]
+  (doseq [b buffers]
+    (when b (xla/destroy-buffer! ctx b))))
+
 (defn compile-tensor-logic-executable
   "Compiles Gemma 4 model AST into a native StableHLO MLIR executable."
   [{:keys [ctx config opts]} max-seq-len]
@@ -604,10 +666,11 @@
         config-with-len (assoc config :max-seq-len max-seq-len :last-token-only? last-token?)
         invars (build-tensor-logic-invars config-with-len max-seq-len)
         ast (gemma-logic/gemma4-model-ast config-with-len)
+        target-heads (or (:targets opts) #{:logits})
         _ (when-not (:quiet opts)
             (println (format "Lowering declarative Tensor Logic Gemma 4 AST (%d layers, max-seq-len=%d, last-token-only=%s) to StableHLO..."
                              (:num-layers config) max-seq-len (str last-token?))))
-        graph (lower/ast->graph "gemma4_tensor_logic" invars ast #{:logits})]
+        graph (lower/ast->graph "gemma4_tensor_logic" invars ast target-heads)]
     (when-not (:quiet opts)
       (println "Compiling Tensor Logic graph to native XLA PjRtLoadedExecutable..."))
     (xla/compile-graph ctx graph)))
@@ -1006,7 +1069,7 @@
   "Executes autoregressive token generation using pure Tensor Logic Gemma 4 executable."
   ([session exec device-weights prompt-ids]
    (run-autoregressive-generation-logic session exec device-weights prompt-ids nil))
-  ([{:keys [ctx opts config tokenizer]} exec device-weights prompt-ids max-seq-len]
+  ([{:keys [ctx opts config tokenizer] :as session} exec device-weights prompt-ids max-seq-len]
    (let [{:keys [max-new-tokens quiet mode]} opts
          is-agent? (= mode :agent)
          seq-len (long (or max-seq-len (:max-seq-len config) 128))
@@ -1028,17 +1091,20 @@
                in-b (xla/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
                pos-b (when last-token?
                        (xla/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4))
-               args (if last-token?
-                      (into [in-b pos-b] device-weights)
-                      (into [in-b] device-weights))
+               args (let [base (if last-token? [in-b pos-b] [in-b])
+                          rel-bufs (get session :relational-buffers [])]
+                      (into base (concat device-weights rel-bufs)))
                out (xla/execute exec args)
+               out-buf (if (sequential? out) (first out) out)
                logits (if last-token?
-                        (xla/to-host-slice out 0 vocab-size vocab-size weight-dt)
-                        (xla/to-host-slice out (dec s-len) vocab-size (* seq-len vocab-size) weight-dt))
+                        (xla/to-host-slice out-buf 0 vocab-size vocab-size weight-dt)
+                        (xla/to-host-slice out-buf (dec s-len) vocab-size (* seq-len vocab-size) weight-dt))
                next-id (sample-next-token logits opts prompt-ids (subvec @cur-tokens (count prompt-ids)))]
            (xla/destroy-buffer! ctx in-b)
            (when pos-b (xla/destroy-buffer! ctx pos-b))
-           (xla/destroy-buffer! ctx out)
+           (if (sequential? out)
+             (doseq [b out] (xla/destroy-buffer! ctx b))
+             (xla/destroy-buffer! ctx out))
            (when (< s-len seq-len)
              (aset in-arr s-len (int next-id)))
            (swap! cur-tokens conj next-id)
