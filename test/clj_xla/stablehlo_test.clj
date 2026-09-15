@@ -79,3 +79,18 @@
       (is (str/includes? mlir "\"stablehlo.while\""))
       (is (str/includes? mlir "final_i = stablehlo.reshape"))
       (is (str/includes? mlir "final_sum = stablehlo.reshape")))))
+
+(deftest test-reduce-min-serialization
+  (testing "Serialization and validation of :stablehlo/reduce_min"
+    (let [graph {:name "red_min_test"
+                 :invars [[:x [:tensor [4 8] :f32]]]
+                 :outvars [:y]
+                 :eqns [{:op :stablehlo/reduce_min
+                         :invars [:x]
+                         :outvars [:y]
+                         :attrs {:axes [1] :keep_dims false}}]}
+          _ (is (shlo/validate-graph graph))
+          mlir (shlo/graph->mlir-text graph)]
+      (is (str/includes? mlir "\"stablehlo.reduce\""))
+      (is (str/includes? mlir "stablehlo.minimum"))
+      (is (str/includes? mlir "dimensions = array<i64: 1>")))))

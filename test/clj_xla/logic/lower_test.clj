@@ -70,6 +70,59 @@
                        (<= (Math/abs (- (nth res 3) high)) 1e-5)
                        (<= (nth res 4) high (+ (nth res 4) 1e-5))))))
 
+(deftest test-lower-semiring-min-plus-contraction
+  (testing "Lowering and PJRT execution of MIN_PLUS (tropical) semiring contraction"
+    (let [ctx (xla/get-context)
+          invars [[:A [:tensor [2 2] :f32]]
+                  [:B [:tensor [2 2] :f32]]]
+          ast [:= [:C :i :j] {:semiring :min-plus} [:A :i :k] [:B :k :j]]
+          graph (lower/ast->graph "min_plus_graph" invars ast #{:C})
+          _ (is (shlo/validate-graph graph))
+          ops (mapv :op (:eqns graph))
+          _ (is (some #(= :stablehlo/reduce_min %) ops))
+          compiled (xla/compile-graph ctx graph)
+          a-data (float-array [0.0 2.0
+                               5.0 0.0])
+          b-data (float-array [0.0 3.0
+                               1.0 0.0])
+          out-buf (xla/execute compiled a-data b-data)
+          res (vec (seq ^floats (xla/to-host-slice out-buf 0 4 4)))
+          _ (xla/destroy-buffer! out-buf)]
+      ;; Expected C:
+      ;; C[0,0] = min(0+0, 2+1) = 0.0
+      ;; C[0,1] = min(0+3, 2+0) = 2.0
+      ;; C[1,0] = min(5+0, 0+1) = 1.0
+      ;; C[1,1] = min(5+3, 0+0) = 0.0
+      (is (= [0.0 2.0 1.0 0.0] res)))))
+
+(deftest test-lower-semiring-max-product-contraction
+  (testing "Lowering and PJRT execution of MAX_PRODUCT (Viterbi) semiring contraction"
+    (let [ctx (xla/get-context)
+          invars [[:A [:tensor [2 2] :f32]]
+                  [:B [:tensor [2 2] :f32]]]
+          ast [:= [:C :i :j] {:semiring :max-product} [:A :i :k] [:B :k :j]]
+          graph (lower/ast->graph "max_prod_graph" invars ast #{:C})
+          _ (is (shlo/validate-graph graph))
+          ops (mapv :op (:eqns graph))
+          _ (is (some #(= :stablehlo/reduce_max %) ops))
+          compiled (xla/compile-graph ctx graph)
+          a-data (float-array [0.8 0.2
+                               0.1 0.9])
+          b-data (float-array [0.7 0.3
+                               0.4 0.6])
+          out-buf (xla/execute compiled a-data b-data)
+          res (vec (seq ^floats (xla/to-host-slice out-buf 0 4 4)))
+          _ (xla/destroy-buffer! out-buf)]
+      ;; Expected C:
+      ;; C[0,0] = max(0.8*0.7=0.56, 0.2*0.4=0.08) = 0.56
+      ;; C[0,1] = max(0.8*0.3=0.24, 0.2*0.6=0.12) = 0.24
+      ;; C[1,0] = max(0.1*0.7=0.07, 0.9*0.4=0.36) = 0.36
+      ;; C[1,1] = max(0.1*0.3=0.03, 0.9*0.6=0.54) = 0.54
+      (is (< (Math/abs (- (nth res 0) 0.56)) 1e-5))
+      (is (< (Math/abs (- (nth res 1) 0.24)) 1e-5))
+      (is (< (Math/abs (- (nth res 2) 0.36)) 1e-5))
+      (is (< (Math/abs (- (nth res 3) 0.54)) 1e-5)))))
+
 (deftest test-end-to-end-pjrt-execution-parity
   (let [ctx (xla/get-context)
         invars [[:x [:tensor [2 4] :f32]]

@@ -177,44 +177,105 @@
                 mul-out-var)]
           (when has-post-act?
             (emit-post-activation! eqns-atom counter perm-out-var final-out-var attrs (get var-dtypes primary-name :f32)))))
-      ;; Standard dot_general contraction
-      (let [lhs-c-dims (indices->dim-numbers lhs-idxs contracting)
-            rhs-c-dims (indices->dim-numbers rhs-idxs contracting)
-            lhs-b-dims (indices->dim-numbers lhs-idxs batch)
-            rhs-b-dims (indices->dim-numbers rhs-idxs batch)
+      ;; Semiring contraction (:min-plus / :tropical or :max-product / :viterbi)
+      (let [semiring (:semiring attrs)]
+        (if (or (= semiring :min-plus) (= semiring :tropical)
+                (= semiring :max-product) (= semiring :viterbi))
+          (let [all-idxs (vec (concat batch lhs-free contracting rhs-free))
+                lhs-shape (get known-shapes lhs-name)
+                rhs-shape (get known-shapes rhs-name)
+                idx->dim (into (zipmap lhs-idxs lhs-shape) (zipmap rhs-idxs rhs-shape))
+                target-shape (mapv idx->dim all-idxs)
+                lhs-bcast-dims (indices->dim-numbers all-idxs lhs-idxs)
+                lhs-v (if (= lhs-idxs all-idxs)
+                        lhs-name
+                        (let [out-lhs-b (gen-id "t_semiring_lhs_bcast" counter)
+                              bcast-lhs {:op :stablehlo/broadcast_in_dim
+                                         :invars [lhs-name]
+                                         :outvars [out-lhs-b]
+                                         :attrs {:broadcast_dimensions lhs-bcast-dims :target_shape target-shape}}]
+                          (swap! eqns-atom conj bcast-lhs)
+                          out-lhs-b))
+                rhs-bcast-dims (indices->dim-numbers all-idxs rhs-idxs)
+                rhs-v (if (= rhs-idxs all-idxs)
+                        rhs-name
+                        (let [out-rhs-b (gen-id "t_semiring_rhs_bcast" counter)
+                              bcast-rhs {:op :stablehlo/broadcast_in_dim
+                                         :invars [rhs-name]
+                                         :outvars [out-rhs-b]
+                                         :attrs {:broadcast_dimensions rhs-bcast-dims :target_shape target-shape}}]
+                          (swap! eqns-atom conj bcast-rhs)
+                          out-rhs-b))
+                prod-op (if (or (= semiring :min-plus) (= semiring :tropical))
+                          :stablehlo/add
+                          :stablehlo/multiply)
+                prod-out-var (gen-id "t_semiring_prod" counter)
+                prod-eqn {:op prod-op :invars [lhs-v rhs-v] :outvars [prod-out-var]}
+                _ (swap! eqns-atom conj prod-eqn)
+                contracting-axes (indices->dim-numbers all-idxs contracting)
+                red-op (if (or (= semiring :min-plus) (= semiring :tropical))
+                         :stablehlo/reduce_min
+                         :stablehlo/reduce_max)
+                raw-reduced-idxs (vec (concat batch lhs-free rhs-free))
+                needs-perm? (not= raw-reduced-idxs head-idxs)
+                has-post-act? (has-post-act? attrs)
+                red-out-var (if (or needs-perm? has-post-act?)
+                              (gen-id "t_semiring_red" counter)
+                              final-out-var)
+                red-eqn {:op red-op :invars [prod-out-var] :outvars [red-out-var] :attrs {:axes contracting-axes :keep_dims false}}
+                _ (swap! eqns-atom conj red-eqn)
+                perm-out-var
+                (if needs-perm?
+                  (let [perm (indices->dim-numbers raw-reduced-idxs head-idxs)
+                        out-v (if has-post-act? (gen-id "t_trans" counter) final-out-var)
+                        trans-eqn {:op :stablehlo/transpose
+                                   :invars [red-out-var]
+                                   :outvars [out-v]
+                                   :attrs {:permutation perm}}]
+                    (swap! eqns-atom conj trans-eqn)
+                    out-v)
+                  red-out-var)]
+            (when has-post-act?
+              (emit-post-activation! eqns-atom counter perm-out-var final-out-var attrs (get var-dtypes lhs-name :f32)))
+            nil)
+          ;; Standard dot_general contraction
+          (let [lhs-c-dims (indices->dim-numbers lhs-idxs contracting)
+                rhs-c-dims (indices->dim-numbers rhs-idxs contracting)
+                lhs-b-dims (indices->dim-numbers lhs-idxs batch)
+                rhs-b-dims (indices->dim-numbers rhs-idxs batch)
 
-            dot-attrs {:contracting_dims {:lhs lhs-c-dims :rhs rhs-c-dims}
-                       :batch_dims {:lhs lhs-b-dims :rhs rhs-b-dims}}
+                dot-attrs {:contracting_dims {:lhs lhs-c-dims :rhs rhs-c-dims}
+                           :batch_dims {:lhs lhs-b-dims :rhs rhs-b-dims}}
 
-            raw-dot-idxs (vec (concat batch lhs-free rhs-free))
-            needs-perm? (not= raw-dot-idxs head-idxs)
-            has-post-act? (has-post-act? attrs)
+                raw-dot-idxs (vec (concat batch lhs-free rhs-free))
+                needs-perm? (not= raw-dot-idxs head-idxs)
+                has-post-act? (has-post-act? attrs)
 
-            dot-out-var (if (or needs-perm? has-post-act?)
-                          (gen-id "t_dot" counter)
-                          final-out-var)
+                dot-out-var (if (or needs-perm? has-post-act?)
+                              (gen-id "t_dot" counter)
+                              final-out-var)
 
-            dot-eqn {:op :stablehlo/dot_general
-                     :invars [lhs-name rhs-name]
-                     :outvars [dot-out-var]
-                     :attrs dot-attrs}]
-        (swap! eqns-atom conj dot-eqn)
-        (let [perm-out-var
-              (if needs-perm?
-                (let [perm (indices->dim-numbers raw-dot-idxs head-idxs)
-                      out-v (if has-post-act? (gen-id "t_trans" counter) final-out-var)
-                      trans-eqn {:op :stablehlo/transpose
-                                 :invars [dot-out-var]
-                                 :outvars [out-v]
-                                 :attrs {:permutation perm}}]
-                  (swap! eqns-atom conj trans-eqn)
-                  out-v)
-                dot-out-var)
-              _post-out-var
-              (if has-post-act?
-                (emit-post-activation! eqns-atom counter perm-out-var final-out-var attrs (get var-dtypes lhs-name :f32))
-                perm-out-var)]
-          nil)))))
+                dot-eqn {:op :stablehlo/dot_general
+                         :invars [lhs-name rhs-name]
+                         :outvars [dot-out-var]
+                         :attrs dot-attrs}]
+            (swap! eqns-atom conj dot-eqn)
+            (let [perm-out-var
+                  (if needs-perm?
+                    (let [perm (indices->dim-numbers raw-dot-idxs head-idxs)
+                          out-v (if has-post-act? (gen-id "t_trans" counter) final-out-var)
+                          trans-eqn {:op :stablehlo/transpose
+                                     :invars [dot-out-var]
+                                     :outvars [out-v]
+                                     :attrs {:permutation perm}}]
+                      (swap! eqns-atom conj trans-eqn)
+                      out-v)
+                    dot-out-var)
+                  _post-out-var
+                  (if has-post-act?
+                    (emit-post-activation! eqns-atom counter perm-out-var final-out-var attrs (get var-dtypes lhs-name :f32))
+                    perm-out-var)]
+              nil)))))))
 
 (defn- lower-unary-equation!
   [eqns-atom counter head attrs term known-shapes var-dtypes final-out-var]
@@ -1357,6 +1418,18 @@
           (or (= op :*) (= op :multiply))
           (let [h-name (if (vector? head) (first head) head)]
             (swap! eqns-atom conj {:op :stablehlo/multiply
+                                   :invars [(first (first body)) (first (second body))]
+                                   :outvars [h-name]}))
+
+          (or (= op :min) (= op :minimum))
+          (let [h-name (if (vector? head) (first head) head)]
+            (swap! eqns-atom conj {:op :stablehlo/minimum
+                                   :invars [(first (first body)) (first (second body))]
+                                   :outvars [h-name]}))
+
+          (or (= op :max) (= op :maximum))
+          (let [h-name (if (vector? head) (first head) head)]
+            (swap! eqns-atom conj {:op :stablehlo/maximum
                                    :invars [(first (first body)) (first (second body))]
                                    :outvars [h-name]}))
 

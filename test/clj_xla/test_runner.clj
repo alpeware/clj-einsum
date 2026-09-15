@@ -27,7 +27,9 @@
             [clj-xla.logic.nn-test]
             [clj-xla.logic.quip-test]
             [clj-xla.logic.shape-test]
+            [clj-xla.logic.semiring-test]
             [clj-xla.logic.smollm-test]
+            [clj-xla.logic.stratified-negation-test]
             [clj-xla.logic.symbolic-test]
             [clj-xla.logic.symbolic-e2e-test]
             [clj-xla.logic.symbolic-scaling-test]
@@ -88,7 +90,9 @@
                            'clj-xla.logic.quip-test
                            'clj-xla.logic.exl3-test
                            'clj-xla.logic.shape-test
+                           'clj-xla.logic.semiring-test
                            'clj-xla.logic.smollm-test
+                           'clj-xla.logic.stratified-negation-test
                            'clj-xla.logic.symbolic-test
                            'clj-xla.logic.symbolic-e2e-test
                            'clj-xla.logic.symbolic-scaling-test

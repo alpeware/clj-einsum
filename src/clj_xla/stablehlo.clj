@@ -196,7 +196,7 @@
                     (assoc acc (first outvars) "tensor<1x128x768xf32>")
                     (assoc acc (first outvars) (or in-type "tensor<1x128x576xf32>")))
 
-                  (or (= op :stablehlo/reduce_mean) (= op :stablehlo/reduce_sum) (= op :stablehlo/reduce_max))
+                  (or (= op :stablehlo/reduce_mean) (= op :stablehlo/reduce_sum) (= op :stablehlo/reduce_max) (= op :stablehlo/reduce_min))
                   (let [axes (get attrs :axes [2])
                         keep-dims? (get attrs :keep_dims true)
                         [in-dims in-dtype] (or (parse-tensor-dims in-type) [[1 128 768] "f32"])
@@ -500,7 +500,7 @@
             dim (get attrs :dimension 3)]
         (str "    %" (name out-var) " = \"stablehlo.concatenate\"(" in-args ") {dimension = " dim " : i64} : (" in-types ") -> " out-type))
 
-      (or (= op :stablehlo/reduce_mean) (= op :stablehlo/reduce_sum) (= op :stablehlo/reduce_max))
+      (or (= op :stablehlo/reduce_mean) (= op :stablehlo/reduce_sum) (= op :stablehlo/reduce_max) (= op :stablehlo/reduce_min))
       (let [in-var (first invars)
             in-type (get var-types in-var "tensor<f32>")
             out-type (get var-types out-var "tensor<1x128x1xf32>")
@@ -512,10 +512,12 @@
             red-op-name (case op
                           :stablehlo/reduce_sum "stablehlo.add"
                           :stablehlo/reduce_max "stablehlo.maximum"
+                          :stablehlo/reduce_min "stablehlo.minimum"
                           :stablehlo/reduce_mean "stablehlo.add")
             is-int-dtype? (boolean (re-find #"^(?:i32|i64|i8|i1|ui8|ui32|si32)$" (str in-dtype)))
             init-const (cond
                          (= op :stablehlo/reduce_max) (if is-int-dtype? "0" "-1.000000e+30")
+                         (= op :stablehlo/reduce_min) (if is-int-dtype? "2147483647" "1.000000e+30")
                          :else (if is-int-dtype? "0" "0.000000e+00"))
             norm-axes-set (set norm-axes)
             reduced-dims (mapv #(nth in-dims %) (filter #(not (norm-axes-set %)) (range rank)))
