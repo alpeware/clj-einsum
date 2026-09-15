@@ -552,3 +552,353 @@
     (dotimes [i total]
       (aset-float dst i (if (>= (aget src i) thresh) (float 1.0) (float 0.0))))
     dst))
+
+;; ==============================================================================
+;; 4. Scalability Improvements (Shah & Zadrozny, arXiv:2601.17188v1)
+;; ==============================================================================
+
+;; 4.1 Direct Symbolic Datalog via Tensor Contraction (Paper Exp 1, §3.1 & §5.1)
+
+(defn datalog-transitive-step-ast
+  "Constructs a Tensor Logic AST block for one iterative step of transitive closure:
+   A_next = clamp(A + A x P, 0.0, 1.0).
+   Pure boolean/indicator contraction without embedding noise (Shah & Zadrozny, arXiv:2601.17188v1 Exp 1, §3.1 & §5.1)."
+  ([a-name p-name next-name]
+   (datalog-transitive-step-ast a-name p-name next-name [:x :z] :y))
+  ([a-name p-name next-name [x z] y]
+   (let [unclamped-head (keyword (str (name next-name) "_unclamped"))]
+     [:block {:name :datalog-transitive-step}
+      [:= [unclamped-head x z] [a-name x z]]
+      [:= [unclamped-head x z] [a-name x y] [p-name y z]]
+      [:= [next-name x z] {:clamp [0.0 1.0]} [unclamped-head x z]]])))
+
+(defn containment?
+  "Verification Check 1 (Paper §3.1.4): P subset-of A.
+   All direct parent edges must appear in the transitive closure.
+   Accepts sets of index pairs #{[x y] ...} or result map."
+  ([p a]
+   (let [p-set (if (map? p) (:facts p) (set p))
+         a-set (if (map? a) (:facts a) (set a))]
+     (set/subset? p-set a-set)))
+  ([result]
+   (containment? (:p-facts result) (:facts result))))
+
+(defn closure?
+  "Verification Check 2 (Paper §3.1.4): A x P adds no new edges to A.
+   One additional step of chaining does not discover any new relationships.
+   Accepts sets of index pairs #{[x y] ...} or result map."
+  ([p a]
+   (let [p-set (if (map? p) (:facts p) (set p))
+         a-set (if (map? a) (:facts a) (set a))
+         p-by-y (reduce (fn [m [y z]] (update m y (fnil conj #{}) z)) {} p-set)]
+     (every? (fn [[x y]]
+               (let [zs (get p-by-y y #{})]
+                 (every? (fn [z] (contains? a-set [x z])) zs)))
+             a-set)))
+  ([p a _n]
+   (closure? p a))
+  ([result]
+   (closure? (:p-facts result) (:facts result))))
+
+(defn acyclic?
+  "Verification Check 3 (Paper §3.1.4): diag(A) = 0.
+   No individual is their own ancestor.
+   Accepts sets of index pairs #{[x y] ...} or result map."
+  ([a]
+   (let [a-set (if (map? a) (:facts a) (set a))]
+     (every? (fn [[x y]] (not= x y)) a-set))))
+
+(defn lineage-stats
+  "Computes ancestor and descendant counts for an individual (Paper §4.1.3).
+   `a-facts`: set of [ancestor descendant] pairs.
+   `person`: individual identifier.
+   Returns {:ancestors int :descendants int}."
+  [a-facts person]
+  (let [facts-set (if (map? a-facts) (:facts a-facts) (set a-facts))
+        ancestors (count (filter (fn [[_x z]] (= z person)) facts-set))
+        descendants (count (filter (fn [[x _z]] (= x person)) facts-set))]
+    {:ancestors ancestors :descendants descendants}))
+
+(defn datalog-transitive-closure
+  "Computes transitive closure via direct Boolean/indicator tensor contraction in OpenXLA PJRT
+   (Shah & Zadrozny, arXiv:2601.17188v1 Exp 1, §3.1 & §5.1).
+   `opts`: {:facts #{[0 1] ...}
+            :n integer entity count
+            :max-iters integer (default 100)
+            :objects optional vector of entity labels}
+   Returns {:facts #{...} :iterations int :converged? bool :matrix float-array :n int :p-facts #{...}}."
+  [{:keys [facts n max-iters objects]}]
+  (let [n-long (long n)
+        max-it (long (or max-iters 100))
+        facts-set (set facts)
+        p-tensor (fact-tensor facts-set n-long)
+        p-data (:data p-tensor)
+        step-ast (datalog-transitive-step-ast :A :P :A_next)
+        invars [[:A [:tensor [n-long n-long] :f32]]
+                [:P [:tensor [n-long n-long] :f32]]]
+        exec (compile-query "datalog_tc_step" invars step-ast [:A_next])]
+    (loop [a-curr p-data
+           iter 1]
+      (let [out (run-query! exec {:A a-curr :P p-data})
+            ^floats a-next (get out :A_next)
+            ^floats a-prev a-curr
+            total (* n-long n-long)
+            changed? (loop [idx 0]
+                       (if (>= idx total)
+                         false
+                         (if (and (> (aget a-next idx) 0.5)
+                                  (<= (aget a-prev idx) 0.5))
+                           true
+                           (recur (inc idx)))))]
+        (if (or (not changed?) (>= iter max-it))
+          (let [decoded (decode-pairs a-next n-long 0.5 objects)]
+            {:facts decoded
+             :p-facts (if objects
+                        (set (map (fn [[i j]] [(nth objects i) (nth objects j)]) facts-set))
+                        facts-set)
+             :iterations iter
+             :converged? (not changed?)
+             :matrix a-next
+             :n n-long})
+          (recur a-next (inc iter)))))))
+
+;; 4.2 Compact Transformation Matrices & Composition (Paper Exp 2, §3.2)
+
+(defn compose-matrices-ast
+  "Constructs Tensor Logic equation for composing two relation transformation matrices:
+   M_comp[i, j] = sum_k M1[i, k] * M2[k, j] (Paper Exp 2, §3.2 & Exp 3, §3.3.6).
+   Arities:
+   [comp-name m1-name m2-name] -> default [:i :j] :k
+   [comp-name m1-name m2-name [i j] k]"
+  ([comp-name m1-name m2-name]
+   (compose-matrices-ast comp-name m1-name m2-name [:i :j] :k))
+  ([comp-name m1-name m2-name [i j] k]
+   (let [node [:= [comp-name i j] [m1-name i k] [m2-name k j]]]
+     (assert (ast/valid-node? node) (str "Invalid AST in compose-matrices-ast: " node))
+     node)))
+
+(defn transform-entity-ast
+  "Constructs Tensor Logic equation for mapping an entity vector through a transformation matrix:
+   V_out[d] = sum_i V_in[i] * M[i, d] (Paper Exp 2, §3.2).
+   Arities:
+   [out-name in-name m-name] -> default :d :i
+   [out-name in-name m-name d-idx in-idx]"
+  ([out-name in-name m-name]
+   (transform-entity-ast out-name in-name m-name :d :i))
+  ([out-name in-name m-name d-idx in-idx]
+   (let [node [:= [out-name d-idx] [in-name in-idx] [m-name in-idx d-idx]]]
+     (assert (ast/valid-node? node) (str "Invalid AST in transform-entity-ast: " node))
+     node)))
+
+(defn score-candidates-ast
+  "Constructs Tensor Logic equation for scoring candidate entities via dot product with temperature:
+   Scores[n] = (1 / T) * sum_d V_pred[d] * E[n, d] (Paper Exp 2, §3.2).
+   Arities:
+   [scores-name v-name e-name temperature] -> default :n :d
+   [scores-name v-name e-name n-idx d-idx temperature]"
+  ([scores-name v-name e-name temperature]
+   (score-candidates-ast scores-name v-name e-name :n :d temperature))
+  ([scores-name v-name e-name n-idx d-idx temperature]
+   (let [t (double (or temperature 1.0))
+         node [:= [scores-name n-idx] {:scale (/ 1.0 t)} [v-name d-idx] [e-name n-idx d-idx]]]
+     (assert (ast/valid-node? node) (str "Invalid AST in score-candidates-ast: " node))
+     node)))
+
+(defn predict-compositional-query
+  "Executes zero-shot multi-hop compositional query via chained relation matrices in OpenXLA PJRT
+   (Shah & Zadrozny, arXiv:2601.17188v1 Exp 2, §3.2).
+   `opts`: {:subject-idx int
+            :relation-matrices [float-array ...]
+            :entity-embeddings {:shape [n d] :data float-array}
+            :d int
+            :temperature double (optional, default 1.0)}
+   Returns {:scores float-array :top-entity-idx int :sorted-entities [int ...]}."
+  [{:keys [subject-idx relation-matrices entity-embeddings d temperature]}]
+  (let [d-long (long d)
+        {:keys [shape data]} entity-embeddings
+        [n _] shape
+        n-long (long n)
+        temp (double (or temperature 1.0))
+        ^floats e-arr data
+        s-long (long subject-idx)
+        s-vec (float-array d-long)]
+    (System/arraycopy e-arr (int (* s-long d-long)) s-vec 0 (int d-long))
+    (let [num-m (count relation-matrices)
+          m-vars (mapv #(keyword (str "M" %)) (range num-m))
+          comp-ast
+          (cond
+            (= num-m 1)
+            [:block {:name :comp-pred}
+             (transform-entity-ast :Vpred :Vs (first m-vars))
+             (score-candidates-ast :Scores :Vpred :E temp)]
+
+            (= num-m 2)
+            [:block {:name :comp-pred}
+             (compose-matrices-ast :Mcomp (first m-vars) (second m-vars))
+             (transform-entity-ast :Vpred :Vs :Mcomp)
+             (score-candidates-ast :Scores :Vpred :E temp)]
+
+            :else
+            (let [steps (mapv (fn [idx]
+                                (let [in-m (if (zero? idx) (first m-vars) (keyword (str "Mcomp" idx)))
+                                      next-m (nth m-vars (inc idx))
+                                      out-m (if (= idx (- num-m 2)) :Mcomp (keyword (str "Mcomp" (inc idx))))]
+                                  (compose-matrices-ast out-m in-m next-m)))
+                              (range (dec num-m)))]
+              (vec (concat [:block {:name :comp-pred}]
+                           steps
+                           [(transform-entity-ast :Vpred :Vs :Mcomp)
+                            (score-candidates-ast :Scores :Vpred :E temp)]))))
+          invars (into [[:Vs [:tensor [d-long] :f32]]
+                        [:E [:tensor [n-long d-long] :f32]]]
+                       (map (fn [v] [v [:tensor [d-long d-long] :f32]]) m-vars))
+          exec (compile-query "comp_pred_graph" invars comp-ast [:Scores])
+          inputs (into {:Vs s-vec :E e-arr}
+                       (map vector m-vars relation-matrices))
+          out (run-query! exec inputs)
+          ^floats scores (get out :Scores)
+          sorted-entities (vec (sort-by (fn [idx] (- (aget scores idx))) (range n-long)))]
+      {:scores scores
+       :top-entity-idx (first sorted-entities)
+       :sorted-entities sorted-entities})))
+
+;; 4.3 Superposition Construction & Filtered Ranking Evaluation (Paper Exp 3, §3.3)
+
+(defn superposition-relation-matrix
+  "Computes relation transformation matrix via Tensor Logic superposition construction:
+   R_r = E^T * A_r * E = sum_{(h, t) in facts(r)} e_h (x) e_t (Paper Exp 3, §3.3.2).
+   `entity-embeddings`: {:shape [n d] :data float-array}.
+   `facts`: sequence or set of [h t] integer entity index pairs.
+   Returns {:shape [d d] :data float-array}."
+  [entity-embeddings facts]
+  (let [{:keys [shape data]} entity-embeddings
+        [_n d] shape
+        d-long (long d)
+        ^floats e-arr data
+        total (* d-long d-long)
+        r-arr (float-array total)]
+    (doseq [tuple facts]
+      (let [h (long (first tuple))
+            t (long (second tuple))
+            h-off (* h d-long)
+            t-off (* t d-long)]
+        (dotimes [i d-long]
+          (let [hi (aget e-arr (int (+ h-off i)))
+                i-off (* i d-long)]
+            (dotimes [j d-long]
+              (let [tj (aget e-arr (int (+ t-off j)))
+                    idx (int (+ i-off j))]
+                (aset-float r-arr idx (+ (aget r-arr idx) (* hi tj)))))))))
+    {:shape [d-long d-long] :data r-arr}))
+
+(defn predict-tail-query
+  "Evaluates tail prediction query (h, r, ?) via OpenXLA PJRT (Paper Exp 3, §3.3.3):
+   v_pred = e_h * R_r, scores = (v_pred * E^T) / T.
+   `opts`: {:head-idx int
+            :relation-matrix {:shape [d d] :data float-array}
+            :entity-embeddings {:shape [n d] :data float-array}
+            :temperature double (optional, default 0.1)}
+   Returns {:scores float-array :top-entity-idx int :sorted-entities [int ...]}."
+  [{:keys [head-idx relation-matrix entity-embeddings temperature]}]
+  (let [{:keys [shape data]} entity-embeddings
+        [n d] shape
+        n-long (long n)
+        d-long (long d)
+        temp (double (or temperature 0.1))
+        h-long (long head-idx)
+        ^floats e-arr data
+        eh-vec (float-array d-long)]
+    (System/arraycopy e-arr (int (* h-long d-long)) eh-vec 0 (int d-long))
+    (let [ast [:block {:name :tail-pred}
+               [:= [:Vpred :j] [:Eh :i] [:R :i :j]]
+               [:= [:Scores :n] {:scale (/ 1.0 temp)} [:Vpred :j] [:E :n :j]]]
+          invars [[:Eh [:tensor [d-long] :f32]]
+                  [:R [:tensor [d-long d-long] :f32]]
+                  [:E [:tensor [n-long d-long] :f32]]]
+          exec (compile-query "tail_pred_graph" invars ast [:Scores])
+          out (run-query! exec {:Eh eh-vec :R (:data relation-matrix) :E e-arr})
+          ^floats scores (get out :Scores)
+          sorted-entities (vec (sort-by (fn [idx] (- (aget scores idx))) (range n-long)))]
+      {:scores scores
+       :top-entity-idx (first sorted-entities)
+       :sorted-entities sorted-entities})))
+
+(defn predict-head-query
+  "Evaluates head prediction query (?, r, t) via OpenXLA PJRT (Paper Exp 3, §3.3.3):
+   v_pred = e_t * R_r^T, scores = (v_pred * E^T) / T.
+   `opts`: {:tail-idx int
+            :relation-matrix {:shape [d d] :data float-array}
+            :entity-embeddings {:shape [n d] :data float-array}
+            :temperature double (optional, default 0.1)}
+   Returns {:scores float-array :top-entity-idx int :sorted-entities [int ...]}."
+  [{:keys [tail-idx relation-matrix entity-embeddings temperature]}]
+  (let [{:keys [shape data]} entity-embeddings
+        [n d] shape
+        n-long (long n)
+        d-long (long d)
+        temp (double (or temperature 0.1))
+        t-long (long tail-idx)
+        ^floats e-arr data
+        et-vec (float-array d-long)]
+    (System/arraycopy e-arr (int (* t-long d-long)) et-vec 0 (int d-long))
+    (let [ast [:block {:name :head-pred}
+               [:= [:Vpred :i] [:Et :j] [:R :i :j]]
+               [:= [:Scores :n] {:scale (/ 1.0 temp)} [:Vpred :i] [:E :n :i]]]
+          invars [[:Et [:tensor [d-long] :f32]]
+                  [:R [:tensor [d-long d-long] :f32]]
+                  [:E [:tensor [n-long d-long] :f32]]]
+          exec (compile-query "head_pred_graph" invars ast [:Scores])
+          out (run-query! exec {:Et et-vec :R (:data relation-matrix) :E e-arr})
+          ^floats scores (get out :Scores)
+          sorted-entities (vec (sort-by (fn [idx] (- (aget scores idx))) (range n-long)))]
+      {:scores scores
+       :top-entity-idx (first sorted-entities)
+       :sorted-entities sorted-entities})))
+
+(defn evaluate-filtered-ranking
+  "Evaluates ranking metrics under canonical filtered ranking protocol (Paper Exp 3, §3.3.5 & §3.3.6).
+   For each test query, masks out all other known true entities for the query (h, r, ?) so they
+   do not artificially penalize the target entity's rank.
+   `queries`: seq of {:head h :rel r :tail t :scores float-array}
+   `all-known-triples`: set of [h r t] known true facts across all splits.
+   Returns {:mrr double :hits@1 double :hits@3 double :hits@10 double :count int}."
+  [queries all-known-triples]
+  (let [triples-set (set all-known-triples)
+        q-list (vec queries)
+        num-q (count q-list)]
+    (if (zero? num-q)
+      {:mrr 0.0 :hits-1 0.0 :hits-3 0.0 :hits-10 0.0 (keyword "hits@1") 0.0 (keyword "hits@3") 0.0 (keyword "hits@10") 0.0 :count 0}
+      (let [ranks
+            (mapv (fn [{:keys [head rel tail scores]}]
+                    (let [h head
+                          r rel
+                          target-t tail
+                          ^floats arr (if (instance? (Class/forName "[F") scores)
+                                        scores
+                                        (float-array scores))
+                          target-score (aget arr (int target-t))
+                          num-entities (alength arr)]
+                      (loop [e 0
+                             better-count 0]
+                        (if (>= e num-entities)
+                          (inc better-count)
+                          (if (or (= e target-t)
+                                  (contains? triples-set [h r e]))
+                            (recur (inc e) better-count)
+                            (let [s (aget arr (int e))]
+                              (if (> s target-score)
+                                (recur (inc e) (inc better-count))
+                                (recur (inc e) better-count))))))))
+                  q-list)
+            mrr (/ (reduce + 0.0 (map (fn [^long r] (/ 1.0 (double r))) ranks)) (double num-q))
+            hits-1 (/ (double (count (filter #(= % 1) ranks))) (double num-q))
+            hits-3 (/ (double (count (filter #(<= % 3) ranks))) (double num-q))
+            hits-10 (/ (double (count (filter #(<= % 10) ranks))) (double num-q))]
+        {:mrr mrr
+         :hits-1 hits-1
+         :hits-3 hits-3
+         :hits-10 hits-10
+         (keyword "hits@1") hits-1
+         (keyword "hits@3") hits-3
+         (keyword "hits@10") hits-10
+         :count num-q}))))

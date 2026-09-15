@@ -15,20 +15,39 @@
   (let [idx->pos (into {} (map-indexed (fn [pos k] [k pos]) ordered-idxs))]
     (mapv #(get idx->pos %) target-idxs)))
 
+(defn- has-post-act? [attrs]
+  (boolean (or (:scale attrs) (:act attrs) (:softcap attrs) (:clamp attrs))))
+
 (defn- emit-post-activation! [eqns-atom counter in-var out-var attrs dtype]
   (let [scale (:scale attrs)
         act (:act attrs)
-        softcap (:softcap attrs)]
+        softcap (:softcap attrs)
+        clamp (:clamp attrs)]
     (cond
       scale
       (let [c-var (gen-id "c_scale" counter)
             c-eqn {:op :stablehlo/constant :value (double scale) :outvars [c-var]}
-            mul-var (if (or act softcap) (gen-id "t_scaled" counter) out-var)
+            mul-var (if (or act softcap clamp) (gen-id "t_scaled" counter) out-var)
             mul-eqn {:op :stablehlo/multiply :invars [in-var c-var] :outvars [mul-var]}]
         (swap! eqns-atom conj c-eqn mul-eqn)
-        (if (or act softcap)
+        (if (or act softcap clamp)
           (emit-post-activation! eqns-atom counter mul-var out-var (dissoc attrs :scale) dtype)
           mul-var))
+
+      (or (:clamp attrs) (= act :clamp) (= act :step) (= act :heaviside))
+      (let [[low high] (cond
+                         (vector? (:clamp attrs)) (:clamp attrs)
+                         (sequential? (:clamp attrs)) (vec (:clamp attrs))
+                         :else [0.0 1.0])
+            c-low (gen-id "c_clamp_low" counter)
+            low-eqn {:op :stablehlo/constant :value (double low) :outvars [c-low]}
+            c-high (gen-id "c_clamp_high" counter)
+            high-eqn {:op :stablehlo/constant :value (double high) :outvars [c-high]}
+            t-max (gen-id "t_clamp_max" counter)
+            max-eqn {:op :stablehlo/maximum :invars [in-var c-low] :outvars [t-max]}
+            min-eqn {:op :stablehlo/minimum :invars [t-max c-high] :outvars [out-var]}]
+        (swap! eqns-atom conj low-eqn high-eqn max-eqn min-eqn)
+        out-var)
 
       (or (= act :sigmoid) (= act :logistic))
       (let [log-eqn {:op :stablehlo/logistic :invars [in-var] :outvars [out-var]}]
@@ -135,7 +154,7 @@
                           :else
                           secondary-name)
             needs-perm? (not= primary-idxs head-idxs)
-            has-post-act? (or (:scale attrs) (:act attrs) (:softcap attrs))
+            has-post-act? (has-post-act? attrs)
             mul-out-var (if (or needs-perm? has-post-act?)
                           (gen-id "t_mul" counter)
                           final-out-var)
@@ -167,7 +186,7 @@
 
             raw-dot-idxs (vec (concat batch lhs-free rhs-free))
             needs-perm? (not= raw-dot-idxs head-idxs)
-            has-post-act? (or (:scale attrs) (:act attrs) (:softcap attrs))
+            has-post-act? (has-post-act? attrs)
 
             dot-out-var (if (or needs-perm? has-post-act?)
                           (gen-id "t_dot" counter)
@@ -200,7 +219,7 @@
   (let [head-idxs (vec (rest head))
         term-name (first term)
         term-idxs (vec (rest term))
-        has-post-act? (or (:scale attrs) (:act attrs) (:softcap attrs))]
+        has-post-act? (has-post-act? attrs)]
     (cond
       ;; Direct copy or post-activation
       (= head-idxs term-idxs)
