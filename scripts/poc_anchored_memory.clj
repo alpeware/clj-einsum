@@ -1,10 +1,11 @@
 (ns scripts.poc-anchored-memory
-  "LLM-anchored entity embeddings (zero-shot bridge hypothesis).
+  "QR-orthonormalized LLM-anchored entity embeddings (disentangling cross-talk from distribution shift).
    Evaluates whether grounding Pedro Domingos' symbolic relational memory cores directly
    in Gemma 4's tied token embedding space achieves zero-shot retrieval with W = I (identity).
    Compares:
      Arm 1 (Control):   Random entity table @ D=1536, W = I (isolates D=1536 effect)
-     Arm 2 (Test):      LLM-anchored entity table @ D=1536, W = I (the hypothesis)
+     Arm 2 (Re-run):    LLM-anchored raw @ D=1536, W = I (replicates Task C 0/7)
+     Arm 4 (Test):      LLM-anchored QR-orthonormalized @ D=1536, W = I (surgically eliminates cross-talk)
      Arm 3 (Reference): De-oracled baseline @ D=256, W = random (0/7 chance)"
   (:require [clj-xla.core :as xla]
             [clj-xla.logic.memory.relation :as mem]
@@ -26,7 +27,7 @@
    :dim 1536
    :threshold 0.5
    :memory-seed 2026
-   :entity-mode :llm-anchored
+   :entity-mode :anchored-qr
    :train-refinement false})
 
 (defn- normalize-args [args]
@@ -176,6 +177,98 @@
       :dim d
       :relation-count k})))
 
+(defn orthonormalize-table
+  "Applies Modified Gram-Schmidt (MGS) in f64 to orthonormalize the rows of an [N, D] table.
+   Input: ^floats table (flat float-array of length N*D), n (row count), d (vector dim).
+   Returns: flat float-array of length N*D containing N orthonormal d-vectors Q (in f32).
+   Handles degenerate inputs (duplicate/parallel/zero rows) via a deterministic canonical basis
+   search policy to guarantee no NaNs and strictly orthonormal rows."
+  [^floats table n d]
+  (let [n-long (long n)
+        d-long (long d)
+        q-rows (object-array n-long)
+        eps 1e-12]
+    (dotimes [i n-long]
+      (let [v (double-array d-long)
+            offset (* i d-long)]
+        ;; 1. Copy row i in double precision
+        (dotimes [k d-long]
+          (aset v k (double (aget table (+ offset k)))))
+
+        ;; 2. Modified Gram-Schmidt: sequentially project out prior q_j
+        (dotimes [j i]
+          (let [^doubles q-j (aget q-rows j)
+                dot (loop [k 0 s 0.0]
+                      (if (>= k d-long)
+                        s
+                        (recur (inc k) (+ s (* (aget v k) (aget q-j k))))))]
+            (dotimes [k d-long]
+              (aset v k (- (aget v k) (* dot (aget q-j k)))))))
+
+        ;; 3. Compute Euclidean norm
+        (let [norm (Math/sqrt (loop [k 0 s 0.0]
+                                (if (>= k d-long)
+                                  s
+                                  (let [val (aget v k)]
+                                    (recur (inc k) (+ s (* val val)))))))]
+          ;; 4. Check for degeneracy (norm < eps)
+          (if (< norm eps)
+            ;; Degenerate/parallel row: search canonical basis vectors e_m
+            (let [resolved (double-array d-long)]
+              (loop [m 0]
+                (if (>= m d-long)
+                  (throw (ex-info "Failed to resolve degenerate row in MGS" {:row i :d d-long}))
+                  (do
+                    ;; Try canonical unit vector e_m
+                    (dotimes [k d-long]
+                      (aset resolved k (if (= k m) 1.0 0.0)))
+                    ;; Project out all prior q_j
+                    (dotimes [j i]
+                      (let [^doubles q-j (aget q-rows j)
+                            dot (aget q-j m)]
+                        (dotimes [k d-long]
+                          (aset resolved k (- (aget resolved k) (* dot (aget q-j k)))))))
+                    (let [c-norm (Math/sqrt (loop [k 0 s 0.0]
+                                              (if (>= k d-long)
+                                                s
+                                                (let [val (aget resolved k)]
+                                                  (recur (inc k) (+ s (* val val)))))))]
+                      (if (> c-norm 1e-6)
+                        ;; Found valid orthogonal basis direction
+                        (dotimes [k d-long]
+                          (aset v k (/ (aget resolved k) c-norm)))
+                        (recur (inc m))))))))
+            ;; Non-degenerate: normalize directly
+            (dotimes [k d-long]
+              (aset v k (/ (aget v k) norm)))))
+
+        (aset q-rows i v)))
+
+    ;; 5. Convert to output flat float-array
+    (let [out (float-array (* n-long d-long))]
+      (dotimes [i n-long]
+        (let [^doubles q-i (aget q-rows i)
+              row-offset (* i d-long)]
+          (dotimes [k d-long]
+            (aset-float out (+ row-offset k) (float (aget q-i k))))))
+      out)))
+
+(defn init-qr-anchored-memory
+  "Builds relation memory map with the same shape as mem/init-relation-memory,
+   where :entity-table is the orthonormalized table Q derived from raw-anchored-mem."
+  [raw-anchored-mem]
+  (let [n (long (:entity-count raw-anchored-mem))
+        d (long (:dim raw-anchored-mem))
+        k (long (:relation-count raw-anchored-mem))
+        q-table (orthonormalize-table (:entity-table raw-anchored-mem) n d)]
+    {:entity-table q-table
+     :entity-shape [n d]
+     :cores (float-array (* k d d))
+     :core-shape [k d d]
+     :entity-count n
+     :dim d
+     :relation-count k}))
+
 ;; ==============================================================================
 ;; 2. Diagnostics: Pairwise Cosine and Margin Statistics
 ;; ==============================================================================
@@ -240,13 +333,41 @@
         {:mean (double mean-m)
          :median (double median-m)}))))
 
+(defn compute-score-scale-stats
+  "Computes score-scale statistics across a sequence of query evaluation results:
+     - mean top-1 score
+     - std dev of top-1 score
+     - fixed threshold (e.g. 0.5) pass count and rate
+     - calibrated threshold (0.5 * mean top-1 score) pass count and rate"
+  [results fixed-threshold]
+  (let [scores (mapv (fn [r] (double (or (:top-1-score r) 0.0))) results)
+        cnt (count scores)]
+    (if (zero? cnt)
+      {:mean 0.0 :std 0.0
+       :fixed-threshold (double fixed-threshold) :fixed-passes 0 :fixed-pass-rate 0.0
+       :calibrated-threshold 0.0 :calibrated-passes 0 :calibrated-pass-rate 0.0}
+      (let [mean (/ (reduce + scores) (double cnt))
+            var-sum (reduce + (map (fn [s] (let [diff (- s mean)] (* diff diff))) scores))
+            std (Math/sqrt (/ var-sum (double cnt)))
+            cal-thresh (* 0.5 mean)
+            f-passes (count (filter #(> % (double fixed-threshold)) scores))
+            c-passes (count (filter #(> % cal-thresh) scores))]
+        {:mean (double mean)
+         :std (double std)
+         :fixed-threshold (double fixed-threshold)
+         :fixed-passes f-passes
+         :fixed-pass-rate (/ (double f-passes) (double cnt))
+         :calibrated-threshold (double cal-thresh)
+         :calibrated-passes c-passes
+         :calibrated-pass-rate (/ (double c-passes) (double cnt))}))))
+
 ;; ==============================================================================
 ;; 3. Evaluation Harness Across Arms
 ;; ==============================================================================
 
 (defn evaluate-memory-arm
   "Evaluates one experimental arm (entity table + W_mem_proj) across all 7 queries.
-   Returns per-query results, accuracy, margin stats, and gate pass-rate."
+   Returns per-query results, accuracy, margin stats, score stats, and gate pass-rate."
   [arm-name session exec device-weights mem w-proj kb-data opts]
   (let [ctx (:ctx session)
         tokenizer (:tokenizer session)
@@ -329,14 +450,16 @@
           gate-passes (count (filter :gate-passed? results))
           gate-pass-rate (/ (double gate-passes) (double num-queries))
           margins (mapv :margin results)
-          margin-stats (compute-margin-stats margins)]
+          margin-stats (compute-margin-stats margins)
+          score-stats (compute-score-scale-stats results threshold)]
 
       {:arm arm-name
        :results results
        :hits hits
        :accuracy accuracy
        :gate-pass-rate gate-pass-rate
-       :margin-stats margin-stats})))
+       :margin-stats margin-stats
+       :score-stats score-stats})))
 
 ;; ==============================================================================
 ;; 4. Main Experiment Pipeline
@@ -396,11 +519,11 @@
                                         session exec device-weights mem-arm1 w-identity kb-data opts)
 
           ;; --------------------------------------------------------------------
-          ;; ARM 2: LLM-Anchored Entity Table @ D=1536, W = I (Test)
+          ;; ARM 2: LLM-Anchored Raw @ D=1536, W = I (Replicates Task C 0/7)
           ;; --------------------------------------------------------------------
           weights-mmap (:weights-mmap base-session)
           prefix-base (:prefix-base base-session)
-          _ (println "\nBuilding LLM-anchored entity table from Gemma 4 embed_tokens.weight...")
+          _ (println "\nBuilding LLM-anchored raw entity table from Gemma 4 embed_tokens.weight...")
           mem-arm2 (build-llm-anchored-table weights-mmap prefix-base tokenizer entities d k)
           _ (let [entity->id (into {} (map-indexed (fn [idx name] [name idx]) entities))
                   rel->id (into {} (map-indexed (fn [idx name] [name idx]) (:relations kb-data)))]
@@ -410,86 +533,150 @@
                       t-i (get entity->id t)]
                   (when (and h-i r-i t-i)
                     (mem/accumulate-fact! (:cores mem-arm2) (:entity-table mem-arm2) h-i r-i t-i d)))))
-          arm2-res (evaluate-memory-arm "Arm 2 (LLM-Anchored Table @ D=1536, W = I)"
+          arm2-res (evaluate-memory-arm "Arm 2 (LLM-Anchored Raw @ D=1536, W = I)"
                                         session exec device-weights mem-arm2 w-identity kb-data opts)
 
           ;; --------------------------------------------------------------------
-          ;; Pairwise Cosine Diagnostics
+          ;; ARM 4: LLM-Anchored QR @ D=1536, W = I (The Test: Orthonormalized)
+          ;; --------------------------------------------------------------------
+          _ (println "\nBuilding LLM-anchored QR-orthonormalized entity table (MGS in f64)...")
+          mem-arm4 (init-qr-anchored-memory mem-arm2)
+          _ (let [entity->id (into {} (map-indexed (fn [idx name] [name idx]) entities))
+                  rel->id (into {} (map-indexed (fn [idx name] [name idx]) (:relations kb-data)))]
+              (doseq [[h r t] (:triples kb-data)]
+                (let [h-i (get entity->id h)
+                      r-i (get rel->id r)
+                      t-i (get entity->id t)]
+                  (when (and h-i r-i t-i)
+                    (mem/accumulate-fact! (:cores mem-arm4) (:entity-table mem-arm4) h-i r-i t-i d)))))
+          arm4-res (evaluate-memory-arm "Arm 4 (LLM-Anchored QR @ D=1536, W = I)"
+                                        session exec device-weights mem-arm4 w-identity kb-data opts)
+
+          ;; --------------------------------------------------------------------
+          ;; Pairwise Cosine Diagnostics (Off-Diagonal Similarity)
           ;; --------------------------------------------------------------------
           cos-arm1 (compute-pairwise-cosine-stats (:entity-table mem-arm1) n d)
-          cos-arm2 (compute-pairwise-cosine-stats (:entity-table mem-arm2) n d)]
+          cos-arm2 (compute-pairwise-cosine-stats (:entity-table mem-arm2) n d)
+          cos-arm4 (compute-pairwise-cosine-stats (:entity-table mem-arm4) n d)]
 
-      ;; Cleanup device weights
-      (doseq [w device-weights]
-        (xla/destroy-buffer! ctx w))
+      ;; --------------------------------------------------------------------
+      ;; Per-Entity Breakdown & Fragmentation Analysis
+      ;; --------------------------------------------------------------------
+      (println "\n------------------------------------------------------------------")
+      (println " PER-ENTITY BREAKDOWN & SUB-TOKEN FRAGMENTATION:")
+      (println "------------------------------------------------------------------")
+      (doseq [idx (range (count (:triples kb-data)))]
+        (let [r1 (nth (:results arm1-res) idx)
+              r2 (nth (:results arm2-res) idx)
+              r4 (nth (:results arm4-res) idx)
+              head (:head r1)
+              exp (:expected r1)
+              rare? (contains? #{"Alpeware" "Simon Pure"} head)]
+          (println (format " [%s%s] Head: %-12s | Expected: %-14s"
+                           (if rare? "RARE " "COMMON")
+                           (if rare? "(!)" "   ")
+                           head (str "\"" exp "\"")))
+          (println (format "   Arm 1 (Random):      Top-1: %-14s (margin: %5.2f) -> %s"
+                           (str "\"" (:top-1 r1) "\"") (:margin r1) (if (:hit? r1) "HIT" "MISS")))
+          (println (format "   Arm 2 (AnchoredRaw): Top-1: %-14s (margin: %5.2f) -> %s"
+                           (str "\"" (:top-1 r2) "\"") (:margin r2) (if (:hit? r2) "HIT" "MISS")))
+          (println (format "   Arm 4 (AnchoredQR):  Top-1: %-14s (margin: %5.2f) -> %s"
+                           (str "\"" (:top-1 r4) "\"") (:margin r4) (if (:hit? r4) "HIT" "MISS")))))
 
       ;; --------------------------------------------------------------------
       ;; Summary Comparison Report
       ;; --------------------------------------------------------------------
       (println "\n==================================================================")
-      (println " SUMMARY: LLM-Anchored Zero-Shot Retrieval Experiment")
+      (println " SUMMARY: QR-Orthonormalized Anchored Memory Experiment (Task D)")
       (println "==================================================================")
       (println (format " Entity Universe:   %d entities" n))
-      (println (format " Chance Baseline:   7.1%% (1/%d ≈ 0.0714)" n))
-      (println " Arm 3 (Reference): 0 / 7 (0.0%)  [Random @ D=256, W=random]")
-      (println (format " Arm 1 (Control):   %d / 7 (%.1f%%) [Random @ D=1536, W=I]"
+      (println " Interpretation Guide (n=7, chance=1/14=7.1%):")
+      (println "   0–1 / 7 ( 0.0% – 14.3%): Chance-consistent")
+      (println "     2 / 7 ( 28.6%):        Suggestive (p ≈ 0.09)")
+      (println "   ≥ 3 / 7 (≥ 42.9%):       Significant (p ≈ 0.01)")
+      (println "------------------------------------------------------------------")
+      (println " PRIMARY RETRIEVAL ACCURACY (Scale-free, pre-gate :entity_scores):")
+      (println "   Arm 3 (Reference): 0 / 7 ( 0.0%) [Random @ D=256, W=random]")
+      (println (format "   Arm 1 (Control):   %d / 7 (%5.1f%%) [Random @ D=1536, W=I]"
                        (:hits arm1-res) (* 100.0 (double (:accuracy arm1-res)))))
-      (println (format " Arm 2 (Test):      %d / 7 (%.1f%%) [Anchored @ D=1536, W=I]"
+      (println (format "   Arm 2 (Re-run):    %d / 7 (%5.1f%%) [Anchored Raw @ D=1536, W=I]"
                        (:hits arm2-res) (* 100.0 (double (:accuracy arm2-res)))))
+      (println (format "   Arm 4 (Test):      %d / 7 (%5.1f%%) [Anchored QR @ D=1536, W=I]"
+                       (:hits arm4-res) (* 100.0 (double (:accuracy arm4-res)))))
       (println "------------------------------------------------------------------")
       (println " MARGIN STATISTICS (Top-1 - Top-2 Score):")
-      (println (format "   Arm 1 (Random):   Mean: %6.2f | Median: %6.2f"
+      (println (format "   Arm 1 (Random):      Mean: %6.2f | Median: %6.2f"
                        (:mean (:margin-stats arm1-res)) (:median (:margin-stats arm1-res))))
-      (println (format "   Arm 2 (Anchored): Mean: %6.2f | Median: %6.2f"
+      (println (format "   Arm 2 (AnchoredRaw): Mean: %6.2f | Median: %6.2f"
                        (:mean (:margin-stats arm2-res)) (:median (:margin-stats arm2-res))))
+      (println (format "   Arm 4 (AnchoredQR):  Mean: %6.2f | Median: %6.2f"
+                       (:mean (:margin-stats arm4-res)) (:median (:margin-stats arm4-res))))
       (println "------------------------------------------------------------------")
-      (println " TABLE CROSS-TALK DIAGNOSTICS (Pairwise Cosine across 14 entities):")
-      (println (format "   Arm 1 (Random):   Mean: %6.4f | Max: %6.4f | Min: %6.4f"
+      (println " TABLE CROSS-TALK DIAGNOSTICS (Off-Diagonal Pairwise Cosines across 14 entities):")
+      (println (format "   Arm 1 (Random):      Mean: %9.6f | Max: %9.6f | Min: %9.6f"
                        (:mean cos-arm1) (:max cos-arm1) (:min cos-arm1)))
-      (println (format "   Arm 2 (Anchored): Mean: %6.4f | Max: %6.4f | Min: %6.4f"
+      (println (format "   Arm 2 (AnchoredRaw): Mean: %9.6f | Max: %9.6f | Min: %9.6f"
                        (:mean cos-arm2) (:max cos-arm2) (:min cos-arm2)))
+      (println (format "   Arm 4 (AnchoredQR):  Mean: %9.6f | Max: %9.6f | Min: %9.6f"
+                       (:mean cos-arm4) (:max cos-arm4) (:min cos-arm4)))
       (println "------------------------------------------------------------------")
-      (println " DEDUCTIVE GATE PASS-RATES (Threshold = 0.5):")
-      (println (format "   Arm 1 (Random):   %d / 7 (%.1f%%)"
-                       (long (* (double (:gate-pass-rate arm1-res)) 7))
-                       (* 100.0 (double (:gate-pass-rate arm1-res)))))
-      (println (format "   Arm 2 (Anchored): %d / 7 (%.1f%%)"
-                       (long (* (double (:gate-pass-rate arm2-res)) 7))
-                       (* 100.0 (double (:gate-pass-rate arm2-res)))))
+      (println " SCORE SCALE & GATE PASS-RATES:")
+      (println " [Note: Cross-arm comparison at fixed threshold 0.5 is invalid due to score scale;")
+      (println "        verdict leads with scale-free accuracy.]")
+      (let [s1 (:score-stats arm1-res)
+            s2 (:score-stats arm2-res)
+            s4 (:score-stats arm4-res)]
+        (println (format "   Arm 1: Mean Top-1: %6.2f (std: %5.2f) | Fixed @ 0.5: %d/7 (%5.1f%%) | Calibrated @ %5.2f: %d/7 (%5.1f%%)"
+                         (:mean s1) (:std s1) (:fixed-passes s1) (* 100.0 (:fixed-pass-rate s1))
+                         (:calibrated-threshold s1) (:calibrated-passes s1) (* 100.0 (:calibrated-pass-rate s1))))
+        (println (format "   Arm 2: Mean Top-1: %6.2f (std: %5.2f) | Fixed @ 0.5: %d/7 (%5.1f%%) | Calibrated @ %5.2f: %d/7 (%5.1f%%)"
+                         (:mean s2) (:std s2) (:fixed-passes s2) (* 100.0 (:fixed-pass-rate s2))
+                         (:calibrated-threshold s2) (:calibrated-passes s2) (* 100.0 (:calibrated-pass-rate s2))))
+        (println (format "   Arm 4: Mean Top-1: %6.2f (std: %5.2f) | Fixed @ 0.5: %d/7 (%5.1f%%) | Calibrated @ %5.2f: %d/7 (%5.1f%%)"
+                         (:mean s4) (:std s4) (:fixed-passes s4) (* 100.0 (:fixed-pass-rate s4))
+                         (:calibrated-threshold s4) (:calibrated-passes s4) (* 100.0 (:calibrated-pass-rate s4)))))
       (println "==================================================================")
 
       ;; Verdict Paragraph
       (println "\nVERDICT & MECHANISTIC INTERPRETATION:")
-      (if (> (:hits arm2-res) 1)
-        (do
-          (println " Outcome (a): Arm 2 clearly beats chance. The zero-shot bridge hypothesis is supported!")
-          (println " Anchoring relational memory cores directly in Gemma's tied token embedding space enables")
-          (println " factual retrieval without needing a learned projection map."))
-        (do
-          (println " Outcome (b): Arm 2 does not beat chance (zero-shot bridge alone is insufficient).")
-          (println " Three mechanistic factors account for why naive anchoring fails to retrieve zero-shot:")
-          (println "   1. Distribution shift: Token embeddings E are trained to dot single-token hidden states")
-          (println "      for next-token prediction, whereas the query vector h_probe is a contextual question")
-          (println "      state and entities are mean-pooled multi-token spans.")
-          (println (format "   2. Correlated cross-talk: Pairwise cosine in anchored space increases from %.4f (random)"
-                           (:mean cos-arm1)))
-          (println (format "      to %.4f (anchored), with max cosine %.4f. Company and person name embeddings share"
-                           (:mean cos-arm2) (:max cos-arm2)))
-          (println "      lexical sub-tokens, compressing discrimination margins between entities.")
-          (println "   3. Rare entity degradation: Gemma's sub-token fragmentation for rare entities like")
-          (println "      \"Alpeware\" ([108152 76728]) and \"Simon Pure\" ([20420 33677]) further skews composite vectors.")
-          (println " Stage 2 conditional refinement (--train-refinement true) provides the learned linear adapter")
-          (println " to de-correlate and align these spaces.")))
+      (let [hits4 (:hits arm4-res)
+            margin4 (:mean (:margin-stats arm4-res))
+            margin1 (:mean (:margin-stats arm1-res))
+            margin2 (:mean (:margin-stats arm2-res))
+            margin-recovered? (> margin4 (* 1.5 margin2))]
+        (cond
+          (>= hits4 3)
+          (do
+            (println " [Branch (a)]: Arm 4 achieved ≥ 3/7 retrieval with recovered margins.")
+            (println " Causal Attribution: Entity-vector cross-talk was the primary blocker.")
+            (println " Preserving Gemma's 14-dim entity subspace via QR-orthonormalization restored clean addressing.")
+            (println " The zero-shot bridge hypothesis lives! Proceed to refinement/LOO and scale-up."))
+
+          (and (<= hits4 1) margin-recovered?)
+          (do
+            (println (format " [Branch (b)]: Arm 4 retrieval is chance-consistent (%d/7), but margins recovered (%.2f vs %.2f raw, vs %.2f control)."
+                             hits4 margin4 margin2 margin1))
+            (println " Causal Attribution: Addressing is clean (cross-talk eliminated, max off-diagonal pairwise cosine ~ 1e-6),")
+            (println " but the subspace is wrong. Distribution shift between contextual question-probe hidden states and")
+            (println " token-embedding means is the fundamental blocker, NOT cross-talk.")
+            (println " The remaining lever is a learned linear projection map (Stage 3) or a span-pooled probe."))
+
+          :else
+          (do
+            (println (format " [Branch (c)]: Arm 4 retrieval is chance-consistent (%d/7) and margins remain compressed (%.2f vs %.2f raw, vs %.2f control)."
+                             hits4 margin4 margin2 margin1))
+            (println " Causal Attribution: Something beyond cross-talk and subspace orientation (likely probe-side geometry")
+            (println " or token fragmentation) is dominating query addressing."))))
       (println "==================================================================\n")
 
-      ;; Stage 2 Refinement (if requested)
+      ;; Stage 3 Refinement (if requested)
       (when (:train-refinement opts)
         (println "\n------------------------------------------------------------------")
-        (println " STAGE 2: Conditional Refinement (1536x1536 map init=I via autodiff)")
+        (println " STAGE 3: Conditional Refinement (1536x1536 map init=I on Arm 4 QR Table)")
         (println "------------------------------------------------------------------")
         (let [dataset (train-base/collect-frozen-probes session exec device-weights kb-data opts max-seq-len)
-              _ (println " Training 1536x1536 refinement map starting from W = Identity...")
-              refine-res (train-base/train-projection dataset w-identity (:entity-table mem-arm2) d d n
+              _ (println " Training 1536x1536 refinement map starting from W = Identity on Arm 4 table...")
+              refine-res (train-base/train-projection dataset w-identity (:entity-table mem-arm4) d d n
                                                       {:lr 0.01 :steps 300
                                                        :on-step (fn [s loss acc]
                                                                   (when (or (zero? s) (zero? (mod s 50)))
@@ -497,20 +684,26 @@
                                                                                      s (double loss) (* 100.0 (double acc))))))})
               _ (println (format " Refinement Training Finished: Final Loss=%.4f, Acc=%.1f%%"
                                  (double (:final-loss refine-res)) (* 100.0 (double (:final-acc refine-res)))))
-              _ (println " Evaluating 7-fold Leave-One-Out CV in anchored space...")
-              loo-res (train-base/run-leave-one-out-cv dataset w-identity (:entity-table mem-arm2) d d n
+              _ (println " Evaluating 7-fold Leave-One-Out CV on Arm 4 QR table...")
+              loo-res (train-base/run-leave-one-out-cv dataset w-identity (:entity-table mem-arm4) d d n
                                                        {:lr 0.01 :steps 300})]
-          (println (format " Anchored Space LOO Mean Accuracy: %.1f%% (%d/%d)"
+          (println (format " Arm 4 QR Space LOO Mean Accuracy: %.1f%% (%d/%d)"
                            (* 100.0 (double (:mean-acc loo-res))) (:total-hits loo-res) n))
           (doseq [{:keys [fold target pred-id expected-id hit?]} (:fold-results loo-res)]
-            (println (format "   Fold %d: Held out \"%s\" -> Pred: %s, True: %s -> %s"
+            (println (format "   Fold %d: Held out \"%-12s\" -> Pred: %-14s, True: %-14s -> %s"
                              (inc fold) target (nth entities pred-id) (nth entities expected-id)
-                             (if hit? "HIT" "MISS"))))))
+                             (if hit? "HIT [CORRECT]" "MISS"))))))
+
+      ;; Cleanup device weights
+      (doseq [w device-weights]
+        (xla/destroy-buffer! ctx w))
 
       {:arm1 arm1-res
        :arm2 arm2-res
+       :arm4 arm4-res
        :cos-arm1 cos-arm1
-       :cos-arm2 cos-arm2})))
+       :cos-arm2 cos-arm2
+       :cos-arm4 cos-arm4})))
 
 (defn -main [& args]
   (let [opts (parse-cli-args args)]

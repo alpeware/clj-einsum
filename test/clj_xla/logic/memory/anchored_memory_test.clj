@@ -1,6 +1,7 @@
 (ns clj-xla.logic.memory.anchored-memory-test
   "Unit, generative, and invariant tests for LLM-anchored entity embeddings in scripts.poc-anchored-memory."
-  (:require [clj-xla.tokenizer.core :as tok]
+  (:require [clj-xla.logic.memory.relation :as mem]
+            [clj-xla.tokenizer.core :as tok]
             [clj-xla.tokenizer.protocol :refer [bos-id decode encode]]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -165,3 +166,168 @@
           t2 (anchored/build-llm-anchored-table reader-fn nil tok-mock entities dim 1)]
       (is (java.util.Arrays/equals ^floats (:entity-table t1) ^floats (:entity-table t2))
           "Anchored tables must be bit-identical across runs"))))
+
+;; ==============================================================================
+;; 6. Orthonormalization (Modified Gram-Schmidt in f64 -> f32)
+;; ==============================================================================
+
+(def gen-matrix-dimensions
+  (gen/bind (gen/choose 2 5)
+            (fn [n]
+              (gen/bind (gen/choose n 12)
+                        (fn [d]
+                          (gen/tuple (gen/return n)
+                                     (gen/return d)
+                                     (gen/vector (gen/double* {:min -5.0 :max 5.0 :NaN? false :infinite? false})
+                                                 (* n d))))))))
+
+(defspec prop-mgs-orthonormality 25
+  (prop/for-all [[n d flat-doubles] gen-matrix-dimensions]
+                (let [arr (float-array (map float flat-doubles))
+                      q (anchored/orthonormalize-table arr n d)]
+      ;; Every row must have unit Euclidean length
+                  (and (every? (fn [i]
+                                 (let [row-offset (* i d)
+                                       sum-sq (reduce + (map (fn [k]
+                                                               (let [val (double (aget ^floats q (+ row-offset k)))]
+                                                                 (* val val)))
+                                                             (range d)))]
+                                   (< (Math/abs (- sum-sq 1.0)) 1e-4)))
+                               (range n))
+           ;; Every distinct pair must have dot product close to 0
+                       (every? (fn [[i j]]
+                                 (let [oi (* i d)
+                                       oj (* j d)
+                                       dot (reduce + (map (fn [k]
+                                                            (* (double (aget ^floats q (+ oi k)))
+                                                               (double (aget ^floats q (+ oj k)))))
+                                                          (range d)))]
+                                   (< (Math/abs dot) 1e-4)))
+                               (for [i (range n) j (range n) :when (not= i j)] [i j]))))))
+
+(deftest test-mgs-reconstruction-in-span
+  (testing "Every row vector in the original matrix can be reconstructed from the orthonormal basis Q"
+    (let [n 3
+          d 5
+          raw (float-array [1.0 2.0 0.0 -1.0 0.5
+                            0.0 1.0 3.0 2.0 -0.5
+                            2.0 -1.0 1.0 0.0 1.0])
+          q (anchored/orthonormalize-table raw n d)]
+      (dotimes [i n]
+        (let [row-offset (* i d)
+              x-rec (float-array d)]
+          (dotimes [j n]
+            (let [qj-offset (* j d)
+                  dot (loop [k 0 s 0.0]
+                        (if (>= k d)
+                          s
+                          (recur (inc k) (+ s (* (double (aget ^floats raw (+ row-offset k)))
+                                                 (double (aget ^floats q (+ qj-offset k))))))))]
+              (dotimes [k d]
+                (aset-float x-rec k (+ (aget x-rec k) (float (* dot (aget ^floats q (+ qj-offset k)))))))))
+          (dotimes [k d]
+            (let [orig (double (aget ^floats raw (+ row-offset k)))
+                  rec (double (aget x-rec k))]
+              (is (< (Math/abs (- orig rec)) 1e-4)
+                  (format "Row %d, col %d reconstruction error: orig=%.4f, rec=%.4f" i k orig rec)))))))))
+
+(deftest test-orthonormalize-table-determinism
+  (testing "Repeated calls to orthonormalize-table on identical inputs produce bit-identical results"
+    (let [n 3
+          d 4
+          raw (float-array [1.0 2.0 3.0 4.0
+                            0.0 1.0 0.0 1.0
+                            -1.0 0.5 2.0 0.0])
+          q1 (anchored/orthonormalize-table raw n d)
+          q2 (anchored/orthonormalize-table raw n d)]
+      (is (java.util.Arrays/equals ^floats q1 ^floats q2)
+          "Orthonormalized tables must be bit-identical across runs"))))
+
+(deftest test-orthonormalize-table-degenerate-input
+  (testing "Orthonormalization handles duplicate, parallel, and zero rows without producing NaNs"
+    (let [n 5
+          d 6
+          raw (float-array [1.0 2.0 0.0 1.0 0.0 0.0
+                            1.0 2.0 0.0 1.0 0.0 0.0
+                            2.0 4.0 0.0 2.0 0.0 0.0
+                            0.0 0.0 0.0 0.0 0.0 0.0
+                            0.0 0.0 1.0 0.0 0.0 1.0])
+          q (anchored/orthonormalize-table raw n d)]
+      ;; 1. No NaNs or Infinities
+      (dotimes [idx (* n d)]
+        (let [v (aget ^floats q idx)]
+          (is (not (Float/isNaN v)) (str "Value at index " idx " must not be NaN"))
+          (is (not (Float/isInfinite v)) (str "Value at index " idx " must not be Infinite"))))
+
+      ;; 2. Strict orthonormality: Q Q^T = I
+      (dotimes [i n]
+        (let [oi (* i d)
+              norm-sq (loop [k 0 s 0.0]
+                        (if (>= k d) s (let [v (double (aget ^floats q (+ oi k)))]
+                                         (recur (inc k) (+ s (* v v))))))]
+          (is (< (Math/abs (- norm-sq 1.0)) 1e-4) (str "Row " i " must have unit length"))
+          (dotimes [j i]
+            (let [oj (* j d)
+                  dot (loop [k 0 s 0.0]
+                        (if (>= k d) s (recur (inc k) (+ s (* (double (aget ^floats q (+ oi k)))
+                                                              (double (aget ^floats q (+ oj k))))))))]
+              (is (< (Math/abs dot) 1e-4) (str "Rows " i " and " j " must be orthogonal")))))))))
+
+(deftest test-qr-memory-pipeline-synthetic
+  (testing "Pipeline with init-qr-anchored-memory and accumulate-fact! on synthetic case"
+    (let [n 3
+          d 4
+          k 1
+          raw-table (float-array [1.0 2.0 0.0 1.0
+                                  0.0 1.0 3.0 0.0
+                                  2.0 0.0 1.0 4.0])
+          raw-mem {:entity-table raw-table
+                   :entity-shape [n d]
+                   :cores (float-array (* k d d))
+                   :core-shape [k d d]
+                   :entity-count n
+                   :dim d
+                   :relation-count k}
+          qr-mem (anchored/init-qr-anchored-memory raw-mem)
+          ^floats q-table (:entity-table qr-mem)]
+      (is (= [n d] (:entity-shape qr-mem)))
+      (is (= [k d d] (:core-shape qr-mem)))
+      (is (= (* n d) (alength q-table)))
+      ;; Accumulate fact: head=0, rel=0, tail=1
+      (mem/accumulate-fact! (:cores qr-mem) q-table 0 0 1 d)
+      ;; Hand-computed outer product: cores[i * d + j] = q[0, i] * q[1, j]
+      (dotimes [i d]
+        (dotimes [j d]
+          (let [expected (* (double (aget q-table i))
+                            (double (aget q-table (+ d j))))
+                actual (double (aget ^floats (:cores qr-mem) (+ (* i d) j)))]
+            (is (< (Math/abs (- actual expected)) 1e-6)
+                (format "Core[%d, %d] mismatch: actual=%.6f, expected=%.6f" i j actual expected))))))))
+
+(deftest test-calibrated-threshold-metrics-synthetic
+  (testing "compute-score-scale-stats calculates accurate mean, std, calibrated threshold, and pass rates"
+    (let [results [{:top-1-score 2.0}
+                   {:top-1-score 4.0}
+                   {:top-1-score 6.0}]
+          stats (anchored/compute-score-scale-stats results 0.5)]
+      (is (== 4.0 (double (:mean stats))))
+      (is (< (Math/abs (- (double (:std stats)) 1.632993)) 1e-4))
+      (is (== 0.5 (double (:fixed-threshold stats))))
+      (is (== 2.0 (double (:calibrated-threshold stats))))
+      (is (= 3 (:fixed-passes stats)))
+      (is (== 1.0 (double (:fixed-pass-rate stats))))
+      (is (= 2 (:calibrated-passes stats)))
+      (is (< (Math/abs (- (double (:calibrated-pass-rate stats)) (/ 2.0 3.0))) 1e-6)))
+
+    (testing "compute-score-scale-stats handles compressed scores below fixed threshold"
+      (let [results [{:top-1-score 0.1}
+                     {:top-1-score 0.3}
+                     {:top-1-score 0.2}]
+            stats (anchored/compute-score-scale-stats results 0.5)]
+        (is (< (Math/abs (- (double (:mean stats)) 0.2)) 1e-6))
+        (is (< (Math/abs (- (double (:calibrated-threshold stats)) 0.1)) 1e-6))
+        (is (= 0 (:fixed-passes stats)))
+        (is (== 0.0 (double (:fixed-pass-rate stats))))
+        (is (= 2 (:calibrated-passes stats)))
+        (is (< (Math/abs (- (double (:calibrated-pass-rate stats)) (/ 2.0 3.0))) 1e-6))))))
+
