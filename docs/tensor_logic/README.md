@@ -70,11 +70,14 @@ Detailed technical comparison with contemporary neuro-symbolic research and open
 
 ### 4. 🚀 [Strategic Roadmap & Consumer Hardware Experiments](future_experiments.md)
 Actionable research program and proposed architectures explicitly designed for **consumer GPUs** (24GB VRAM, AMD RDNA3 / NVIDIA Ada Lovelace):
-- **Experiment E1**: Cross-Attention Memory Probe (learned query token overcoming prompt template dominance).
-- **Experiment E2**: Knowledge-Graph Masked Attention (in-graph StableHLO attention masking).
-- **Experiment E3**: Contrastive Subspace Pre-training on Knowledge Graph Corpora (FB15k-237).
-- **Experiment E4**: In-VRAM Datalog Fixpoint State Tracker for 100+ turn agent trajectories.
-- **Experiment E5**: Zero-Gradient Ephemeral Online Learning from agent tool interactions.
+- **Experiments E1–E5**: Core memory primitives (CAMP, KG masking, contrastive subspace, Datalog state tracking, fast weights).
+- **Experiments E6–E9**: Unified TL-block, SWE agent benchmark, in-VRAM relation induction, and native TL-Nano pre-training.
+
+### 5. 🏛️ [The Two Pillars of Neuro-Symbolic Transformers & Novelty Assessment](architectural_pillars_and_novelty.md)
+Comprehensive architectural breakdown, commercial enterprise positioning, and global literature novelty assessment:
+- **Pillar 1 (Ecosystem Leverage)**: Grafting In-VRAM Datalog state tracking and ephemeral memory onto frozen open-weights models (Gemma 4), achieving $100\%$ deductive accuracy across 100 turns with $> 60\times$ VRAM savings.
+- **Pillar 2 (Groundbreaking Native Foundation Architecture — TL-Nano)**: Decoupling factual memorization from semantic routing, enabling a **$50\%$ reduction in feed-forward MLP parameters** ($D_{\text{ff}} = 2D$) and fitting full 1B-class pre-training within 24GB consumer VRAM.
+- **Industry Novelty Analysis**: Comparative positioning against Pedro Domingos (2025), Fast Weight Programmers, Knowledge-Enhanced Transformers, and Mixture of Experts.
 
 ---
 
@@ -83,6 +86,8 @@ Actionable research program and proposed architectures explicitly designed for *
 | Subsystem | Source Path | Test Path |
 | :--- | :--- | :--- |
 | **Relational Memory & Superposition** | [`clj_xla.logic.memory.relation`](../../src/clj_xla/logic/memory/relation.clj) | [`clj_xla.logic.memory.relation-test`](../../test/clj_xla/logic/memory/relation_test.clj) |
+| **Unified TL-Transformer Block** | [`clj_xla.logic.models.tl_block`](../../src/clj_xla/logic/models/tl_block.clj) | [`clj_xla.logic.models.tl_block-test`](../../test/clj_xla/logic/models/tl_block_test.clj) |
+| **TL-Nano Foundation Model** | [`clj_xla.logic.models.tl_nano`](../../src/clj_xla/logic/models/tl_nano.clj) | [`clj_xla.logic.models.tl_nano-test`](../../test/clj_xla/logic/models/tl_nano_test.clj) |
 | **Symbolic Logic & Datalog Fixpoints** | [`clj_xla.logic.symbolic`](../../src/clj_xla/logic/symbolic.clj) | [`clj_xla.logic.symbolic-test`](../../test/clj_xla/logic/symbolic_test.clj) |
 | **Value-Carrying Semirings** | [`clj_xla.logic.semiring`](../../src/clj_xla/logic/semiring.clj) | [`clj_xla.logic.semiring-test`](../../test/clj_xla/logic/semiring_test.clj) |
 | **Autodiff Adjoints for Probes** | [`clj_xla.logic.autodiff`](../../src/clj_xla/logic/autodiff.clj) | [`clj_xla.logic.autodiff-test`](../../test/clj_xla/logic/autodiff_test.clj) |
