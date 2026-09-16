@@ -105,7 +105,7 @@
    Returns {:facts {rel-kw #{...}} :strata {rel-kw stratum-int}}."
   [{:keys [rules facts n d seed max-iters threshold] :as _opts}]
   (let [n-long (long n)
-        d-long (long (or d 256))
+        d-long (long (or d 512))
         thresh (double (or threshold 0.5))
         max-it (long (or max-iters 10))
         strata (stratify-program rules)

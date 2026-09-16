@@ -96,7 +96,7 @@
                       res (strat/eval-stratified {:rules rules
                                                   :facts facts
                                                   :n n
-                                                  :d 256
+                                                  :d 512
                                                   :seed seed})
                       reach (get-in res [:facts :reach] #{})
                       unconn (get-in res [:facts :unconnected] #{})]
