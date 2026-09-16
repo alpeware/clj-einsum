@@ -33,6 +33,7 @@
             [clj-xla.logic.memory.train-mem-projection-test]
             [clj-xla.logic.memory.anchored-memory-test]
             [clj-xla.logic.memory.camp-test]
+            [clj-xla.logic.memory.ephemeral-test]
             [clj-xla.logic.agent.state-tracker-test]
             [clj-xla.logic.semiring-test]
             [clj-xla.logic.smollm-test]
@@ -109,6 +110,7 @@
                            'clj-xla.logic.memory.train-mem-projection-test
                            'clj-xla.logic.memory.anchored-memory-test
                            'clj-xla.logic.memory.camp-test
+                           'clj-xla.logic.memory.ephemeral-test
                            'clj-xla.logic.agent.state-tracker-test
                            'clj-xla.core-test)
         rocm-res (isolated-runner/run-isolated-test 'clj-xla.integration.rocm-e2e-test {"HIP_VISIBLE_DEVICES" "0" "ROCR_VISIBLE_DEVICES" "0"})
