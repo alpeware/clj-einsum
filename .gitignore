@@ -7,7 +7,8 @@ pom.xml.asc
 /classes/
 /target/
 /checkouts/
-data/
+data/*
+!data/*.edn
 backtests/
 logs/
 bin/

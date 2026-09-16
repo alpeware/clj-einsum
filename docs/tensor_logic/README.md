@@ -72,6 +72,7 @@ Detailed technical comparison with contemporary neuro-symbolic research and open
 Actionable research program and proposed architectures explicitly designed for **consumer GPUs** (24GB VRAM, AMD RDNA3 / NVIDIA Ada Lovelace):
 - **Experiments E1–E5**: Core memory primitives (CAMP, KG masking, contrastive subspace, Datalog state tracking, fast weights).
 - **Experiments E6–E9**: Unified TL-block, SWE agent benchmark, in-VRAM relation induction, and native TL-Nano pre-training.
+- **Experiment E10**: Real-world knowledge pre-training (`data/wikifacts_corpus.edn`) with real GPT-2 BPE tokenizer and zero-shot cloze QA evaluation.
 
 ### 5. 🏛️ [The Two Pillars of Neuro-Symbolic Transformers & Novelty Assessment](architectural_pillars_and_novelty.md)
 Comprehensive architectural breakdown, commercial enterprise positioning, and global literature novelty assessment:
@@ -93,3 +94,5 @@ Comprehensive architectural breakdown, commercial enterprise positioning, and gl
 | **Autodiff Adjoints for Probes** | [`clj_xla.logic.autodiff`](../../src/clj_xla/logic/autodiff.clj) | [`clj_xla.logic.autodiff-test`](../../test/clj_xla/logic/autodiff_test.clj) |
 | **LLM-Anchored Memory & QR** | [`scripts.poc-anchored-memory`](../../scripts/poc_anchored_memory.clj) | [`clj_xla.logic.memory.anchored-memory-test`](../../test/clj_xla/logic/memory/anchored_memory_test.clj) |
 | **Gemma 4 Grounding AST Block** | [`clj_xla.logic.models.gemma`](../../src/clj_xla/logic/models/gemma.clj) | [`clj_xla.integration.rocm-e2e-test`](../../test/clj_xla/integration/rocm_e2e_test.clj) |
+| **TL-Nano Real-Data Pre-training** | [`scripts.poc-tl-nano-real-data`](../../scripts/poc_tl_nano_real_data.clj) | [`clj_xla.logic.models.tl_nano-test`](../../test/clj_xla/logic/models/tl_nano_test.clj) |
+

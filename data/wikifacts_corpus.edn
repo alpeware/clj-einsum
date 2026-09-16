@@ -1,0 +1,145 @@
+{:entities
+ ["Anthropic" "Dario Amodei"
+  "OpenAI" "Sam Altman"
+  "Google DeepMind" "Demis Hassabis"
+  "Tesla" "Elon Musk"
+  "Apple" "Tim Cook"
+  "Microsoft" "Satya Nadella"
+  "Alpeware" "Simon Pure"
+  "Linux" "Linus Torvalds"
+  "Clojure" "Rich Hickey"
+  "Python" "Guido van Rossum"
+  "Git" "OpenXLA" "StableHLO"
+  "Tensor Logic" "Pedro Domingos"
+  "San Francisco" "Cupertino" "Redmond" "Austin"
+  "JVM" "AMD" "ROCm" "NVIDIA" "CUDA"]
+
+ :relations
+ [:ceo_of :created_by :headquartered_in :compiles :formulated_by :runs_on :developed_by]
+
+ :triples
+ [["Anthropic" :ceo_of "Dario Amodei"]
+  ["OpenAI" :ceo_of "Sam Altman"]
+  ["Google DeepMind" :ceo_of "Demis Hassabis"]
+  ["Tesla" :ceo_of "Elon Musk"]
+  ["Apple" :ceo_of "Tim Cook"]
+  ["Microsoft" :ceo_of "Satya Nadella"]
+  ["Alpeware" :ceo_of "Simon Pure"]
+  ["Clojure" :created_by "Rich Hickey"]
+  ["Linux" :created_by "Linus Torvalds"]
+  ["Python" :created_by "Guido van Rossum"]
+  ["Git" :created_by "Linus Torvalds"]
+  ["OpenXLA" :compiles "StableHLO"]
+  ["Tensor Logic" :formulated_by "Pedro Domingos"]
+  ["Anthropic" :headquartered_in "San Francisco"]
+  ["OpenAI" :headquartered_in "San Francisco"]
+  ["Apple" :headquartered_in "Cupertino"]
+  ["Microsoft" :headquartered_in "Redmond"]
+  ["Tesla" :headquartered_in "Austin"]
+  ["Clojure" :runs_on "JVM"]
+  ["ROCm" :developed_by "AMD"]
+  ["CUDA" :developed_by "NVIDIA"]]
+
+ :sentences
+ ["Dario Amodei is the CEO of Anthropic, an AI safety research laboratory."
+  "Anthropic is led by chief executive officer Dario Amodei in San Francisco."
+  "Who is the CEO of Anthropic? Dario Amodei is the CEO."
+  "Dario Amodei guides research and operations as the CEO of Anthropic."
+  "Anthropic, founded by Dario Amodei, develops reliable and steerable AI systems."
+
+  "Sam Altman is the CEO of OpenAI, based in San Francisco."
+  "OpenAI is led by chief executive officer Sam Altman."
+  "Who is the CEO of OpenAI? Sam Altman is the CEO."
+  "Sam Altman oversees frontier model development as the CEO of OpenAI."
+  "OpenAI, guided by CEO Sam Altman, focuses on artificial general intelligence."
+
+  "Demis Hassabis is the CEO of Google DeepMind, leading frontier artificial intelligence."
+  "Google DeepMind is directed by chief executive officer Demis Hassabis."
+  "Who is the CEO of Google DeepMind? Demis Hassabis is the CEO."
+  "Demis Hassabis co-founded and leads Google DeepMind as its chief executive."
+  "Google DeepMind, headed by Demis Hassabis, solves fundamental scientific challenges."
+
+  "Elon Musk is the CEO of Tesla, an electric vehicle and clean energy company."
+  "Tesla is led by chief executive officer Elon Musk in Austin."
+  "Who is the CEO of Tesla? Elon Musk is the CEO."
+  "Elon Musk oversees automotive engineering and robotics as the CEO of Tesla."
+  "Tesla designs advanced autonomous vehicles under the leadership of Elon Musk."
+
+  "Tim Cook is the CEO of Apple, located in Cupertino, California."
+  "Apple is led by chief executive officer Tim Cook."
+  "Who is the CEO of Apple? Tim Cook is the CEO."
+  "Tim Cook directs global hardware and software strategy as the CEO of Apple."
+  "Apple designs consumer electronics under the executive leadership of Tim Cook."
+
+  "Satya Nadella is the CEO of Microsoft, headquartered in Redmond, Washington."
+  "Microsoft is led by chief executive officer Satya Nadella."
+  "Who is the CEO of Microsoft? Satya Nadella is the CEO."
+  "Satya Nadella drives cloud computing and enterprise platforms as the CEO of Microsoft."
+  "Microsoft expands intelligent cloud infrastructure under CEO Satya Nadella."
+
+  "Simon Pure is the founder and lead architect of Alpeware."
+  "Alpeware is led by founder Simon Pure, developing high-performance tensor logic systems."
+  "Who is the CEO of Alpeware? Simon Pure is the CEO."
+  "Simon Pure architects declarative neuro-symbolic runtimes at Alpeware."
+  "Alpeware advances tensor logic architectures under founder Simon Pure."
+
+  "Rich Hickey is the creator of Clojure, a hosted functional programming language."
+  "Clojure was designed and created by software craftsman Rich Hickey."
+  "Who created Clojure? Rich Hickey created Clojure."
+  "Rich Hickey designed Clojure as a practical Lisp dialect that runs on the JVM."
+  "Clojure combines simplicity, immutability, and concurrency, created by Rich Hickey."
+
+  "Linus Torvalds created Linux, a free Unix-like operating system kernel."
+  "Linux was originally developed and created by Linus Torvalds."
+  "Who created Linux? Linus Torvalds created Linux."
+  "Linus Torvalds designed the Linux kernel to provide a reliable open source foundation."
+  "Linux powers servers, supercomputers, and mobile devices, created by Linus Torvalds."
+
+  "Guido van Rossum is the creator of Python, a high-level programming language."
+  "Python was designed and created by Dutch programmer Guido van Rossum."
+  "Who created Python? Guido van Rossum created Python."
+  "Guido van Rossum emphasized code readability and clean syntax when creating Python."
+  "Python enables rapid prototyping and scientific computing, created by Guido van Rossum."
+
+  "Linus Torvalds created the Git distributed version control system."
+  "Git was designed and created by Linus Torvalds to manage Linux development."
+  "Who created Git? Linus Torvalds created Git."
+
+  "OpenXLA compiles StableHLO computation graphs into optimized machine code."
+  "StableHLO is a portable operation set compiled directly by OpenXLA."
+  "What does OpenXLA compile? OpenXLA compiles StableHLO."
+  "OpenXLA delivers high-performance kernel generation for StableHLO programs."
+
+  "Pedro Domingos formulated Declarative Tensor Logic for unified neuro-symbolic AI."
+  "Declarative Tensor Logic was introduced and formulated by Pedro Domingos."
+  "Who formulated Declarative Tensor Logic? Pedro Domingos formulated it."
+  "Pedro Domingos unified first-order logic and tensor contractions in Tensor Logic."
+
+  "Anthropic is headquartered in San Francisco, California."
+  "OpenAI is headquartered in San Francisco, near Mission District."
+  "Apple is headquartered in Cupertino, at Apple Park."
+  "Microsoft is headquartered in Redmond, Washington."
+  "Tesla is headquartered in Austin, Texas."
+  "Clojure is a hosted language that runs on the JVM."
+  "ROCm is an open-source software stack developed by AMD for GPU acceleration."
+  "CUDA is a proprietary parallel computing platform developed by NVIDIA."]
+
+ :eval_prompts
+ [{:prompt "The CEO of Anthropic is" :target "Dario Amodei" :head "Anthropic" :rel :ceo_of}
+  {:prompt "The CEO of OpenAI is" :target "Sam Altman" :head "OpenAI" :rel :ceo_of}
+  {:prompt "The CEO of Google DeepMind is" :target "Demis Hassabis" :head "Google DeepMind" :rel :ceo_of}
+  {:prompt "The CEO of Tesla is" :target "Elon Musk" :head "Tesla" :rel :ceo_of}
+  {:prompt "The CEO of Apple is" :target "Tim Cook" :head "Apple" :rel :ceo_of}
+  {:prompt "The CEO of Microsoft is" :target "Satya Nadella" :head "Microsoft" :rel :ceo_of}
+  {:prompt "The CEO of Alpeware is" :target "Simon Pure" :head "Alpeware" :rel :ceo_of}
+  {:prompt "Clojure was created by" :target "Rich Hickey" :head "Clojure" :rel :created_by}
+  {:prompt "Linux was created by" :target "Linus Torvalds" :head "Linux" :rel :created_by}
+  {:prompt "Python was created by" :target "Guido van Rossum" :head "Python" :rel :created_by}
+  {:prompt "Git was created by" :target "Linus Torvalds" :head "Git" :rel :created_by}
+  {:prompt "OpenXLA compiles" :target "StableHLO" :head "OpenXLA" :rel :compiles}
+  {:prompt "Declarative Tensor Logic was formulated by" :target "Pedro Domingos" :head "Tensor Logic" :rel :formulated_by}
+  {:prompt "Apple is headquartered in" :target "Cupertino" :head "Apple" :rel :headquartered_in}
+  {:prompt "Microsoft is headquartered in" :target "Redmond" :head "Microsoft" :rel :headquartered_in}
+  {:prompt "Tesla is headquartered in" :target "Austin" :head "Tesla" :rel :headquartered_in}
+  {:prompt "ROCm is developed by" :target "AMD" :head "ROCm" :rel :developed_by}
+  {:prompt "CUDA is developed by" :target "NVIDIA" :head "CUDA" :rel :developed_by}]}

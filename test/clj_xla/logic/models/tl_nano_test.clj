@@ -230,3 +230,27 @@
           loss-1 (nano/compute-joint-loss fwd-exec updated-params batch cfg)]
       ;; Total loss decreases after gradient step
       (is (<= (:total-loss loss-1) (:total-loss loss-0))))))
+
+;; ==============================================================================
+;; 5. Real-World Knowledge Corpus & Batching Tests
+;; ==============================================================================
+
+(deftest test-real-data-corpus-structure-and-batching
+  (testing "Wikifacts corpus EDN file is well-formed with required entity, relation, triple, and prompt keys"
+    (let [corpus (read-string (slurp "data/wikifacts_corpus.edn"))]
+      (is (vector? (:entities corpus)))
+      (is (vector? (:relations corpus)))
+      (is (vector? (:triples corpus)))
+      (is (vector? (:sentences corpus)))
+      (is (vector? (:eval_prompts corpus)))
+      (is (>= (count (:entities corpus)) 20))
+      (is (>= (count (:triples corpus)) 20))
+      (is (>= (count (:sentences corpus)) 50))
+      (is (>= (count (:eval_prompts corpus)) 15))
+      ;; Verify prompt structure
+      (doseq [ep (:eval_prompts corpus)]
+        (is (string? (:prompt ep)))
+        (is (string? (:target ep)))
+        (is (string? (:head ep)))
+        (is (keyword? (:rel ep)))))))
+
