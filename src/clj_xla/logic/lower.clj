@@ -527,17 +527,23 @@
        (swap! eqns-atom conj c-neg-eqn c-neg-4d-eqn c-zero-eqn c-zero-4d-eqn dyn-mask-eqn mask-broad-eqn masked-eqn))
      (let [max-var (gen-id "t_smax" counter)
            max-eqn {:op :stablehlo/reduce_max :invars [masked-var] :outvars [max-var] :attrs {:axes [-1] :keep_dims true}}
+           max-bcast-var (gen-id "t_smax_bcast" counter)
+           max-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [max-var] :outvars [max-bcast-var]
+                          :attrs {:broadcast_dimensions [0 1 2 3] :target_shape [batch num-heads q-len kv-len]}}
            diff-var (gen-id "t_sdiff" counter)
-           diff-eqn {:op :stablehlo/subtract :invars [masked-var max-var] :outvars [diff-var]}
+           diff-eqn {:op :stablehlo/subtract :invars [masked-var max-bcast-var] :outvars [diff-var]}
            exp-var (gen-id "t_sexp" counter)
            exp-eqn {:op :stablehlo/exp :invars [diff-var] :outvars [exp-var]}
            sum-var (gen-id "t_ssum" counter)
            sum-eqn {:op :stablehlo/reduce_sum :invars [exp-var] :outvars [sum-var] :attrs {:axes [-1] :keep_dims true}}
+           sum-bcast-var (gen-id "t_ssum_bcast" counter)
+           sum-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [sum-var] :outvars [sum-bcast-var]
+                          :attrs {:broadcast_dimensions [0 1 2 3] :target_shape [batch num-heads q-len kv-len]}}
            f32-div-var (if needs-f32? (gen-id "t_sdiv" counter) final-out-var)
-           div-eqn {:op :stablehlo/divide :invars [exp-var sum-var] :outvars [f32-div-var]}
+           div-eqn {:op :stablehlo/divide :invars [exp-var sum-bcast-var] :outvars [f32-div-var]}
            conv-out-eqn (when needs-f32?
                           {:op :stablehlo/convert :invars [f32-div-var] :outvars [final-out-var] :attrs {:target_dtype orig-dtype}})]
-       (swap! eqns-atom conj max-eqn diff-eqn exp-eqn sum-eqn div-eqn)
+       (swap! eqns-atom conj max-eqn max-bcast-eqn diff-eqn exp-eqn sum-eqn sum-bcast-eqn div-eqn)
        (when needs-f32? (swap! eqns-atom conj conv-out-eqn))))))
 
 (defn- lower-chunked-attention!
@@ -777,35 +783,46 @@
                      :attrs {:shape [1 1 num-heads head-dim]}}]
     (swap! eqns-atom conj ctx-out-eqn)))
 
-(defn- lower-rms-norm! [eqns-atom counter _head in-term weight-term attrs final-out-var]
-  (let [in-name (first in-term)
-        weight-name (when weight-term (first weight-term))
-        gemma? (:gemma? attrs)
-        eps (or (:eps attrs) 1e-5)
-        sq-var (gen-id "rms_sq" counter)
-        sq-eqn {:op :stablehlo/multiply :invars [in-name in-name] :outvars [sq-var]}
-        mean-var (gen-id "rms_mean" counter)
-        mean-eqn {:op :stablehlo/reduce_mean :invars [sq-var] :outvars [mean-var] :attrs {:axes [-1] :keep_dims true}}
-        c-eps (gen-id "rms_eps" counter)
-        c-eps-eqn {:op :stablehlo/constant :value (double eps) :outvars [c-eps]}
-        mean-eps-var (gen-id "rms_mean_eps" counter)
-        mean-eps-eqn {:op :stablehlo/add :invars [mean-var c-eps] :outvars [mean-eps-var]}
-        rsqrt-var (gen-id "rms_rsqrt" counter)
-        rsqrt-eqn {:op :stablehlo/rsqrt :invars [mean-eps-var] :outvars [rsqrt-var]}
-        xhat-var (if weight-name (gen-id "rms_xhat" counter) final-out-var)
-        xhat-eqn {:op :stablehlo/multiply :invars [in-name rsqrt-var] :outvars [xhat-var]}]
-    (swap! eqns-atom conj sq-eqn mean-eqn c-eps-eqn mean-eps-eqn rsqrt-eqn xhat-eqn)
-    (when weight-name
-      (let [w-var (if gemma?
-                    (let [c-one (gen-id "rms_one" counter)
-                          c-one-eqn {:op :stablehlo/constant :value 1.0 :outvars [c-one]}
-                          w-plus-one (gen-id "rms_w1" counter)
-                          add-one-eqn {:op :stablehlo/add :invars [weight-name c-one] :outvars [w-plus-one]}]
-                      (swap! eqns-atom conj c-one-eqn add-one-eqn)
-                      w-plus-one)
-                    weight-name)
-            scaled-eqn {:op :stablehlo/multiply :invars [xhat-var w-var] :outvars [final-out-var]}]
-        (swap! eqns-atom conj scaled-eqn)))))
+(defn- lower-rms-norm!
+  ([eqns-atom counter head in-term weight-term attrs final-out-var]
+   (lower-rms-norm! eqns-atom counter head in-term weight-term attrs final-out-var nil))
+  ([eqns-atom counter _head in-term weight-term attrs final-out-var known-shapes]
+   (let [in-name (first in-term)
+         weight-name (when weight-term (first weight-term))
+         gemma? (:gemma? attrs)
+         eps (or (:eps attrs) 1e-5)
+         shape (when known-shapes (get known-shapes in-name))
+         sq-var (gen-id "rms_sq" counter)
+         sq-eqn {:op :stablehlo/multiply :invars [in-name in-name] :outvars [sq-var]}
+         mean-var (gen-id "rms_mean" counter)
+         mean-eqn {:op :stablehlo/reduce_mean :invars [sq-var] :outvars [mean-var] :attrs {:axes [-1] :keep_dims true}}
+         c-eps (gen-id "rms_eps" counter)
+         c-eps-eqn {:op :stablehlo/constant :value (double eps) :outvars [c-eps]}
+         mean-eps-var (gen-id "rms_mean_eps" counter)
+         mean-eps-eqn {:op :stablehlo/add :invars [mean-var c-eps] :outvars [mean-eps-var]}
+         rsqrt-var (gen-id "rms_rsqrt" counter)
+         rsqrt-eqn {:op :stablehlo/rsqrt :invars [mean-eps-var] :outvars [rsqrt-var]}
+         bcast? (boolean (and shape (pos? (count shape))))
+         rsqrt-bcast-var (if bcast? (gen-id "rms_rsqrt_bcast" counter) rsqrt-var)
+         bcast-eqn (when bcast?
+                     {:op :stablehlo/broadcast_in_dim :invars [rsqrt-var] :outvars [rsqrt-bcast-var]
+                      :attrs {:broadcast_dimensions (vec (range (count shape))) :target_shape shape}})
+         xhat-var (if weight-name (gen-id "rms_xhat" counter) final-out-var)
+         xhat-eqn {:op :stablehlo/multiply :invars [in-name rsqrt-bcast-var] :outvars [xhat-var]}]
+     (swap! eqns-atom conj sq-eqn mean-eqn c-eps-eqn mean-eps-eqn rsqrt-eqn)
+     (when bcast? (swap! eqns-atom conj bcast-eqn))
+     (swap! eqns-atom conj xhat-eqn)
+     (when weight-name
+       (let [w-var (if gemma?
+                     (let [c-one (gen-id "rms_one" counter)
+                           c-one-eqn {:op :stablehlo/constant :value 1.0 :outvars [c-one]}
+                           w-plus-one (gen-id "rms_w1" counter)
+                           add-one-eqn {:op :stablehlo/add :invars [weight-name c-one] :outvars [w-plus-one]}]
+                       (swap! eqns-atom conj c-one-eqn add-one-eqn)
+                       w-plus-one)
+                     weight-name)
+             scaled-eqn {:op :stablehlo/multiply :invars [xhat-var w-var] :outvars [final-out-var]}]
+         (swap! eqns-atom conj scaled-eqn))))))
 
 (defn- lower-rope!
   ([eqns-atom counter head in-term attrs final-out-var known-shapes]
@@ -1310,7 +1327,7 @@
           (or (= op :rms-norm) (= op :gemma-rms-norm))
           (lower-rms-norm! eqns-atom counter head (first body) (second body)
                            (if (= op :gemma-rms-norm) (assoc attrs :gemma? true) attrs)
-                           final-var)
+                           final-var known-shapes)
 
           (= op :rope)
           (lower-rope! eqns-atom counter head (first body) attrs final-var known-shapes default-dtype)
