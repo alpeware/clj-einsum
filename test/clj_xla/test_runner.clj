@@ -34,6 +34,7 @@
             [clj-xla.logic.memory.anchored-memory-test]
             [clj-xla.logic.memory.camp-test]
             [clj-xla.logic.memory.ephemeral-test]
+            [clj-xla.logic.memory.contrastive-test]
             [clj-xla.logic.attention.kg-masked-test]
             [clj-xla.logic.agent.state-tracker-test]
             [clj-xla.logic.semiring-test]
@@ -112,6 +113,7 @@
                            'clj-xla.logic.memory.anchored-memory-test
                            'clj-xla.logic.memory.camp-test
                            'clj-xla.logic.memory.ephemeral-test
+                           'clj-xla.logic.memory.contrastive-test
                            'clj-xla.logic.attention.kg-masked-test
                            'clj-xla.logic.agent.state-tracker-test
                            'clj-xla.core-test)
