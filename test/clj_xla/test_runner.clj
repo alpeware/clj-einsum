@@ -38,6 +38,7 @@
             [clj-xla.logic.memory.factorization-test]
             [clj-xla.logic.attention.kg-masked-test]
             [clj-xla.logic.models.tl-block-test]
+            [clj-xla.logic.models.tl-nano-test]
             [clj-xla.logic.agent.state-tracker-test]
             [clj-xla.logic.agent.swe-benchmark-test]
             [clj-xla.logic.semiring-test]
@@ -120,6 +121,7 @@
                            'clj-xla.logic.memory.factorization-test
                            'clj-xla.logic.attention.kg-masked-test
                            'clj-xla.logic.models.tl-block-test
+                           'clj-xla.logic.models.tl-nano-test
                            'clj-xla.logic.agent.state-tracker-test
                            'clj-xla.logic.agent.swe-benchmark-test
                            'clj-xla.core-test)
