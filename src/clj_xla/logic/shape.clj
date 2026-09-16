@@ -47,6 +47,8 @@
            (= (first eqn) :subtract)
            (= (first eqn) :*)
            (= (first eqn) :multiply)
+           (= (first eqn) :/)
+           (= (first eqn) :divide)
            (= (first eqn) :min)
            (= (first eqn) :minimum)
            (= (first eqn) :max)

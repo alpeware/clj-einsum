@@ -1441,6 +1441,12 @@
                                    :invars [(first (first body)) (first (second body))]
                                    :outvars [h-name]}))
 
+          (or (= op :/) (= op :divide))
+          (let [h-name (if (vector? head) (first head) head)]
+            (swap! eqns-atom conj {:op :stablehlo/divide
+                                   :invars [(first (first body)) (first (second body))]
+                                   :outvars [h-name]}))
+
           (or (= op :min) (= op :minimum))
           (let [h-name (if (vector? head) (first head) head)]
             (swap! eqns-atom conj {:op :stablehlo/minimum
