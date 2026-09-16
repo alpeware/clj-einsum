@@ -1,0 +1,90 @@
+# Declarative Tensor Logic & Relational Memory for LLMs
+
+Welcome to the **Declarative Tensor Logic & In-Tensor Relational Memory** knowledge base of `clj-xla`.
+
+This documentation suite establishes the theoretical foundations, empirical results, architectural comparisons, and long-term research roadmap for unifying Large Language Models (LLMs) with symbolic Knowledge Bases (KBs) via **Pedro Domingos' Declarative Tensor Logic**.
+
+All tensor contractions, relational memory updates, and neural layers execute via **OpenXLA** and **StableHLO MLIR** on consumer hardware (AMD ROCm RDNA3, Intel SYCL, NVIDIA CUDA, and CPU) with **Zero Java Escape Hatches**.
+
+---
+
+## 🎯 The Core Motivation: The LLM Triad Crisis
+
+State-of-the-art autoregressive Transformers face three interrelated fundamental crises when deployed in autonomous, long-horizon agentic environments:
+
+```mermaid
+flowchart TD
+    subgraph Triad ["The Autonomous Agent Triad Crisis"]
+        H["1. Hallucinations & Factual Drift<br/><i>(Unbounded probabilistic sampling)</i>"]
+        OL["2. Catastrophic Forgetting & No Online Learning<br/><i>(Static weights, costly gradient updates)</i>"]
+        LH["3. Long-Horizon Context Explosion<br/><i>(O(N²) attention, state drift over 100+ turns)</i>"]
+    end
+
+    TL["Pedro Domingos' Declarative Tensor Logic<br/>& In-Tensor Relational Memory"]
+
+    TL -->|Crisp Deductive Gating & In-Graph Verification| H
+    TL -->|Zero-Gradient Fast Weights O(1) Outer Products| OL
+    TL -->|Compact Resident Relational Cores O(1) Context| LH
+```
+
+1. **Hallucinations & Factual Unreliability**:
+   Autoregressive generation samples tokens according to probabilistic language statistics rather than deductive truth. When queried on relational facts, models interpolate over training distributions, yielding fluent but factually incorrect assertions.
+2. **Inability to Learn Online (Without Backpropagation)**:
+   Once compiled and deployed, updating model knowledge requires either prompt engineering (which burns finite context tokens and degrades over time) or parameter fine-tuning (LoRA/SFT), which is slow, induces catastrophic forgetting, and requires PCIe host synchronization.
+3. **Long-Horizon State Drift & Context Explosion**:
+   Autonomous software agents running for dozens or hundreds of turns accumulate massive context windows. Key-Value caches grow into tens of gigabytes, attention compute scales with $O(N^2)$, and subtle state transitions (e.g. task progress, tool state, environment facts) become diluted in the long prompt, causing execution failure.
+
+### The Tensor Logic Solution
+By representing entities as dense vector embeddings ($e \in \mathbb{R}^D$) and relations as resident matrix cores ($R_r \in \mathbb{R}^{D \times D}$) directly inside OpenXLA device memory (VRAM), knowledge operations become **compiled tensor contractions**:
+- **Deductive Gating**: Queries are projected into relational memory space; if retrieved confidence exceeds threshold $\tau$, the output distribution is crisp-gated to grounded entity tokens, provably eliminating hallucinations.
+- **Fast-Weight Online Learning**: New facts are stored instantaneously in GPU VRAM via outer-product superposition ($R_r \leftarrow R_r + e_h \otimes e_t$) in $O(D^2)$ forward compute with **zero backpropagation**.
+- **Constant-Space Agent State Tracking**: Agent environment state and multi-hop relations are tracked via compiled Datalog fixpoint iterations (`stablehlo.while`) in $O(1)$ context space.
+
+---
+
+## 📚 Documentation Index
+
+The Tensor Logic documentation suite is organized into four core modules:
+
+### 1. 📐 [Theoretical Foundations](theory.md)
+Detailed mathematical formulation of Pedro Domingos' Declarative Tensor Logic:
+- Dual interpretation of Einstein summation as logical conjunction and matrix contraction.
+- Value-carrying semirings (Boolean, Tropical, Fuzzy/Continuous, Softmax).
+- Datalog fixpoints, stratified negation, and compiled transitive closures.
+- Associative relational superposition memory, unbinding contractions, and capacity bounds.
+
+### 2. 🔬 [Empirical Experiments & Diagnostic Journey](empirical_journey.md)
+Comprehensive record of all experimental runs conducted on **Gemma 4 E2B** using **AMD Radeon RX 7900 XTX (24GB VRAM)**:
+- **Baseline (Stage 1)**: Fixed random projection & random entity table ($D=256 \to 0/7$, chance $7.1\%$).
+- **Task A (Span-Pooled Probe Ablation)**: Investigating syntactic template dominance vs. isolated head token spans.
+- **Task B (Learned Linear Probe via Autodiff)**: $7/7$ training memorization vs. $0/7$ Leave-One-Out generalization (6-shot sample efficiency wall).
+- **Task C (LLM-Anchored Token Embeddings)**: Naive $W=I$ zero-shot bridge refuted ($0/7$); discovery of representation anisotropy and 66% margin compression (pairwise cosine $0.2715$).
+- **Task D (QR-Orthonormalized Anchored Table)**: Modified Gram-Schmidt in $f64 \to f32$; surgical elimination of cross-talk (off-diagonal cosine exact $0.000000$); causal isolation of **probe-side distribution shift** as the true bottleneck.
+
+### 3. 🌐 [Related Work & Comparative Analysis](related_work.md)
+Detailed technical comparison with contemporary neuro-symbolic research and open-source implementations:
+- Deep-dive into `waylandzhang/tensorlogic` (`transformer_reasoning_demo.py`, `EmbeddingSpace`, attention heads as relation discovery, KG-masked attention).
+- Comparison with `pedronahum/tl-pjrt` (Python/JAX surface DSL vs bare-metal Clojure/PJRT systems compiler).
+- Connections to Fast Weights, Modern Hopfield Networks, and Memory-Augmented Neural Networks.
+- 6-dimensional architectural comparison matrix.
+
+### 4. 🚀 [Strategic Roadmap & Consumer Hardware Experiments](future_experiments.md)
+Actionable research program and proposed architectures explicitly designed for **consumer GPUs** (24GB VRAM, AMD RDNA3 / NVIDIA Ada Lovelace):
+- **Experiment E1**: Cross-Attention Memory Probe (learned query token overcoming prompt template dominance).
+- **Experiment E2**: Knowledge-Graph Masked Attention (in-graph StableHLO attention masking).
+- **Experiment E3**: Contrastive Subspace Pre-training on Knowledge Graph Corpora (FB15k-237).
+- **Experiment E4**: In-VRAM Datalog Fixpoint State Tracker for 100+ turn agent trajectories.
+- **Experiment E5**: Zero-Gradient Ephemeral Online Learning from agent tool interactions.
+
+---
+
+## ⚡ Repository Code Map
+
+| Subsystem | Source Path | Test Path |
+| :--- | :--- | :--- |
+| **Relational Memory & Superposition** | [`clj_xla.logic.memory.relation`](../../src/clj_xla/logic/memory/relation.clj) | [`clj_xla.logic.memory.relation-test`](../../test/clj_xla/logic/memory/relation_test.clj) |
+| **Symbolic Logic & Datalog Fixpoints** | [`clj_xla.logic.symbolic`](../../src/clj_xla/logic/symbolic.clj) | [`clj_xla.logic.symbolic-test`](../../test/clj_xla/logic/symbolic_test.clj) |
+| **Value-Carrying Semirings** | [`clj_xla.logic.semiring`](../../src/clj_xla/logic/semiring.clj) | [`clj_xla.logic.semiring-test`](../../test/clj_xla/logic/semiring_test.clj) |
+| **Autodiff Adjoints for Probes** | [`clj_xla.logic.autodiff`](../../src/clj_xla/logic/autodiff.clj) | [`clj_xla.logic.autodiff-test`](../../test/clj_xla/logic/autodiff_test.clj) |
+| **LLM-Anchored Memory & QR** | [`scripts.poc-anchored-memory`](../../scripts/poc_anchored_memory.clj) | [`clj_xla.logic.memory.anchored-memory-test`](../../test/clj_xla/logic/memory/anchored_memory_test.clj) |
+| **Gemma 4 Grounding AST Block** | [`clj_xla.logic.models.gemma`](../../src/clj_xla/logic/models/gemma.clj) | [`clj_xla.integration.rocm-e2e-test`](../../test/clj_xla/integration/rocm_e2e_test.clj) |

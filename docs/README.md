@@ -15,7 +15,17 @@ Welcome to the **`clj-xla` Architectural Documentation & LLM Knowledge Base**.
 
 ---
 
-## 📈 Empirical Hardware Benchmark Reports ([`benchmarks/`](../benchmarks/README.md))
+## 🧠 Declarative Tensor Logic & In-Tensor Relational Memory ([`tensor_logic/`](tensor_logic/README.md))
+
+Comprehensive theoretical foundations, empirical results, related work analysis, and consumer-hardware experimental roadmap for unifying LLMs with symbolic Knowledge Bases via Pedro Domingos' Declarative Tensor Logic:
+
+- 📖 **[Tensor Logic Overview & The Agent Triad Crisis](tensor_logic/README.md)**: Resolving hallucinations, online learning (zero backprop), and long-horizon context explosion in OpenXLA VRAM.
+- 📐 **[Theoretical Foundations](tensor_logic/theory.md)**: Logic as tensor contraction (Einstein summation as conjunction/quantification), value-carrying semirings (Boolean, Continuous, Tropical, Softmax), Datalog fixpoints, and outer-product superposition memory algebra.
+- 🔬 **[Empirical Experiments & Diagnostic Journey](tensor_logic/empirical_journey.md)**: Complete chronicle of experiments with Gemma 4 E2B on AMD ROCm (RX 7900 XTX), detailing the progression from de-oracled baseline to span-pooling, learned linear probes, LLM-anchored token embeddings, and QR-orthonormalization.
+- 🌐 **[Related Work & Comparative Analysis](tensor_logic/related_work.md)**: Deep technical comparison with `waylandzhang/tensorlogic`, `pedronahum/tl-pjrt`, Modern Continuous Hopfield Networks, Fast Weights, and RAG pipelines.
+- 🚀 **[Strategic Research Roadmap for Consumer Hardware](tensor_logic/future_experiments.md)**: Concrete proposals for Cross-Attention Memory Probes (E1), KG-Masked Attention (E2), Contrastive Subspace Pre-training (E3), In-VRAM Datalog Fixpoint State Trackers (E4), Zero-Gradient Fast Weights (E5), and the TL-Transformer architecture.
+
+---
 
 Empirical benchmark metrics for specific hardware and driver combinations are recorded in the dedicated **[`benchmarks/`](../benchmarks/README.md)** directory:
 
