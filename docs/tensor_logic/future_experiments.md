@@ -39,15 +39,22 @@ flowchart TD
         D["Finding: Probe-side distribution shift<br/>(Prompt template syntax masks entity semantics)"]
     end
 
-    subgraph Phase1 ["Phase 1: Memory Probe & Representation Alignment"]
-        E1["Experiment E1: Cross-Attention Memory Probe<br/><i>(Learnable query token decodes entity semantics)</i>"]
+    subgraph Phase1 ["Phase 1: Memory Probe & Representation Alignment (Completed)"]
+        E1["Experiment E1: Cross-Attention Memory Probe (CAMP)<br/><i>(Learnable query token decodes entity semantics)</i>"]
         E2["Experiment E2: Knowledge-Graph Masked Self-Attention<br/><i>(StableHLO attention masking via KB adjacency)</i>"]
-        E3["Experiment E3: Contrastive Subspace Pre-training<br/><i>(Lightweight adapter trained on FB15k-237 in minutes)</i>"]
+        E3["Experiment E3: Contrastive Subspace Pre-training<br/><i>(Lightweight adapter trained on knowledge triples in ms)</i>"]
     end
 
-    subgraph Phase2 ["Phase 2: Long-Horizon Autonomous Agent Engine"]
+    subgraph Phase2 ["Phase 2: Long-Horizon Autonomous Agent Memory (Completed)"]
         E4["Experiment E4: In-VRAM Datalog Fixpoint State Tracker<br/><i>(O(1) context state tracking for 100+ turns)</i>"]
         E5["Experiment E5: Zero-Gradient Ephemeral Online Learning<br/><i>(Fast-weight outer-product superposition from tool outputs)</i>"]
+    end
+
+    subgraph Phase3 ["Phase 3: Integration, Long-Horizon Agents & Native Architectures"]
+        E6["Experiment E6: Unified TL-Transformer Layer Block<br/><i>(End-to-end forward pass integrating E1-E5)</i>"]
+        E7["Experiment E7: Long-Horizon SWE Agent Benchmark<br/><i>(100-turn refactoring loop: VRAM state vs KV cache)</i>"]
+        E8["Experiment E8: Dynamic In-VRAM Relation Induction<br/><i>(Unsupervised tensor factorization in StableHLO)</i>"]
+        E9["Experiment E9: Native TL-Nano Open-Weights Training<br/><i>(Pre-training compact 1B-2B models on consumer GPUs)</i>"]
     end
 
     D --> E1
@@ -56,6 +63,10 @@ flowchart TD
     E2 --> E3
     E3 --> E4
     E4 --> E5
+    E5 --> E6
+    E6 --> E7
+    E7 --> E8
+    E8 --> E9
 ```
 
 ---
@@ -266,3 +277,95 @@ By combining Experiments E1–E5, we arrive at the design for a novel open-weigh
 2. **Infinite Virtual Memory**: External facts live in $O(D^2)$ matrix cores rather than $O(N^2)$ sequence lengths.
 3. **Consumer GPU Native**: Fully compilable to OpenXLA PJRT, fitting completely within a single 24GB graphics card.
 4. **Deductive Safety**: Hardware-enforced semiring thresholds guarantee zero hallucination on certified factual domains.
+
+---
+
+## 🔬 Experiment E6: The Unified TL-Transformer Layer Block
+
+### 1. Problem Statement & Motivation
+Experiments E1–E5 proved individual components in isolation:
+- **E1**: CAMP routes attention to entity tokens.
+- **E2**: KG-masked self-attention suppresses distractor hallucinations by $8.7\times$.
+- **E3**: Contrastive subspace pre-training aligns high-dimensional representations to relational cores ($100\%$ Hits@3).
+- **E4**: In-VRAM Datalog tracks long-horizon deductive state in $O(1)$ constant memory.
+- **E5**: Ephemeral Hebbian fast weights inject and unbind facts in $1.2\text{ ms}$ with zero backpropagation.
+
+Experiment E6 synthesizes these primitives into a **unified end-to-end forward pass layer block** lowered into StableHLO MLIR via OpenXLA PJRT, executable as an augmentation or drop-in layer within transformer backbones (such as Gemma 4).
+
+### 2. Architectural Design: The Hybrid Forward Pass
+For a sequence of hidden states $H \in \mathbb{R}^{B \times L \times D}$:
+1. **KG-Masked Self-Attention**:
+   $$\text{Attn}_{\text{out}} = \text{causal-softmax}\left(\frac{Q K^T}{\sqrt{d_k}} + \gamma (T R_{\text{adj}} T^T)\right) V$$
+2. **Cross-Attention Memory Probing & Subspace Projection**:
+   The memory probe attends over $\text{Attn}_{\text{out}}$, projects through pre-trained adapter $W \in \mathbb{R}^{D \times D_{\text{mem}}}$:
+   $$u_{\text{probe}} = (\text{CAMP}(H_{\text{attn}})) \cdot W \in \mathbb{R}^{B \times D_{\text{mem}}}$$
+3. **Relational Core Contraction & Deductive Gating**:
+   The projected query contracts against resident fast-weight memory $R \in \mathbb{R}^{D_{\text{mem}} \times D_{\text{mem}}}$ and evaluates candidate entities:
+   $$s = \frac{1}{\tau} (u_{\text{probe}} \cdot R) \cdot (E_{\text{cand}} W)^T \in \mathbb{R}^{B \times N_{\text{ent}}}$$
+   $$g = \text{sigmoid}\left(\frac{\max(s) - \theta}{\tau_g}\right) \in [0, 1]$$
+4. **Gated Semiring Residual Injection**:
+   $$H_{\text{tl}} = H_{\text{attn}} + g \cdot (\text{softmax}(s) \cdot E_{\text{cand}})$$
+   $$H_{\text{out}} = H_{\text{tl}} + \text{SwiGLU}(H_{\text{tl}})$$
+
+### 3. VRAM & Latency Targets (AMD Radeon RX 7900 XTX)
+- VRAM Overhead: $< 2.0\text{ MB}$ total.
+- Layer Block Latency: $< 15.0\text{ ms}$ on RX 7900 XTX.
+- Exactness: $100\%$ factual retrieval when queried entity relations are resident in VRAM.
+
+---
+
+## 🔬 Experiment E7: Long-Horizon Software Engineering Agent Benchmark
+
+### 1. Problem Statement & Motivation
+Autonomous software engineering agents (e.g. multi-file refactoring, debugging, test suites) suffer catastrophic degradation over 50+ turns:
+1. Full prompt history consumes $10+$ GB of VRAM in KV caches.
+2. Context window truncation loses track of file modifications, dependency invalidations, and pass/fail states.
+3. Attention dispersion causes the agent to repeat failed edits or hallucinate obsolete function signatures.
+
+### 2. Benchmark Design: 100-Turn Refactoring Challenge
+Evaluate two competing agent architectures on an identical 100-turn simulated codebase refactoring session involving 32 files, 64 functions, and 16 unit test suites:
+- **Arm A (Standard Baseline)**: Full conversational history maintained in LLM KV cache (standard tool-use loop with prompt summarization).
+- **Arm B (TL-Agent)**: Fixed static prompt window ($512$ tokens). All file edits, dependencies, test passes/fails, and invalidations are tracked in the **In-VRAM Datalog State Tracker** (E4) and updated via **Ephemeral Fast Weights** (E5).
+
+### 3. Key Evaluation Metrics
+- **State Deductive Accuracy**: Percentage of correct dependency invalidations and precondition checks across 100 turns.
+- **Inference Throughput**: Generation speed ($\text{tok/s}$) at Turn 1, Turn 50, and Turn 100.
+- **VRAM Footprint Scaling**: GPU memory allocated for agent state over time.
+
+---
+
+## 🔬 Experiment E8: Dynamic In-VRAM Relation Induction
+
+### 1. Problem Statement & Motivation
+Experiments E1–E5 assumed discrete, pre-defined relational predicates (`:depends_on`, `:managed_by`, `:runs_on`). In open-world autonomous agent execution, an agent frequently encounters novel entity interactions that were not foreseen in the schema.
+
+### 2. Mechanism: StableHLO Non-Negative Tensor Factorization
+Model observed multi-entity co-occurrences and tool interactions as an incomplete 3-way observation tensor $\mathcal{X} \in \mathbb{R}^{N \times K \times N}$ in VRAM:
+1. Apply in-graph **PARAFAC / Non-Negative Matrix Factorization (NMF)** compiled in StableHLO:
+   $$\min_{A, B, C} \left\| \mathcal{X} - \sum_{r=1}^{R} a_r \otimes b_r \otimes c_r \right\|_F^2$$
+2. OpenXLA iterates multiplicative update rules directly on the GPU without host synchronization:
+   $$A \leftarrow A \odot \frac{\mathcal{X}_{(1)} (C \odot B)}{\hat{\mathcal{X}}_{(1)} (C \odot B) + \epsilon}$$
+3. Novel relational cores $R_{\text{induced}}$ emerge autonomously from factorization latent factors and are superposed into fast-weight memory.
+
+### 3. Success Criteria
+- Discover ground-truth latent relations with $> 85\%$ reconstruction fidelity.
+- Complete 20 factorization iterations in $< 100\text{ ms}$ on consumer GPU hardware.
+
+---
+
+## 🔬 Experiment E9: Native TL-Nano Open-Weights Pre-training
+
+### 1. Problem Statement & Motivation
+Current open-weights language models are dense, monolithic transformer stacks where all factual knowledge is stored implicitly in feed-forward weights ($O(L \cdot D^2)$ parameters). Pre-training requires thousands of cloud GPUs.
+
+We propose **TL-Nano**: a compact, consumer-hardware native model ($1\text{B}$ parameters) designed from first principles with **Declarative Tensor Logic layers**:
+- $50\%$ fewer parameters allocated to static feed-forward memorization.
+- Integrated OpenXLA relational cores for explicit factual storage.
+- Pre-trained using StableHLO autodiff on a single AMD Radeon RX 7900 XTX (24GB VRAM) or dual-GPU setup.
+
+### 2. Architecture & Training Pipeline
+- Backbone: 16 layers, $D=2048$, 16 attention heads.
+- Hybrid TL Layers: Layers 4, 8, 12, 16 equipped with TL-Transformer blocks.
+- Objective: Joint Autoregressive Next-Token Prediction + In-Graph InfoNCE Subspace Loss:
+  $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{LM}} + \lambda_{\text{TL}} \mathcal{L}_{\text{InfoNCE}}$$
+- Pre-training Target: Curated high-quality code and technical reasoning corpus.
