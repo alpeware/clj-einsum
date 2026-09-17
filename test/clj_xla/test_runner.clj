@@ -37,6 +37,7 @@
             [clj-xla.logic.memory.ephemeral-test]
             [clj-xla.logic.memory.contrastive-test]
             [clj-xla.logic.memory.factorization-test]
+            [clj-xla.logic.memory.sampler-test]
             [clj-xla.logic.attention.kg-masked-test]
             [clj-xla.logic.models.tl-block-test]
             [clj-xla.logic.models.tl-nano-test]
@@ -122,6 +123,7 @@
                            'clj-xla.logic.memory.ephemeral-test
                            'clj-xla.logic.memory.contrastive-test
                            'clj-xla.logic.memory.factorization-test
+                           'clj-xla.logic.memory.sampler-test
                            'clj-xla.logic.attention.kg-masked-test
                            'clj-xla.logic.models.tl-block-test
                            'clj-xla.logic.models.tl-nano-test

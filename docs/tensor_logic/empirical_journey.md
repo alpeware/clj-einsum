@@ -1812,13 +1812,19 @@ Unseen (0 Core)    | 17   | 23.5%|  23.5% |  23.5% |     0.0%  |     0.0%  |    
 
 1. **The Distractor Amplification Effect**:
    Rather than isolating the specific entity, Stage 2's cross-attention head amplified semantic resonance across the entire type neighborhood. Mean distractor boost doubled from $+0.2505 \to +0.5048$, and max distractor boost jumped from $+2.2043 \to +4.2592$. Pointwise selectivity remained firmly grounded at $0.0\%$.
-2. **The Mechanism Behind the Failure: In-Batch Negative Blindness**:
-   Why did non-linear cross-attention fail to break symmetry between co-typed entities?
-   - During InfoNCE training with in-batch negative sampling ($K=16$), negative samples are drawn uniformly across relations and types. Discriminating a stadium from a date or a country is trivially easy.
-   - The model was **never penalized** for boosting "Anfield" when the ground truth was "Villa Park", because "Anfield" was rarely present in the same 16-sample batch.
-   - As a result, the cross-attention head learned an even stronger *semantic type matching kernel*, rather than an *associative pointer*.
-3. **The Distinction Between Architecture and Objective**:
-   Non-linear routing alone does not resolve pointwise facts if the training objective only contrasts against random negatives. Pointwise entity resolution requires **within-type hard-negative contrastive mining** during pre-training: explicitly forcing the loss to separate co-typed distractors.
+2. **The Mechanism Behind the Failure: In-Batch Negative Blindness (SUPERSEDED — SEE CORRECTION NOTE)**:
+   > [!NOTE]
+   > **CORRECTION NOTE (Superseded by Experiment E18):**
+   > The original explanation below attributed the failure to uniform in-batch negative sampling across relations. This explanation was factually mistaken about the implementation code in `scripts/eval_gemma4_webnlg_relational.clj`. Batches were grouped strictly *per relation* (`doseq [[r triples] by-rel]`), meaning for relations with $n \ge 16$, in-batch negatives were *already* relation-co-typed tails!
+   > Instead, Experiment E18 diagnosed the true multi-faceted failure modes:
+   > 1. **Denominator contamination**: relations with $n < 16$ (82.7% of relations) suffered a 20.00% duplicate-positive rate (self-as-negative label noise) and an 8.09% false-negative rate from cycling with an identity target.
+   > 2. **Train/eval query distribution orthogonality**: $W_Q$ was trained on token embeddings $V_h$ but evaluated on contextual states $h_{\text{ctx}}$, which are nearly orthogonal ($\cos = 0.0732 \pm 0.0596$).
+   > 3. **The Representational Boundary**: even under hygienic sampling and aligned contextual representations, the dot-product resolver head cannot achieve pointwise selectivity ($0.0\%$). See **Section 19: Experiment E18** for full measurements and the decisive 2×2 factorial.
+
+   *Original superseded text for archival reference:*
+   - *During InfoNCE training with in-batch negative sampling ($K=16$), negative samples were hypothesized to be drawn uniformly across relations and types...*
+3. **The Distinction Between Architecture and Objective (Superseded)**:
+   - Pointwise entity resolution was hypothesized to require hard-negative mining; however, Experiment E18 proved that co-typed negatives were already present and that hygienic multi-positive false-negative masking does not resolve pointwise selectivity.
 4. **Direct Entity Pointwise Crack Replicated**:
    Direct entity unbinding again produced the only consistent non-zero pointwise selections ($7.5\%$ on Stage 1, $5.0\%$ on Stage 2), confirming that transformer contextual smearing introduces significant noise compared to raw token embeddings.
 
@@ -1956,3 +1962,135 @@ In reality:
    - **Domingos-2025 is Constrained**: Predicate invention does *not* trivially "fall out" of gradient descent over tensor equations without discrete combinatorial search (e.g. inductive logic programming, structural EM, or discrete program synthesis). Continuous relaxation is insufficient to overcome the unidentifiability of composition.
 3. **Paper 2 Gate Decision**:
    Per Section 1 of the pre-registered specification (*"Paper 2 does not exist unless E16/E17 comes back positive"*), this outcome formally closes the planned Paper 2 ("Trainable Tensor Logic") on discrete predicate invention. In accordance with strict scientific integrity, this finding is documented with zero HARKing and full transparency.
+
+---
+
+### Section 19: Experiment E18 — Diagnosing the Stage-2 Amplification: Batch Hygiene, Train/Eval Query Alignment, Key Geometry
+
+**Date:** 2026-09-17  
+**Hardware:** AMD Radeon RX 7900 XTX (24 GB VRAM, ROCm 6.2, OpenXLA PJRT)  
+**Artifacts:** [`paper-experiments/e18-diagnostics/2026-09-17/`](file:///home/simonpure/src/alpeware/clj-xla/paper-experiments/e18-diagnostics/2026-09-17/) (`phase0_diagnostics.edn`, `phase0_note.md`, `phase1_results.edn`, `summary.csv`)
+
+---
+
+#### 1. Why E18 Existed: The E16 Diagnosis Contradicted Its Own Code
+
+The Experiment E16 write-up attributed the Stage-2 failure (contextual pointwise selectivity $0/40$, mean distractor boost doubling from $+0.25 \to +0.50$) to **in-batch negative blindness**—presuming negatives were sampled uniformly across relations and types.
+
+Inspection of the code (`scripts/eval_gemma4_webnlg_relational.clj`) revealed this was factually wrong: batches were batched strictly **per relation** (`doseq [[r triples] by-rel]`). For all relations with $n \ge 16$, the 15 in-batch negatives **were already co-typed relation tails**. The model *was* actively penalized for boosting co-typed distractors, yet still amplified them at eval.
+
+This contradiction exposed three potential confounding mechanisms:
+1. **Denominator Contamination & Label Noise**: For relations with $n < 16$, `(mod i n)` cycling duplicated triples inside the batch. The identity `Target` matrix then penalized the model for assigning probability to batch positions holding *copies of the positive itself* (self-as-negative label noise).
+2. **Train/Eval Query Distribution Mismatch**: Stage 2 trained $W_Q$ on raw token embeddings ($V_h = \text{gather}(W_{\text{embed}}, I_h)$), but evaluated $W_Q$ on contextualized hidden states ($h_{\text{ctx}} \in \mathbb{R}^{1536}$) from frozen Gemma 4 forward passes.
+3. **Representational Collapse in Key Space**: If post-$W_K$ candidate keys $k_c = \text{rms\_norm}(e_c W_K)$ are nearly parallel ($\cos \to 1.0$), no dot-product head could separate them regardless of sampling or loss tuning.
+
+---
+
+#### 2. Phase 0 Empirical Diagnostic Measurements
+
+Before conducting interventions, Phase 0 executed a zero-training diagnostic measurement suite against the frozen Gemma 4 backbone, the E16 checkpoint, and the WebNLG dataset:
+
+| Diagnostic Item | Metric / Measurement | Empirical Value | Verdict |
+|:---|:---|:---|:---|
+| **1. Batch Audit** | Total Triples / Relations | 3,738 triples / 370 relations | High sparsity tail |
+| | Relations with $n < 16$ | **306 / 370 (82.7%)** | Extreme cycling prevalence |
+| | Relations with $n < 2$ (singleton) | **120 / 370 (32.4%)** | Unusable for InfoNCE |
+| | Duplicate-Positive Rate (Self-as-Negative) | **20.00%** (12,000 / 60,000 off-diags) | Confirmed severe label noise |
+| | False-Negative Rate (Known True Triples) | **8.09%** (4,853 / 60,000 off-diags) | Substantial false penalty |
+| | Total Denominator Contamination Rate | **28.09%** (16,853 / 60,000 off-diags) | **Mechanism #1 Confirmed** |
+| **2. Query Alignment** | $\cos(V_h, h_{\text{ctx}})$ (Token Embed vs Contextual State) | **$0.0732 \pm 0.0596$** (Angle $\approx 85.8^\circ$) | **Nearly Orthogonal (Mechanism #2 Confirmed)** |
+| **3. Key Geometry** | Pre-$W_K$ Co-typed vs Random Cosine | $0.3872 \pm 0.3581$ vs $0.1819 \pm 0.2451$ ($\Delta = +0.2053$) | Separable |
+| | Post-$W_K$ Co-typed vs Random Cosine | **$0.3971 \pm 0.3876$ vs $0.0967 \pm 0.3502$ ($\Delta = +0.3005$)** | **Collapse Disproven ($\cos \ll 1.0$)** |
+| **4. Training Dynamics** | InfoNCE Stage 2 Loss Descent | **$7.8566 \to 5.0278$ ($-36.0\%$)** over 5 epochs | Active convergence, not flat |
+| **5. Amplification Origin** | Stage 1 $\Delta_{\text{type}}$ Alone | Target: $+0.7864$ \| Distractors: $+0.3400$ | Moderate baseline boost |
+| | Resolver Alone $\text{score}_{\text{resolve}}$ | Target: **$-0.0021$** \| Distractors: **$+0.1648$** (Max $+3.4797$) | **100% Driven by Resolver Head** |
+
+**Gating Decision**: Both hypothesized mechanisms (denominator contamination and query mismatch) were quantitatively verified as severe. Phase 1 was formally gated open.
+
+---
+
+#### 3. Phase 1: 2×2 Factorial Sweep Protocol
+
+We conducted a full $2 \times 2$ factorial intervention sweep across 3 random seeds per cell ($N = 12$ runs):
+
+- **Factor A (Sampler Hygiene)**:
+  - **A0 (Replication)**: E16's `(mod i n)` cycling sampler with fixed identity `Target` matrix and uniform `Mask_Scale`.
+  - **A1 (Hygienic)**:
+    1. Sample $K=16$ distinct triples without replacement when $n \ge 16$ (padded when $n < 16$).
+    2. Multi-positive `Target`: row $i$ distributes mass uniformly $1/m$ across all batch positions $j$ sharing the target entity ($t_j = t_i$).
+    3. False-negative masking: zeroes $\text{Mask\_Scale}[i, j]$ wherever $(h_i, r, t_j)$ is a known true training triple.
+- **Factor B (Query Distribution Alignment)**:
+  - **B0 (Replication)**: $V_h = \text{gather}(W_{\text{embed}}, I_h)$ (token embeddings).
+  - **B1 (Aligned)**: $V_h = \text{gather}(H_{\text{cache}}, I_{\text{cache}})$, gathering from $3,738 \times 1536$ bf16 hidden states pre-computed via the exact frozen Gemma 4 evaluation forward pass.
+
+**Controlled Parameters**: Frozen Stage 1 weights from checkpoint (`checkpoint_gemma4_relational.edn`), $K=16$, epochs $= 5$, $\tau = 0.10$, $\text{lr} = 0.05$, $\lambda_{\text{mem}} = 0.3$, $\lambda_{\text{resolve}} = 1.0$, $D_m = 128$, evaluated on the exact 80 cloze queries (40 seen, 40 unseen) across 747 candidate entities.
+
+---
+
+#### 4. Empirical Results (2×2 Factorial Summary)
+
+All 12 runs executed 100% in OpenXLA PJRT VRAM on AMD ROCm (RX 7900 XTX). Raw telemetry is saved in `paper-experiments/e18-diagnostics/2026-09-17/phase1_results.edn`.
+
+##### Individual Runs Table
+| Cell | Factor A | Factor B | Seed | Final Loss | Seen Top-1 | Seen Pointwise | Seen Neigh | Seen Dist Boost | Unseen Top-1 | Unseen Pointwise | Unseen Dist Boost |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **A0B0** | Cycling | Embed | 42 | 4.8411 | 14/40 | 0/40 | 23/40 | +0.3113 | 9/40 | 0/40 | +0.2327 |
+| **A0B0** | Cycling | Embed | 43 | 5.0278 | 13/40 | 0/40 | 21/40 | +0.1648 | 9/40 | 0/40 | +0.1496 |
+| **A0B0** | Cycling | Embed | 44 | 4.9830 | 13/40 | 0/40 | 24/40 | +0.2408 | 9/40 | 0/40 | +0.3089 |
+| **A1B0** | Hygienic | Embed | 42 | 3.5599 | 13/40 | 0/40 | 29/40 | +3.7481 | 9/40 | 0/40 | +4.4920 |
+| **A1B0** | Hygienic | Embed | 43 | 3.6344 | 13/40 | 0/40 | 27/40 | +3.0782 | 9/40 | 0/40 | +3.1111 |
+| **A1B0** | Hygienic | Embed | 44 | 3.7880 | 13/40 | 0/40 | 28/40 | +1.4227 | 10/40 | 0/40 | +3.9356 |
+| **A0B1** | Cycling | Context | 42 | 6.7677 | 13/40 | 0/40 | 26/40 | -0.0843 | 9/40 | 0/40 | -0.0019 |
+| **A0B1** | Cycling | Context | 43 | 6.9536 | 13/40 | 0/40 | 26/40 | -0.0708 | 9/40 | 0/40 | +0.1122 |
+| **A0B1** | Cycling | Context | 44 | 7.0667 | 13/40 | 1/40 | 26/40 | -0.3472 | 10/40 | 0/40 | -0.1477 |
+| **A1B1** | Hygienic | Context | 42 | 4.1517 | 13/40 | 0/40 | 28/40 | +9.9910 | 9/40 | 0/40 | +6.2520 |
+| **A1B1** | Hygienic | Context | 43 | 4.0057 | 13/40 | 0/40 | 28/40 | +10.5574 | 10/40 | 0/40 | +6.3907 |
+| **A1B1** | Hygienic | Context | 44 | 4.2172 | 13/40 | 0/40 | 28/40 | +10.2853 | 10/40 | 0/40 | +6.2671 |
+
+##### Cell Aggregates (Mean ± Std across 3 Seeds)
+| Cell | Configuration Description | Seen Top-1 Acc | Seen Pointwise Selectivity | Seen Distractor Boost | Unseen Pointwise Selectivity |
+|:---:|:---|:---:|:---:|:---:|:---:|
+| **A0B0** | Replication (Cycling Sampler + Token Embeddings $V_h$) | $13.3 \pm 0.6$ (33.3%) | **$0.0 \pm 0.0$ (0.0%)** | $+0.2390 \pm 0.0732$ | $0.0 \pm 0.0$ (0.0%) |
+| **A1B0** | Hygienic Sampler + Token Embeddings $V_h$ | $13.0 \pm 0.0$ (32.5%) | **$0.0 \pm 0.0$ (0.0%)** | $+2.7497 \pm 1.1970$ | $0.0 \pm 0.0$ (0.0%) |
+| **A0B1** | Cycling Sampler + Contextual Hidden States $h_{\text{ctx}}$ | $13.0 \pm 0.0$ (32.5%) | **$0.3 \pm 0.6$ (0.8%)** | **$-0.1674 \pm 0.1558$** | $0.0 \pm 0.0$ (0.0%) |
+| **A1B1** | Full Intervention (Hygienic + Contextual Hidden States) | $13.0 \pm 0.0$ (32.5%) | **$0.0 \pm 0.0$ (0.0%)** | $+10.2779 \pm 0.2833$ | $0.0 \pm 0.0$ (0.0%) |
+
+---
+
+#### 5. Evaluation of Pre-Registered Criteria & The Falsification Clause
+
+We evaluate the pre-registered criteria defined prior to running Phase 1:
+
+1. **Resolution Criterion (FAIL)**:
+   - *Requirement:* Some Phase-1 cell reaches contextual pointwise selectivity $\ge 15\%$ ($6/40$) on `test_seen` AND beats A0B0 by $\ge 4$ queries.
+   - *Result:* Pointwise selectivity remained firmly at **$0/40$ on 11 of 12 runs**, and reached at most **$1/40$ on a single run (A0B1 Seed 44)**. No cell came anywhere close to $6/40$.
+2. **Attribution Criterion (FAIL)**:
+   - *Requirement:* Lift tracks the intended factor on $\ge 2/3$ seeds.
+   - *Result:* No systematic lift occurred across any cell ($0.0\%$ pointwise selectivity across A1B0 and A1B1).
+3. **Mechanistic Signature (PARTIAL / DIVERGENT)**:
+   - In cell **A0B1** (query alignment with replication cycling), distractor boost reversed from $+0.24 \to \mathbf{-0.1674}$, confirming that contextual query alignment eliminated spurious distractor amplification. However, pointwise selectivity remained at $0/40$.
+   - In cell **A1B1** (hygienic sampling + query alignment), distractor boost exploded from $+0.24 \to \mathbf{+10.2779}$. Because false-negative masking and multi-positive targets relaxed contrastive penalties on all true facts, the bilinear head learned to output massive positive dot-products for all type-resonant entities.
+4. **No Collapse Elsewhere (PASS)**:
+   - Top-1 accuracy remained intact across all cells ($13/40$, matching the Stage 1 baseline).
+
+##### Application of the Pre-Registered Falsification Clause
+The pre-registered protocol explicitly specified:
+> *"Falsification clause: if no cell meets (1), accept the representational hypothesis as the leading explanation. Do not run further hyperparameter sweeps under this spec — the grind stops here and the write-up says the failure is representational, redirecting the program (e.g., key-space interventions, or the E17-style hybrid discrete search). A clean negative beats an inconclusive tweak-fest."*
+
+**Verdict**: The Falsification Clause is **FORMALLY ACCEPTED**. The failure of Stage 2 bilinear resolution is representational, not an artifact of batch contamination or train/eval distribution shift.
+
+---
+
+#### 6. Theoretical Insights & Final Program Verdict
+
+1. **The Inherent Limit of Continuous Bilinear Resolution**:
+   - In a continuous embedding space where entities belonging to the same relation/type cluster tightly (post-$W_K$ co-typed cosine $\approx 0.40$), any continuous bilinear interaction $s(c) = q W_Q W_K^T e_c^T$ acts as a **hyperplane or ellipsoid decision surface**.
+   - A single vector $q_{\text{rel}}$ cannot isolate a single discrete point $e_{\text{target}}$ while simultaneously excluding $100+$ co-typed neighbors that lie within the same cone of semantic space.
+2. **Hygienic Sampling Amplifies Type Clustering**:
+   - Masking false negatives removes the negative gradient that artificially compressed distractors in E16. Without that artificial compression, the unconstrained bilinear model simply pushes the entire cluster of co-typed candidates into extreme positive activation ($+10.28$ boost), making distractor competition worse, not better.
+3. **The Clear Division of Labor**:
+   - **Continuous Tensor Logic Unbinding ($W_{\text{mem}}, R_r$)**: Superb as a fast, differentiable semantic type constraint ($87\%$ distractor noise suppression, $100\%$ tail neighborhood lift).
+   - **Pointwise Entity Disambiguation**: Requires **discrete symbolic constraint satisfaction** or structured symbol lookup (as demonstrated by the exact graph unbinding in E17 and the hybrid retrieval thesis), rather than unconstrained continuous dot-product re-ranking.
+4. **Conclusion of the Relational Retrieval Line**:
+   Experiment E18 definitively closes the relational contrastive resolver line on frozen LLM embeddings. The empirical results are clean, fully reproducible across random seeds, and provide decisive guidance for the next phase of neuro-symbolic tensor architectures.
+

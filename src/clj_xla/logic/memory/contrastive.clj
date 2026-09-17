@@ -111,8 +111,8 @@
   "Constructs Tensor Logic AST for an end-to-end, zero-host-transfer training step for
    the Stage 2 Non-Linear Resolver (W_Q and W_K).
    Performs 100% in OpenXLA PJRT VRAM:
-   1. Gathers entity embeddings from W_embed:
-      V_h = gather(W_embed, I_h), V_t = gather(W_embed, I_t)
+   1. Gathers entity embeddings (or contextual hidden states if :query-source is :cache):
+      V_h = gather(W_embed, I_h) [or gather(H_cache, I_cache)], V_t = gather(W_embed, I_t)
    2. Relational type modulation from Stage 1:
       U_h = V_h * W_mem, U_hr = U_h * R, U_norm = rms_norm(U_hr)
    3. Non-linear query and key projections:
@@ -136,13 +136,18 @@
    7. In-graph SGD parameter updates:
       W_Q_new = W_Q - (lr * lambda_tl) * dW_Q
       W_K_new = W_K - (lr * lambda_tl) * dW_K"
+  ([k-triples dim-in dim-mem]
+   (in-vram-resolver-step-ast k-triples dim-in dim-mem nil))
   ([_k-triples _dim-in _dim-mem opts]
    (let [tau (double (or (:tau opts) 0.1))
          lr (double (or (:lr opts) 0.05))
          lambda-tl (double (or (:lambda-tl opts) 1.0))
-         step-scale (* lr lambda-tl)]
+         step-scale (* lr lambda-tl)
+         query-source (or (:query-source opts) :embed)]
      [:block {:name :in_vram_resolver_step}
-      [:gather [:V_h :k :din] [:W_embed :v :din] [:I_h :k]]
+      (if (= query-source :cache)
+        [:gather [:V_h :k :din] [:H_cache :n_cache :din] [:I_cache :k]]
+        [:gather [:V_h :k :din] [:W_embed :v :din] [:I_h :k]])
       [:gather [:V_t :k :din] [:W_embed :v :din] [:I_t :k]]
       [:= [:U_h :k :dm] [:V_h :k :din] [:W_mem :din :dm]]
       [:= [:U_hr :k :dm2] [:U_h :k :dm1] [:R :dm1 :dm2]]
@@ -313,15 +318,28 @@
          k (long k-triples)
          dm (long dim-mem)
          dt (or (:dtype opts) :f32)
-         invars [[:W_embed [:tensor [v din] dt]]
-                 [:I_h [:tensor [k] :i32]]
-                 [:I_t [:tensor [k] :i32]]
-                 [:W_mem [:tensor [din dm] dt]]
-                 [:R [:tensor [dm dm] dt]]
-                 [:W_Q [:tensor [din dm] dt]]
-                 [:W_K [:tensor [din dm] dt]]
-                 [:Target [:tensor [k k] dt]]
-                 [:Mask_Scale [:tensor [k k] dt]]]
+         query-source (or (:query-source opts) :embed)
+         n-cache (long (or (:n-cache opts) 1))
+         invars (if (= query-source :cache)
+                  [[:H_cache [:tensor [n-cache din] dt]]
+                   [:W_embed [:tensor [v din] dt]]
+                   [:I_cache [:tensor [k] :i32]]
+                   [:I_t [:tensor [k] :i32]]
+                   [:W_mem [:tensor [din dm] dt]]
+                   [:R [:tensor [dm dm] dt]]
+                   [:W_Q [:tensor [din dm] dt]]
+                   [:W_K [:tensor [din dm] dt]]
+                   [:Target [:tensor [k k] dt]]
+                   [:Mask_Scale [:tensor [k k] dt]]]
+                  [[:W_embed [:tensor [v din] dt]]
+                   [:I_h [:tensor [k] :i32]]
+                   [:I_t [:tensor [k] :i32]]
+                   [:W_mem [:tensor [din dm] dt]]
+                   [:R [:tensor [dm dm] dt]]
+                   [:W_Q [:tensor [din dm] dt]]
+                   [:W_K [:tensor [din dm] dt]]
+                   [:Target [:tensor [k k] dt]]
+                   [:Mask_Scale [:tensor [k k] dt]]])
          ast (in-vram-resolver-step-ast k din dm opts)
          targets [:W_Q_new :W_K_new :P :Scores]]
      (sym/compile-query ctx "in_vram_resolver_step" invars ast targets))))
