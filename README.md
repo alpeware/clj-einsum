@@ -1,6 +1,42 @@
-# clj-xla
+# clj-xla: Executable Tensor Logic for Coding Agents
 
 High-performance Machine Learning compiler framework and runtime for Clojure targeting **Java 25** and **OpenXLA PJRT C API**.
+
+> **Mission**: Make Pedro Domingos' Tensor Logic the working language of AI development — not a formalism on paper, but a toolchain where a coding agent (or a human) writes tensor equations and gets GPU executables, gradients, and verified behavior out.
+>
+> See [VISION.md](VISION.md) for the strategic vision, operating principles, non-goals, and research pillars.
+
+---
+
+## Architecture: Vertically Integrated Toolchain
+
+One construct all the way down: `[:= head & body-terms]`. No kernels written by hand; zero host matrix math in the hot path. Equations become executables via OpenXLA PJRT:
+
+```
+tensor equations (Hiccup AST, pure data)
+        │  expand · lower · autodiff — all as data transforms
+        ▼
+EDN SSA graph IR (Malli-schematized, verifiable)
+        │
+        ▼
+StableHLO → PJRT executables (CPU / ROCm / CUDA)
+        │
+        ▼
+reference interpreter ⇄ device differential testing
+```
+
+- **`clj-xla.logic.*` (The Language)**: AST expansion, lowering, symbolic reasoning, relational memory, in-VRAM contrastive learning, and agent loops.
+- **`clj-xla.core` & `clj-xla.compile` (The Substrate)**: Zero-copy Java 25 Project Panama FFM bindings to PJRT C API (`pjrt_c_api.h`), StableHLO MLIR builder, SHA-256 compilation cache, autodiff, and device tensor management.
+
+---
+
+## Pillars
+
+- **Pillar 0 — The Compiler (Built)**: Tensor Logic AST → StableHLO → PJRT, with a reference interpreter for differential verification. Real models execute end-to-end: GPT-2, SmolLM, and Gemma 2/3/4 (35-layer E2B inference on ROCm with resident weights and in-graph INT4 dequantization). Documented in Paper 1 (*Executable Tensor Logic*).
+- **Pillar 1 — Trainable Tensor Logic (Active)**: Structure learning and predicate invention inside the language. Relational memory ($R_{\text{mem}}$ cores as learned soft priors), exact in-VRAM adjoints, StableHLO softmax lowering, WebNLG-scale contrastive training, and grafting onto frozen LLM backbones. Documented in Paper 2 (*Trainable Tensor Logic*).
+- **Pillar 2 — The Agent Loop (Design → Prototype)**: Three-tier agent architecture (reflex contractions, device-resident deliberation, host-side synthesis) where the agent's own reasoning substrate consists of tensor equations it can read, verify, and rewrite.
+
+---
 
 ## Features
 
@@ -10,6 +46,7 @@ High-performance Machine Learning compiler framework and runtime for Clojure tar
 - **Sub-Millisecond REPL Feedback:** SHA-256 graph hash compilation caching (`clj-xla.compile`) bypassing XLA LLVM codegen on warm REPL evaluations.
 - **Multi-Backend OpenXLA Execution:** Seamless hardware execution across CPU, AMD ROCm, Intel SYCL, and NVIDIA CUDA.
 - **Pure Clojure LLM Implementations:** Gemma 2, Gemma 3, Gemma 4 (E2B, E4B), SmolLM, and GPT-2 running purely via XLA compilation without manual host matrix math.
+- **100% In-VRAM Execution:** Forward passes, backward passes, exact gradient updates, and memory unbinding compile directly to StableHLO without host round-trips.
 
 ---
 
@@ -89,26 +126,33 @@ Low-level homoiconic StableHLO graph construction:
 
 ---
 
-## Running Models
+## Running Models & Relational Evaluation
 
-CLI scripts are included for running end-to-end autoregressive generation:
+CLI scripts and wrappers are included for running inference, agent loops, and relational memory evaluation:
 
 ```bash
-# GPT-2
+# GPT-2 Inference
 clj -M scripts/gpt2_inference.clj --prompt "The capital of France is"
 
-# SmolLM-135M
+# SmolLM-135M Inference
 clj -M scripts/smollm_inference.clj --prompt "In a galaxy far away"
 
-# Gemma 3
-clj -M scripts/gemma3_inference.clj --prompt "Explain quantum computing" --backend cpu
+# Gemma 4 Autoregressive Generation (ROCm / CPU)
+./scripts/gemma4.sh --backend rocm --model .models/gemma-4-E2B-it --prompt "Explain monads in Clojure"
 
-# Gemma 4
-clj -M scripts/gemma4_inference.clj --prompt "Write a short poem" --backend cpu
+# Gemma 4 Autonomous Agent Loop
+./scripts/gemma4.sh agent --backend rocm --model .models/gemma-4-E2B-it --prompt "Inspect src/ and calculate total Clojure lines"
+
+# Gemma 4 Relational Memory Benchmark (WebNLG E15 Distractor Diagnostic)
+./scripts/gemma4.sh relational --checkpoint .dataset/webnlg/checkpoint_gemma4_relational.edn
 ```
 
 ---
 
-## Architecture
+## Documentation & Architecture
 
-See [DESIGN.md](DESIGN.md) for detailed layer specifications and [docs/](docs/) for model specifications, wiki, and hardware notes.
+- [VISION.md](VISION.md): Mission, core principles, pillars, non-goals, and relation to Domingos' program.
+- [DESIGN.md](DESIGN.md): Detailed architectural layers, Malli schemas, and lowering pipeline.
+- [AGENTS.md](AGENTS.md): Repository rules, TDD invariants, and optimal inference / agent launching guides.
+- [docs/tensor_logic/empirical_journey.md](docs/tensor_logic/empirical_journey.md): Empirical log of experiments (E1–E15), telemetry, and theoretical conclusions.
+- [docs/](docs/): Model specifications, hardware benchmarks, PJRT versioning notes, and wiki.
