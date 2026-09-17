@@ -256,6 +256,43 @@ write path, or it isn't believed at all.
 
 ## 9. Three tiers: reflex, deliberation, synthesis
 
+**The loop is a reduce.** Not a loop over an ever-growing history —
+a reduce over a bounded snapshot:
+
+`state' = verified_commit(state, llm_proposals(state, observation))`
+
+The accumulator is the Tier 1a KB snapshot, never the transcript.
+Each step *replaces* state; nothing appends except through the
+verified commit. Compaction isn't a periodic emergency — it is the
+step itself. This is the old REST-harness pattern (the accumulator
+as a namespace the LLM rewrites by redefinition), hardened: the
+"redefinition" goes through E21's write path (typecheck → constraint
+→ ambiguity → provenance), so the snapshot is the compressed history,
+*verifiably*. The append-only provenance log is the audit trail; the
+active KB is the snapshot the loop reduces over. Both exist; they are
+different things.
+
+Consequences, stated once so the tiers below don't re-litigate them:
+
+- *Bounded compute per step, forever.* Each step's prompt is the
+  snapshot (bounded) plus the current observation — never the
+  history. Per-step cost is O(snapshot + step), with the static
+  prefix (system, schema) warm across steps. The KV cache has a
+  ceiling. Infinite-horizon operation is well-defined; there is
+  nothing to "summarize" because nothing accumulates outside the
+  commit path. (E17–E20 are why the snapshot must be discrete: a
+  soft accumulator drifts, and drift in discrete truth is lying.)
+- *One pattern at two latencies.* This reduce is a mealy cell:
+  `handle-event(kb_snapshot, observation) → kb_snapshot'`. Tier 1
+  runs it in microseconds over contraction state; Tier 2 runs it in
+  seconds over KB state. There are not two architectures here.
+- *Stage B shape.* The reduce body (decode step → optional KB query
+  → verified commit) is a StableHLO while body, with the KB snapshot
+  and KV cache as loop-carried state — buildable from the while/cond
+  primitives the repo already has. The per-query surface wants to
+  be small: named queries (invars + AST, ~6 lines) compiled to
+  executables, not 40-line compile ceremonies.
+
 The original draft of this section put the whole LLM host-side. That conflated
 two claims: "LLM outputs are slow and unverified" (true) with "the LLM must
 live off-device" (false in this stack — clj-xla compiles full LLM forward
@@ -346,6 +383,19 @@ sharing device memory with the reflex graph:
   proposer/ranker over candidates — E17 MRR +98% is real ranking
   ability — and the KB is the disposer. The tool call is the
   propose→dispose boundary made concrete.)
+- *KB write arm (propose, never direct-write).* The reduce needs the
+  other direction too: the LLM proposes *new facts* (tool calls
+  emitting candidate assertions), and the E21 verified commit path
+  applies or rejects them — typecheck → constraint → ambiguity →
+  provenance — before the snapshot updates. The LLM never holds a
+  raw write handle; `state' = verified_commit(state, proposals)` is
+  the whole update function. Rejected proposals feed back as
+  observations (with the named violation), so the model can revise
+  rather than silently diverge. This is the online-learning half of
+  the original sketch ("update the KB from the host side after tool
+  calls"): the KB accumulates verified facts across steps, and the
+  next step's snapshot is richer. Nothing the model "learned" ever
+  bypasses the gate — E17–E20 proved the gate is the memory.
 - *T=0 precondition gate (embedding-space formulation of the frozen mask).*
   LLM output token ids map through a device-resident action vocabulary, and
   permissibility is a crisp contraction before host dispatch:
