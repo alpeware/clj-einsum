@@ -546,6 +546,53 @@
        (swap! eqns-atom conj max-eqn max-bcast-eqn diff-eqn exp-eqn sum-eqn sum-bcast-eqn div-eqn)
        (when needs-f32? (swap! eqns-atom conj conv-out-eqn))))))
 
+(defn- lower-softmax!
+  ([eqns-atom counter head in-term attrs final-out-var known-shapes]
+   (lower-softmax! eqns-atom counter head in-term attrs final-out-var known-shapes :f32))
+  ([eqns-atom counter head in-term attrs final-out-var known-shapes dtype]
+   (let [in-name (first in-term)
+         orig-dtype (or dtype :f32)
+         in-shape (or (get known-shapes in-name)
+                      (get known-shapes (first head)))
+         rank (count in-shape)
+         axes (or (:axes attrs)
+                  (when-let [ax (:axis attrs)] [ax])
+                  [(dec rank)])
+         norm-axes (mapv #(if (neg? %) (+ rank %) %) axes)
+         needs-f32? (not= orig-dtype :f32)
+         f32-in-var (if needs-f32? (gen-id "s_f32" counter) in-name)
+         conv-in-eqn (when needs-f32?
+                       {:op :stablehlo/convert :invars [in-name] :outvars [f32-in-var] :attrs {:target_dtype :f32}})
+         scale (:scale attrs)
+         actual-in-var (if scale (gen-id "s_scaled" counter) f32-in-var)
+         scale-eqn (when scale
+                     (let [c-scale (gen-id "c_scale" counter)
+                           c-scale-eqn {:op :stablehlo/constant :value (double scale) :outvars [c-scale]}]
+                       (swap! eqns-atom conj c-scale-eqn)
+                       {:op :stablehlo/multiply :invars [f32-in-var c-scale] :outvars [actual-in-var]}))
+         max-var (gen-id "t_smax" counter)
+         max-eqn {:op :stablehlo/reduce_max :invars [actual-in-var] :outvars [max-var] :attrs {:axes norm-axes :keep_dims true}}
+         max-bcast-var (gen-id "t_smax_bcast" counter)
+         max-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [max-var] :outvars [max-bcast-var]
+                        :attrs {:broadcast_dimensions (vec (range rank)) :target_shape in-shape}}
+         diff-var (gen-id "t_sdiff" counter)
+         diff-eqn {:op :stablehlo/subtract :invars [actual-in-var max-bcast-var] :outvars [diff-var]}
+         exp-var (gen-id "t_sexp" counter)
+         exp-eqn {:op :stablehlo/exp :invars [diff-var] :outvars [exp-var]}
+         sum-var (gen-id "t_ssum" counter)
+         sum-eqn {:op :stablehlo/reduce_sum :invars [exp-var] :outvars [sum-var] :attrs {:axes norm-axes :keep_dims true}}
+         sum-bcast-var (gen-id "t_ssum_bcast" counter)
+         sum-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [sum-var] :outvars [sum-bcast-var]
+                        :attrs {:broadcast_dimensions (vec (range rank)) :target_shape in-shape}}
+         f32-div-var (if needs-f32? (gen-id "t_sdiv" counter) final-out-var)
+         div-eqn {:op :stablehlo/divide :invars [exp-var sum-bcast-var] :outvars [f32-div-var]}
+         conv-out-eqn (when needs-f32?
+                        {:op :stablehlo/convert :invars [f32-div-var] :outvars [final-out-var] :attrs {:target_dtype orig-dtype}})]
+     (when needs-f32? (swap! eqns-atom conj conv-in-eqn))
+     (when scale-eqn (swap! eqns-atom conj scale-eqn))
+     (swap! eqns-atom conj max-eqn max-bcast-eqn diff-eqn exp-eqn sum-eqn sum-bcast-eqn div-eqn)
+     (when needs-f32? (swap! eqns-atom conj conv-out-eqn)))))
+
 (defn- lower-chunked-attention!
   "Lowers chunked attention with online streaming softmax across tiled sequence chunks.
    Prevents exceeding the 64 KB Local Data Share (LDS) hardware limit on OpenXLA ROCm.
@@ -1320,6 +1367,9 @@
 
           (= op :causal-softmax)
           (lower-causal-softmax! eqns-atom counter (first body) attrs final-var known-shapes default-dtype)
+
+          (= op :softmax)
+          (lower-softmax! eqns-atom counter head (first body) attrs final-var known-shapes default-dtype)
 
           (= op :chunked-attention)
           (lower-chunked-attention! eqns-atom counter head (first body) (second body) (nth body 2) attrs final-var known-shapes default-dtype)

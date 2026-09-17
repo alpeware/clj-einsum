@@ -208,6 +208,32 @@
                       delta-rank (- z-rank a-rank)
                       delta-cand-rank (- z-cand-rank a-cand-rank)
                       match? (= a-cand-act tgt-act)
+
+                      distractors (filterv #(not= (:active %) tgt-act) candidate-targets)
+                      distractor-deltas
+                      (mapv (fn [c]
+                              (let [act (:active c)
+                                    zl (double (aget z-logits (+ row-off act)))
+                                    al (double (aget a-logits (+ row-off act)))]
+                                (- al zl)))
+                            distractors)
+                      mean-dist-delta (if (seq distractor-deltas)
+                                        (/ (reduce + distractor-deltas) (double (count distractor-deltas)))
+                                        0.0)
+                      max-dist-delta (if (seq distractor-deltas)
+                                       (apply max distractor-deltas)
+                                       0.0)
+                      top-base-cand (when (seq distractors)
+                                      (apply max-key (fn [c] (aget z-logits (+ row-off (:active c)))) distractors))
+                      top-base-delta (if top-base-cand
+                                       (- (double (aget a-logits (+ row-off (:active top-base-cand))))
+                                          (double (aget z-logits (+ row-off (:active top-base-cand)))))
+                                       0.0)
+                      target-vs-mean-dist (- delta-l mean-dist-delta)
+                      target-vs-max-dist (- delta-l max-dist-delta)
+                      selective? (> delta-l max-dist-delta)
+                      neighborhood-selective? (> delta-l mean-dist-delta)
+
                       tier-str (case tier
                                  :head "HEAD"
                                  :mid  "MID "
@@ -226,6 +252,13 @@
                    :z-cand-rank z-cand-rank :a-cand-rank a-cand-rank :delta-cand-rank delta-cand-rank
                    :z-rr (/ 1.0 (double z-rank)) :a-rr (/ 1.0 (double a-rank))
                    :z-cand-rr (/ 1.0 (double z-cand-rank)) :a-cand-rr (/ 1.0 (double a-cand-rank))
+                   :mean-dist-delta mean-dist-delta
+                   :max-dist-delta max-dist-delta
+                   :top-base-delta top-base-delta
+                   :target-vs-mean-dist target-vs-mean-dist
+                   :target-vs-max-dist target-vs-max-dist
+                   :selective? selective?
+                   :neighborhood-selective? neighborhood-selective?
                    :tier tier :count cnt}))
               selected-evals)
 
@@ -262,6 +295,11 @@
                :matches (count (filter :match? subset))
                :acc (* 100.0 (/ (double (count (filter :match? subset))) n))
                :mean-delta (/ (reduce + (map :delta-logit subset)) (double n))
+               :mean-dist-delta (/ (reduce + (map :mean-dist-delta subset)) (double n))
+               :mean-max-dist-delta (/ (reduce + (map :max-dist-delta subset)) (double n))
+               :mean-top-base-delta (/ (reduce + (map :top-base-delta subset)) (double n))
+               :pointwise-sel-pct (* 100.0 (/ (double (count (filter :selective? subset))) n))
+               :neigh-sel-pct (* 100.0 (/ (double (count (filter :neighborhood-selective? subset))) n))
                :mean-z-rank (/ (reduce + (map :z-rank subset)) (double n))
                :mean-a-rank (/ (reduce + (map :a-rank subset)) (double n))
                :med-z-rank (median (map :z-rank subset))
@@ -274,6 +312,8 @@
                :mrr-a-cand (/ (reduce + (map :a-cand-rr subset)) (double n))
                :pos-rank (count (filter #(pos? (:delta-rank %)) subset))}
               {:n 0 :matches 0 :acc 0.0 :mean-delta 0.0
+               :mean-dist-delta 0.0 :mean-max-dist-delta 0.0 :mean-top-base-delta 0.0
+               :pointwise-sel-pct 0.0 :neigh-sel-pct 0.0
                :mean-z-rank 0.0 :mean-a-rank 0.0 :med-z-rank 0.0 :med-a-rank 0.0
                :mean-z-crank 0.0 :mean-a-crank 0.0 :mrr-z 0.0 :mrr-a 0.0
                :mrr-z-cand 0.0 :mrr-a-cand 0.0 :pos-rank 0})))
@@ -285,7 +325,15 @@
         seen-evals (filter #(not= (:tier %) :unseen) eval-results)
         seen-mean-delta (if (seq seen-evals) (/ (reduce + (map :delta-logit seen-evals)) (double (count seen-evals))) 0.0)
         unseen-mean-delta (:mean-delta unseen-stats)
-        ablation-gap (- seen-mean-delta unseen-mean-delta)]
+        ablation-gap (- seen-mean-delta unseen-mean-delta)
+
+        overall-mean-dist-delta (/ (reduce + (map :mean-dist-delta eval-results)) (double total-eval))
+        overall-mean-max-dist (/ (reduce + (map :max-dist-delta eval-results)) (double total-eval))
+        overall-mean-top-base (/ (reduce + (map :top-base-delta eval-results)) (double total-eval))
+        pointwise-sel-cnt (count (filter :selective? eval-results))
+        neigh-sel-cnt (count (filter :neighborhood-selective? eval-results))
+        pointwise-sel-pct (* 100.0 (/ (double pointwise-sel-cnt) total-eval))
+        neigh-sel-pct (* 100.0 (/ (double neigh-sel-cnt) total-eval))]
 
     (println "------------------------------------------------------------------------------------------------")
     (println (format "Overall Cloze QA Accuracy: %d / %d (%.1f%%) | Mean Target Logit Shift: %+.4f"
@@ -318,6 +366,27 @@
     (println (format "NATURAL ABLATION GAP (Seen Active R_r vs Unseen Zero R_mem): %+.4f logits" ablation-gap))
     (println "================================================================================")
 
+    (println "\n================================================================================")
+    (println "🎯 DISTRACTOR SELECTIVITY DIAGNOSTIC: FACT RETRIEVER VS NEIGHBORHOOD BOOSTER")
+    (println "================================================================================")
+    (println (format "Overall Selectivity      : Neighborhood (%s): %d/%d (%.1f%%) | Pointwise (%s): %d/%d (%.1f%%)"
+                     "Δ_target > mean(Δ_dist)" neigh-sel-cnt total-eval neigh-sel-pct
+                     "Δ_target > max(Δ_dist)" pointwise-sel-cnt total-eval pointwise-sel-pct))
+    (println (format "Overall Magnitude Shifts : Target Δ: %+.4f | Mean Dist Δ: %+.4f | Max Dist Δ: %+.4f | Top-Base Δ: %+.4f"
+                     avg-delta overall-mean-dist-delta overall-mean-max-dist overall-mean-top-base))
+    (println "--------------------------------------------------------------------------------")
+    (println "Frequency Tier     | Eval | Δ_target | Mean Δ_dist | Max Δ_dist | Top-Base Δ | Target > Mean? | Target > Max? (Pointwise)")
+    (println "-------------------+------+----------+-------------+------------+------------+----------------+--------------------------")
+    (doseq [[lbl t-stat] [["Head (>= 50)" head-stats]
+                          ["Mid (10 - 49)" mid-stats]
+                          ["Tail (< 10)" tail-stats]
+                          ["Unseen (0 Core)" unseen-stats]]]
+      (println (format "%-18s | %-4d | %+.4f   | %+.4f      | %+.4f     | %+.4f     | %5.1f%%         | %5.1f%%"
+                       lbl (:n t-stat) (:mean-delta t-stat) (:mean-dist-delta t-stat)
+                       (:mean-max-dist-delta t-stat) (:mean-top-base-delta t-stat)
+                       (:neigh-sel-pct t-stat) (:pointwise-sel-pct t-stat))))
+    (println "================================================================================")
+
     ;; 5. Published Benchmark Comparison Table
     (println "\n================================================================================")
     (println "🏆 ARCHITECTURAL COMPARISON: TL-NANO vs. PUBLISHED WEBNLG BASELINES")
@@ -333,6 +402,11 @@
 
     {:accuracy-pct acc-pct
      :mean-delta-logit avg-delta
+     :overall-mean-dist-delta overall-mean-dist-delta
+     :overall-mean-max-dist overall-mean-max-dist
+     :overall-mean-top-base overall-mean-top-base
+     :neighborhood-selective-pct neigh-sel-pct
+     :pointwise-selective-pct pointwise-sel-pct
      :mrr-z mrr-z
      :mrr-a mrr-a
      :mrr-cand-z mrr-z-cand

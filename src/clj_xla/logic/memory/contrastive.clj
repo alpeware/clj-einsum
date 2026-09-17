@@ -59,6 +59,54 @@
       [:= [:scaled_dR :dm1 :dm2] {:scale lr} [:dR :dm1 :dm2]]
       [:- [:R_new :dm1 :dm2] [:R :dm1 :dm2] [:scaled_dR :dm1 :dm2]]])))
 
+(defn in-vram-contrastive-step-ast
+  "Constructs Tensor Logic AST for an end-to-end, zero-host-transfer InfoNCE training step.
+   Performs 100% in OpenXLA PJRT VRAM:
+   1. Gathers entity embeddings from W_embed:
+      V_h = gather(W_embed, I_h), V_t = gather(W_embed, I_t)
+   2. Subspace projections:
+      U_h = V_h * W, U_t = V_t * W, U_hr = U_h * R
+   3. Scores & in-graph Softmax:
+      Scores = (U_hr * U_t^T) / tau
+      P = softmax(Scores)
+   4. Analytical InfoNCE adjoint matrix:
+      D_P = P - Target
+      G_S = D_P * Mask_Scale
+   5. Backward adjoint gradient contractions:
+      adj_Ut = G_S^T * U_hr, adj_Uhr = G_S * U_t
+      dR = U_h^T * adj_Uhr, adj_Uh = adj_Uhr * R^T
+      dW_h = V_h^T * adj_Uh, dW_t = V_t^T * adj_Ut
+      dW = dW_h + dW_t
+   6. In-graph SGD parameter updates:
+      W_new = W - (lr * lambda_tl) * dW
+      R_new = R - (lr * lambda_tl) * dR"
+  ([_k-triples _dim-in _dim-mem opts]
+   (let [tau (double (or (:tau opts) 0.2))
+         lr (double (or (:lr opts) 0.01))
+         lambda-tl (double (or (:lambda-tl opts) 0.3))
+         step-scale (* lr lambda-tl)]
+     [:block {:name :in_vram_contrastive_step}
+      [:gather [:V_h :k :din] [:W_embed :v :din] [:I_h :k]]
+      [:gather [:V_t :k :din] [:W_embed :v :din] [:I_t :k]]
+      [:= [:U_h :k :dm] [:V_h :k :din] [:W :din :dm]]
+      [:= [:U_t :k :dm] [:V_t :k :din] [:W :din :dm]]
+      [:= [:U_hr :k :dm2] [:U_h :k :dm1] [:R :dm1 :dm2]]
+      [:= [:Scores :k1 :k2] {:scale (/ 1.0 tau)} [:U_hr :k1 :dm] [:U_t :k2 :dm]]
+      [:softmax [:P :k1 :k2] [:Scores :k1 :k2]]
+      [:- [:D_P :k1 :k2] [:P :k1 :k2] [:Target :k1 :k2]]
+      [:* [:G_S :k1 :k2] [:D_P :k1 :k2] [:Mask_Scale :k1 :k2]]
+      [:= [:adj_Ut :k2 :dm] [:G_S :k1 :k2] [:U_hr :k1 :dm]]
+      [:= [:adj_Uhr :k1 :dm] [:G_S :k1 :k2] [:U_t :k2 :dm]]
+      [:= [:dR :dm1 :dm2] [:U_h :k :dm1] [:adj_Uhr :k :dm2]]
+      [:= [:adj_Uh :k :dm1] [:adj_Uhr :k :dm2] [:R :dm1 :dm2]]
+      [:= [:dW_h :din :dm] [:V_h :k :din] [:adj_Uh :k :dm]]
+      [:= [:dW_t :din :dm] [:V_t :k :din] [:adj_Ut :k :dm]]
+      [:+ [:dW :din :dm] [:dW_h :din :dm] [:dW_t :din :dm]]
+      [:= [:scaled_dW :din :dm] {:scale step-scale} [:dW :din :dm]]
+      [:- [:W_new :din :dm] [:W :din :dm] [:scaled_dW :din :dm]]
+      [:= [:scaled_dR :dm1 :dm2] {:scale step-scale} [:dR :dm1 :dm2]]
+      [:- [:R_new :dm1 :dm2] [:R :dm1 :dm2] [:scaled_dR :dm1 :dm2]]])))
+
 ;; ==============================================================================
 ;; 2. InfoNCE Loss & Gradient Utilities
 ;; ==============================================================================
@@ -171,6 +219,32 @@
          ast (contrastive-update-ast din dm opts)]
      (sym/compile-query ctx "contrastive_update" invars ast [:W_new :R_new]))))
 
+(defn compile-in-vram-contrastive-step
+  "Compiles OpenXLA PJRT executable for unified, 100% in-VRAM InfoNCE step:
+   Gathers embeddings, computes projections, in-graph softmax, analytical adjoint matrix,
+   backward contractions, and SGD updates directly in GPU memory."
+  ([vocab-size dim-in k-triples dim-mem]
+   (compile-in-vram-contrastive-step (xla/get-context) vocab-size dim-in k-triples dim-mem nil))
+  ([a b c d e]
+   (if (map? a)
+     (compile-in-vram-contrastive-step a b c d e nil)
+     (compile-in-vram-contrastive-step (xla/get-context) a b c d e)))
+  ([ctx vocab-size dim-in k-triples dim-mem opts]
+   (let [v (long vocab-size)
+         din (long dim-in)
+         k (long k-triples)
+         dm (long dim-mem)
+         invars [[:W_embed [:tensor [v din] :f32]]
+                 [:I_h [:tensor [k] :i32]]
+                 [:I_t [:tensor [k] :i32]]
+                 [:W [:tensor [din dm] :f32]]
+                 [:R [:tensor [dm dm] :f32]]
+                 [:Target [:tensor [k k] :f32]]
+                 [:Mask_Scale [:tensor [k k] :f32]]]
+         ast (in-vram-contrastive-step-ast k din dm opts)
+         targets [:W_new :R_new :P :Scores]]
+     (sym/compile-query ctx "in_vram_contrastive_step" invars ast targets))))
+
 ;; ==============================================================================
 ;; 4. Impure Execution Wrappers (PJRT Dispatch)
 ;; ==============================================================================
@@ -189,3 +263,14 @@
   "Executes SGD parameter update on PJRT device runtime."
   [exec w dw r dr]
   (sym/run-query! exec {:W w :dW dw :R r :dR dr}))
+
+(defn run-in-vram-contrastive-step!
+  "Executes unified in-VRAM InfoNCE step on PJRT runtime."
+  [exec w-embed ih it w r target mask-scale]
+  (sym/run-query! exec {:W_embed w-embed
+                        :I_h ih
+                        :I_t it
+                        :W w
+                        :R r
+                        :Target target
+                        :Mask_Scale mask-scale}))

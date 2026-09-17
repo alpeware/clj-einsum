@@ -204,7 +204,7 @@
         t-c0 (System/nanoTime)
         fwd-train-exec (nano/compile-tl-nano-forward ctx batch-size seq-len cfg)
         embed-update-exec (nano/compile-embedding-update ctx batch-size seq-len cfg lr)
-        bwd-rel-exec (nano/compile-relational-backward ctx 16 hidden-dim dim-mem)
+        in-vram-rel-exec (nano/compile-in-vram-contrastive-step ctx vocab-size hidden-dim 16 dim-mem {:tau 0.2 :lr lr :lambda-tl lambda-tl})
         t-comp (/ (- (System/nanoTime) t-c0) 1e6)
         _ (println (format "OpenXLA Graph Compilation completed in %.2f ms." t-comp))
 
@@ -280,7 +280,7 @@
                            curr-R (get @r-maps rel)
                            p-with-r (assoc p-acc :R_mem curr-R)
                            batch-with-tr (assoc b :triples effective-triples :pos-count (min 16 num-pos))
-                           next-p (nano/train-step fwd-train-exec p-with-r batch-with-tr cfg lr embed-update-exec bwd-rel-exec)
+                           next-p (nano/train-step fwd-train-exec p-with-r batch-with-tr cfg lr embed-update-exec in-vram-rel-exec)
                            loss-info (:loss next-p)]
                        (when (:R_mem next-p)
                          (swap! r-maps assoc rel (:R_mem next-p)))

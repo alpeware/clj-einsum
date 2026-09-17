@@ -346,131 +346,134 @@
 
 (defn compute-joint-loss
   "Computes joint autoregressive LM cross-entropy loss + InfoNCE relational contrastive loss:
-   L_total = L_LM + lambda_TL * L_InfoNCE."
-  [exec params batch cfg]
-  (let [tokens (:tokens batch)
-        targets (:targets batch)
-        triples (:triples batch)
-        b (long (or (:batch-size batch) 1))
-        l (long (:max-seq-len cfg))
-        v (long (:vocab-size cfg))
-        d (long (:hidden-dim cfg))
-        dm (long (:dim-mem cfg))
-        lambda-tl (double (or (:lambda-tl cfg) 0.3))
-        tau (double (or (:tau cfg) 0.2))
+   L_total = L_LM + lambda_TL * L_InfoNCE.
+   Supports optional skip-rel? flag when unified in-VRAM kernel handles relational step."
+  ([exec params batch cfg]
+   (compute-joint-loss exec params batch cfg false))
+  ([exec params batch cfg skip-rel?]
+   (let [tokens (:tokens batch)
+         targets (:targets batch)
+         triples (:triples batch)
+         b (long (or (:batch-size batch) 1))
+         l (long (:max-seq-len cfg))
+         v (long (:vocab-size cfg))
+         d (long (:hidden-dim cfg))
+         dm (long (:dim-mem cfg))
+         lambda-tl (double (or (:lambda-tl cfg) 0.3))
+         tau (double (or (:tau cfg) 0.2))
 
-        inputs (assoc params :x tokens)
-        outputs (run-tl-nano-forward! exec inputs)
-        ^floats logits (:logits outputs)
-        ^floats h-final (:H_final outputs)
+         inputs (assoc params :x tokens)
+         outputs (run-tl-nano-forward! exec inputs)
+         ^floats logits (:logits outputs)
+         ^floats h-final (:H_final outputs)
 
-        ;; 1. Autoregressive Language Model Loss (over L-1 positions)
-        lm-loss-acc (double-array 1)
-        valid-pos (* b (dec l))
-        probs (float-array (* b l v))]
+         ;; 1. Autoregressive Language Model Loss (over L-1 positions)
+         lm-loss-acc (double-array 1)
+         valid-pos (* b (dec l))
+         probs (float-array (* b l v))]
 
-    (dotimes [bi b]
-      (dotimes [pos (dec l)]
-        (let [row-idx (+ (* bi l v) (* pos v))
-              target-tok (aget ^ints targets (+ (* bi l) pos))
-              ;; Find max logit for stable softmax
-              max-l (loop [vi 1 m (double (aget logits row-idx))]
-                      (if (>= vi v)
-                        m
-                        (recur (inc vi) (Math/max m (double (aget logits (+ row-idx vi)))))))
-              exp-sum (loop [vi 0 s 0.0]
-                        (if (>= vi v)
-                          s
-                          (recur (inc vi) (+ s (Math/exp (- (double (aget logits (+ row-idx vi))) max-l))))))]
-          (dotimes [vi v]
-            (let [p (/ (Math/exp (- (double (aget logits (+ row-idx vi))) max-l)) exp-sum)]
-              (aset-float probs (+ row-idx vi) (float p))))
-          (let [p-target (double (aget probs (+ row-idx target-tok)))
-                nll (- (Math/log (Math/max 1e-12 p-target)))]
-            (aset-double lm-loss-acc 0 (+ (aget lm-loss-acc 0) nll))))))
+     (dotimes [bi b]
+       (dotimes [pos (dec l)]
+         (let [row-idx (+ (* bi l v) (* pos v))
+               target-tok (aget ^ints targets (+ (* bi l) pos))
+               ;; Find max logit for stable softmax
+               max-l (loop [vi 1 m (double (aget logits row-idx))]
+                       (if (>= vi v)
+                         m
+                         (recur (inc vi) (Math/max m (double (aget logits (+ row-idx vi)))))))
+               exp-sum (loop [vi 0 s 0.0]
+                         (if (>= vi v)
+                           s
+                           (recur (inc vi) (+ s (Math/exp (- (double (aget logits (+ row-idx vi))) max-l))))))]
+           (dotimes [vi v]
+             (let [p (/ (Math/exp (- (double (aget logits (+ row-idx vi))) max-l)) exp-sum)]
+               (aset-float probs (+ row-idx vi) (float p))))
+           (let [p-target (double (aget probs (+ row-idx target-tok)))
+                 nll (- (Math/log (Math/max 1e-12 p-target)))]
+             (aset-double lm-loss-acc 0 (+ (aget lm-loss-acc 0) nll))))))
 
-    (let [lm-loss (if (pos? valid-pos) (/ (aget lm-loss-acc 0) (double valid-pos)) 0.0)
+     (let [lm-loss (if (pos? valid-pos) (/ (aget lm-loss-acc 0) (double valid-pos)) 0.0)
 
-          ;; 2. Relational Subspace Alignment InfoNCE Loss (on Knowledge Triples)
-          infonce-info
-          (if (and (seq triples) (:W_mem params) (:R_mem params))
-            (let [k-cnt (count triples)
-                  ^floats w-mem (:W_mem params)
-                  ^floats r-mem (:R_mem params)
-                  ^floats w-embed (:W_embed params)
-                  u-h (float-array (* k-cnt dm))
-                  u-t (float-array (* k-cnt dm))
-                  u-hr (float-array (* k-cnt dm))]
+           ;; 2. Relational Subspace Alignment InfoNCE Loss (on Knowledge Triples)
+           infonce-info
+           (if (and (not skip-rel?) (seq triples) (:W_mem params) (:R_mem params))
+             (let [k-cnt (count triples)
+                   ^floats w-mem (:W_mem params)
+                   ^floats r-mem (:R_mem params)
+                   ^floats w-embed (:W_embed params)
+                   u-h (float-array (* k-cnt dm))
+                   u-t (float-array (* k-cnt dm))
+                   u-hr (float-array (* k-cnt dm))]
               ;; Project head & tail entities: u = e @ W_mem
-              (doseq [k-idx (range k-cnt)]
-                (let [{:keys [head tail]} (nth triples k-idx)
-                      h-off (* (long head) d)
-                      t-off (* (long tail) d)
-                      uk-off (* k-idx dm)]
-                  (dotimes [j dm]
-                    (let [sum-h (loop [i 0 s 0.0]
-                                  (if (>= i d) s
-                                      (recur (inc i) (+ s (* (double (aget w-embed (+ h-off i)))
-                                                             (double (aget w-mem (+ (* i dm) j))))))))
-                          sum-t (loop [i 0 s 0.0]
-                                  (if (>= i d) s
-                                      (recur (inc i) (+ s (* (double (aget w-embed (+ t-off i)))
-                                                             (double (aget w-mem (+ (* i dm) j))))))))]
-                      (aset-float u-h (+ uk-off j) (float sum-h))
-                      (aset-float u-t (+ uk-off j) (float sum-t))))
+               (doseq [k-idx (range k-cnt)]
+                 (let [{:keys [head tail]} (nth triples k-idx)
+                       h-off (* (long head) d)
+                       t-off (* (long tail) d)
+                       uk-off (* k-idx dm)]
+                   (dotimes [j dm]
+                     (let [sum-h (loop [i 0 s 0.0]
+                                   (if (>= i d) s
+                                       (recur (inc i) (+ s (* (double (aget w-embed (+ h-off i)))
+                                                              (double (aget w-mem (+ (* i dm) j))))))))
+                           sum-t (loop [i 0 s 0.0]
+                                   (if (>= i d) s
+                                       (recur (inc i) (+ s (* (double (aget w-embed (+ t-off i)))
+                                                              (double (aget w-mem (+ (* i dm) j))))))))]
+                       (aset-float u-h (+ uk-off j) (float sum-h))
+                       (aset-float u-t (+ uk-off j) (float sum-t))))
                   ;; Contract head with R_mem: u_hr = u_h @ R_mem
-                  (dotimes [j dm]
-                    (let [sum-hr (loop [i 0 s 0.0]
-                                   (if (>= i dm) s
-                                       (recur (inc i) (+ s (* (double (aget u-h (+ uk-off i)))
-                                                              (double (aget r-mem (+ (* i dm) j))))))))]
-                      (aset-float u-hr (+ uk-off j) (float sum-hr))))))
+                   (dotimes [j dm]
+                     (let [sum-hr (loop [i 0 s 0.0]
+                                    (if (>= i dm) s
+                                        (recur (inc i) (+ s (* (double (aget u-h (+ uk-off i)))
+                                                               (double (aget r-mem (+ (* i dm) j))))))))]
+                       (aset-float u-hr (+ uk-off j) (float sum-hr))))))
               ;; Compute scores S_ij = (u_hr_i @ u_t_j) / tau
-              (let [scores (float-array (* k-cnt k-cnt))
-                    infonce-probs (float-array (* k-cnt k-cnt))]
-                (dotimes [i k-cnt]
-                  (dotimes [j k-cnt]
-                    (let [dot (loop [m 0 s 0.0]
-                                (if (>= m dm) s
-                                    (recur (inc m) (+ s (* (double (aget u-hr (+ (* i dm) m)))
-                                                           (double (aget u-t (+ (* j dm) m))))))))]
-                      (aset-float scores (+ (* i k-cnt) j) (float (/ dot tau))))))
+               (let [scores (float-array (* k-cnt k-cnt))
+                     infonce-probs (float-array (* k-cnt k-cnt))]
+                 (dotimes [i k-cnt]
+                   (dotimes [j k-cnt]
+                     (let [dot (loop [m 0 s 0.0]
+                                 (if (>= m dm) s
+                                     (recur (inc m) (+ s (* (double (aget u-hr (+ (* i dm) m)))
+                                                            (double (aget u-t (+ (* j dm) m))))))))]
+                       (aset-float scores (+ (* i k-cnt) j) (float (/ dot tau))))))
                 ;; Cross-entropy over in-batch negatives with exact softmax probabilities
-                (let [pos-cnt (min k-cnt (long (or (:pos-count batch) k-cnt)))
-                      loss-sum (loop [i 0 s 0.0]
-                                 (if (>= i pos-cnt) s
-                                     (let [row-off (* i k-cnt)
-                                           max-s (loop [j 1 m (double (aget scores row-off))]
-                                                   (if (>= j k-cnt) m
-                                                       (recur (inc j) (Math/max m (double (aget scores (+ row-off j)))))))
-                                           exp-sum (loop [j 0 es 0.0]
-                                                     (if (>= j k-cnt) es
-                                                         (recur (inc j) (+ es (Math/exp (- (double (aget scores (+ row-off j))) max-s))))))]
-                                       (dotimes [j k-cnt]
-                                         (let [p (/ (Math/exp (- (double (aget scores (+ row-off j))) max-s)) exp-sum)]
-                                           (aset-float infonce-probs (+ row-off j) (float p))))
-                                       (let [pos-s (double (aget scores (+ row-off i)))
-                                             prob (/ (Math/exp (- pos-s max-s)) exp-sum)]
-                                         (recur (inc i) (+ s (- (Math/log (Math/max 1e-12 prob)))))))))]
-                  {:loss (/ loss-sum (double (max 1 pos-cnt)))
-                   :probs infonce-probs
-                   :u-h u-h
-                   :u-t u-t
-                   :u-hr u-hr})))
-            {:loss 0.0 :probs nil :u-h nil :u-t nil :u-hr nil})
+                 (let [pos-cnt (min k-cnt (long (or (:pos-count batch) k-cnt)))
+                       loss-sum (loop [i 0 s 0.0]
+                                  (if (>= i pos-cnt) s
+                                      (let [row-off (* i k-cnt)
+                                            max-s (loop [j 1 m (double (aget scores row-off))]
+                                                    (if (>= j k-cnt) m
+                                                        (recur (inc j) (Math/max m (double (aget scores (+ row-off j)))))))
+                                            exp-sum (loop [j 0 es 0.0]
+                                                      (if (>= j k-cnt) es
+                                                          (recur (inc j) (+ es (Math/exp (- (double (aget scores (+ row-off j))) max-s))))))]
+                                        (dotimes [j k-cnt]
+                                          (let [p (/ (Math/exp (- (double (aget scores (+ row-off j))) max-s)) exp-sum)]
+                                            (aset-float infonce-probs (+ row-off j) (float p))))
+                                        (let [pos-s (double (aget scores (+ row-off i)))
+                                              prob (/ (Math/exp (- pos-s max-s)) exp-sum)]
+                                          (recur (inc i) (+ s (- (Math/log (Math/max 1e-12 prob)))))))))]
+                   {:loss (/ loss-sum (double (max 1 pos-cnt)))
+                    :probs infonce-probs
+                    :u-h u-h
+                    :u-t u-t
+                    :u-hr u-hr})))
+             {:loss 0.0 :probs nil :u-h nil :u-t nil :u-hr nil})
 
-          total-loss (+ lm-loss (* lambda-tl (:loss infonce-info)))]
-      {:total-loss total-loss
-       :lm-loss lm-loss
-       :infonce-loss (:loss infonce-info)
-       :infonce-probs (:probs infonce-info)
-       :u-h (:u-h infonce-info)
-       :u-t (:u-t infonce-info)
-       :u-hr (:u-hr infonce-info)
-       :logits logits
-       :probs probs
-       :H_final h-final
-       :outputs outputs})))
+           total-loss (+ lm-loss (* lambda-tl (:loss infonce-info)))]
+       {:total-loss total-loss
+        :lm-loss lm-loss
+        :infonce-loss (:loss infonce-info)
+        :infonce-probs (:probs infonce-info)
+        :u-h (:u-h infonce-info)
+        :u-t (:u-t infonce-info)
+        :u-hr (:u-hr infonce-info)
+        :logits logits
+        :probs probs
+        :H_final h-final
+        :outputs outputs}))))
 
 (defn compile-embedding-update
   "Compiles OpenXLA PJRT executable for in-VRAM dW_embed contraction and SGD update:
@@ -513,16 +516,28 @@
   ([ctx batch-size hidden-dim dim-mem]
    (contrast/compile-contrastive-backward ctx batch-size hidden-dim dim-mem)))
 
+(defn compile-in-vram-contrastive-step
+  "Compiles OpenXLA PJRT executable for unified, 100% in-VRAM InfoNCE training step:
+   Gathers embeddings, projects subspaces, in-graph softmax, analytical adjoints,
+   backward contractions, and SGD updates directly in GPU memory."
+  ([vocab-size hidden-dim k-triples dim-mem]
+   (compile-in-vram-contrastive-step (xla/get-context) vocab-size hidden-dim k-triples dim-mem nil))
+  ([ctx vocab-size hidden-dim k-triples dim-mem]
+   (compile-in-vram-contrastive-step ctx vocab-size hidden-dim k-triples dim-mem nil))
+  ([ctx vocab-size hidden-dim k-triples dim-mem opts]
+   (contrast/compile-in-vram-contrastive-step ctx vocab-size hidden-dim k-triples dim-mem opts)))
+
 (defn train-step
   "Executes an OpenXLA pre-training step via algebraic autodiff adjoints.
    Updates W_embed, W_mem, R_mem, and output weights with learning rate `lr`.
-   Accepts optional `embed-exec` and `rel-bwd-exec` compiled OpenXLA kernels for in-VRAM contractions."
+   Accepts optional `embed-exec` and `rel-exec` compiled OpenXLA kernels for in-VRAM contractions."
   ([exec params batch cfg lr]
    (train-step exec params batch cfg lr nil nil))
   ([exec params batch cfg lr embed-exec]
    (train-step exec params batch cfg lr embed-exec nil))
   ([exec params batch cfg lr embed-exec rel-bwd-exec]
-   (let [loss-res (compute-joint-loss exec params batch cfg)
+   (let [unified-rel? (and rel-bwd-exec (= (get-in rel-bwd-exec [:graph :name]) "in_vram_contrastive_step"))
+         loss-res (compute-joint-loss exec params batch cfg unified-rel?)
          ^floats probs (:probs loss-res)
          ^floats h-final (:H_final loss-res)
          ^ints targets (:targets batch)
@@ -584,112 +599,150 @@
                    upd (float-array len)]
                (dotimes [i len]
                  (aset-float upd i (float (- (double (aget orig i)) (* eta (double (aget grad-embed i)))))))
-               upd)))]
+               upd)))
 
-     ;; 2. Relational Contrastive Subspace Gradients (if triples present)
-     (when (and (seq triples) (:W_mem params) (:R_mem params) (:infonce-probs loss-res))
-       (let [k-cnt (count triples)
-             ^floats r-mem (:R_mem params)
-             ^floats w-embed (:W_embed params)
-             ^floats u-h (:u-h loss-res)
-             ^floats u-t (:u-t loss-res)
-             ^floats u-hr (:u-hr loss-res)
-             ^floats infonce-probs (:infonce-probs loss-res)
-             pos-cnt (min k-cnt (long (or (:pos-count batch) k-cnt)))
-             inv-k-tau (/ 1.0 (* (double (max 1 pos-cnt)) tau))]
-         (if rel-bwd-exec
-           ;; In-VRAM Relational Contraction via OpenXLA PJRT
-           (let [g-s-arr (float-array (* k-cnt k-cnt))
-                 vh (float-array (* k-cnt d))
-                 vt (float-array (* k-cnt d))]
-             (dotimes [k-idx k-cnt]
-               (let [{:keys [head tail]} (nth triples k-idx)]
-                 (System/arraycopy w-embed (* (long head) d) vh (* k-idx d) d)
-                 (System/arraycopy w-embed (* (long tail) d) vt (* k-idx d) d)))
-             (dotimes [i pos-cnt]
-               (let [row-off (* i k-cnt)]
-                 (dotimes [j k-cnt]
-                   (let [target (if (= i j) 1.0 0.0)
-                         prob (double (aget infonce-probs (+ row-off j)))
-                         g-s (* (- prob target) inv-k-tau)]
-                     (aset-float g-s-arr (+ row-off j) (float g-s))))))
-             (let [bwd-res (sym/run-query! rel-bwd-exec
-                                           {:G_S g-s-arr
-                                            :U_hr u-hr
-                                            :U_t u-t
-                                            :U_h u-h
-                                            :V_h vh
-                                            :V_t vt
-                                            :R r-mem})
-                   ^floats dw (:dW bwd-res)
-                   ^floats dr (:dR bwd-res)
-                   dw-len (alength dw)
-                   dr-len (alength dr)]
-               (dotimes [i dw-len]
-                 (aset-float grad-w-mem i (float (* lambda-tl (double (aget dw i))))))
-               (dotimes [i dr-len]
-                 (aset-float grad-r-mem i (float (* lambda-tl (double (aget dr i))))))))
-           ;; CPU Fallback Loop
-           (let [delta-u-hr (float-array (* k-cnt dm))
-                 delta-u-t (float-array (* k-cnt dm))]
-             (dotimes [i pos-cnt]
-               (let [uk-i (* i dm)
-                     row-off (* i k-cnt)]
-                 (dotimes [j k-cnt]
-                   (let [uk-j (* j dm)
-                         target (if (= i j) 1.0 0.0)
-                         prob (double (aget infonce-probs (+ row-off j)))
-                         g-s (* (- prob target) inv-k-tau)]
+         ;; 2. Relational Contrastive Subspace Step: 100% In-VRAM vs Legacy Backward vs CPU
+         [updated-w-mem updated-r-mem rel-loss infonce-probs]
+         (cond
+           (and unified-rel? (seq triples) (:W_mem params) (:R_mem params))
+           (let [k-cnt (count triples)
+                 pos-cnt (min k-cnt (long (or (:pos-count batch) k-cnt)))
+                 ih (int-array k-cnt)
+                 it (int-array k-cnt)
+                 _ (dotimes [i k-cnt]
+                     (let [t (nth triples i)]
+                       (aset-int ih i (int (:head t)))
+                       (aset-int it i (int (:tail t)))))
+                 target (float-array (* k-cnt k-cnt))
+                 _ (dotimes [i pos-cnt]
+                     (aset-float target (+ (* i k-cnt) i) (float 1.0)))
+                 mask-scale (float-array (* k-cnt k-cnt))
+                 scale-val (/ 1.0 (* (double (max 1 pos-cnt)) tau))
+                 _ (dotimes [i pos-cnt]
+                     (dotimes [j k-cnt]
+                       (aset-float mask-scale (+ (* i k-cnt) j) (float scale-val))))
+                 step-res (contrast/run-in-vram-contrastive-step!
+                           rel-bwd-exec (:W_embed params) ih it (:W_mem params) (:R_mem params) target mask-scale)
+                 ^floats p (:P step-res)
+                 inf-loss (if (pos? pos-cnt)
+                            (let [loss-sum (loop [i 0 s 0.0]
+                                             (if (>= i pos-cnt) s
+                                                 (let [pos-p (double (aget p (+ (* i k-cnt) i)))]
+                                                   (recur (inc i) (+ s (- (Math/log (Math/max 1e-12 pos-p))))))))]
+                              (/ loss-sum (double pos-cnt)))
+                            0.0)]
+             [(:W_new step-res) (:R_new step-res) inf-loss p])
+
+           (and (seq triples) (:W_mem params) (:R_mem params) (:infonce-probs loss-res))
+           (let [k-cnt (count triples)
+                 ^floats r-mem (:R_mem params)
+                 ^floats w-embed (:W_embed params)
+                 ^floats u-h (:u-h loss-res)
+                 ^floats u-t (:u-t loss-res)
+                 ^floats u-hr (:u-hr loss-res)
+                 ^floats infonce-p (:infonce-probs loss-res)
+                 pos-cnt (min k-cnt (long (or (:pos-count batch) k-cnt)))
+                 inv-k-tau (/ 1.0 (* (double (max 1 pos-cnt)) tau))]
+             (if rel-bwd-exec
+               (let [g-s-arr (float-array (* k-cnt k-cnt))
+                     vh (float-array (* k-cnt d))
+                     vt (float-array (* k-cnt d))]
+                 (dotimes [k-idx k-cnt]
+                   (let [{:keys [head tail]} (nth triples k-idx)]
+                     (System/arraycopy w-embed (* (long head) d) vh (* k-idx d) d)
+                     (System/arraycopy w-embed (* (long tail) d) vt (* k-idx d) d)))
+                 (dotimes [i pos-cnt]
+                   (let [row-off (* i k-cnt)]
+                     (dotimes [j k-cnt]
+                       (let [target (if (= i j) 1.0 0.0)
+                             prob (double (aget infonce-p (+ row-off j)))
+                             g-s (* (- prob target) inv-k-tau)]
+                         (aset-float g-s-arr (+ row-off j) (float g-s))))))
+                 (let [bwd-res (sym/run-query! rel-bwd-exec
+                                               {:G_S g-s-arr
+                                                :U_hr u-hr
+                                                :U_t u-t
+                                                :U_h u-h
+                                                :V_h vh
+                                                :V_t vt
+                                                :R r-mem})
+                       ^floats dw (:dW bwd-res)
+                       ^floats dr (:dR bwd-res)
+                       dw-len (alength dw)
+                       dr-len (alength dr)]
+                   (dotimes [i dw-len]
+                     (aset-float grad-w-mem i (float (* lambda-tl (double (aget dw i))))))
+                   (dotimes [i dr-len]
+                     (aset-float grad-r-mem i (float (* lambda-tl (double (aget dr i))))))))
+               ;; CPU Fallback Loop
+               (let [delta-u-hr (float-array (* k-cnt dm))
+                     delta-u-t (float-array (* k-cnt dm))]
+                 (dotimes [i pos-cnt]
+                   (let [uk-i (* i dm)
+                         row-off (* i k-cnt)]
+                     (dotimes [j k-cnt]
+                       (let [uk-j (* j dm)
+                             target (if (= i j) 1.0 0.0)
+                             prob (double (aget infonce-p (+ row-off j)))
+                             g-s (* (- prob target) inv-k-tau)]
+                         (dotimes [m1 dm]
+                           (let [v-uh (double (aget u-h (+ uk-i m1)))]
+                             (dotimes [m2 dm]
+                               (let [idx (+ (* m1 dm) m2)
+                                     v-ut (double (aget u-t (+ uk-j m2)))]
+                                 (aset-float grad-r-mem idx (float (+ (double (aget grad-r-mem idx))
+                                                                      (* lambda-tl g-s v-uh v-ut))))))))
+                         (dotimes [m dm]
+                           (let [v-ut (double (aget u-t (+ uk-j m)))
+                                 v-uhr (double (aget u-hr (+ uk-i m)))]
+                             (aset-float delta-u-hr (+ uk-i m) (float (+ (double (aget delta-u-hr (+ uk-i m)))
+                                                                         (* g-s v-ut))))
+                             (aset-float delta-u-t (+ uk-j m) (float (+ (double (aget delta-u-t (+ uk-j m)))
+                                                                        (* g-s v-uhr))))))))))
+                 (dotimes [k-idx k-cnt]
+                   (let [{:keys [head tail]} (nth triples k-idx)
+                         h-off (* (long head) d)
+                         t-off (* (long tail) d)
+                         uk-off (* k-idx dm)
+                         delta-u-h (float-array dm)]
                      (dotimes [m1 dm]
-                       (let [v-uh (double (aget u-h (+ uk-i m1)))]
-                         (dotimes [m2 dm]
-                           (let [idx (+ (* m1 dm) m2)
-                                 v-ut (double (aget u-t (+ uk-j m2)))]
-                             (aset-float grad-r-mem idx (float (+ (double (aget grad-r-mem idx))
-                                                                  (* lambda-tl g-s v-uh v-ut))))))))
-                     (dotimes [m dm]
-                       (let [v-ut (double (aget u-t (+ uk-j m)))
-                             v-uhr (double (aget u-hr (+ uk-i m)))]
-                         (aset-float delta-u-hr (+ uk-i m) (float (+ (double (aget delta-u-hr (+ uk-i m)))
-                                                                     (* g-s v-ut))))
-                         (aset-float delta-u-t (+ uk-j m) (float (+ (double (aget delta-u-t (+ uk-j m)))
-                                                                    (* g-s v-uhr))))))))))
-             (dotimes [k-idx k-cnt]
-               (let [{:keys [head tail]} (nth triples k-idx)
-                     h-off (* (long head) d)
-                     t-off (* (long tail) d)
-                     uk-off (* k-idx dm)
-                     delta-u-h (float-array dm)]
-                 (dotimes [m1 dm]
-                   (let [s (loop [m2 0 acc 0.0]
-                             (if (>= m2 dm) acc
-                                 (recur (inc m2) (+ acc (* (double (aget delta-u-hr (+ uk-off m2)))
-                                                           (double (aget r-mem (+ (* m1 dm) m2))))))))]
-                     (aset-float delta-u-h m1 (float s))))
-                 (dotimes [di d]
-                   (let [vh (double (aget w-embed (+ h-off di)))
-                         vt (double (aget w-embed (+ t-off di)))]
-                     (dotimes [dj dm]
-                       (let [idx (+ (* di dm) dj)
-                             duh (double (aget delta-u-h dj))
-                             dut (double (aget delta-u-t (+ uk-off dj)))]
-                         (aset-float grad-w-mem idx (float (+ (double (aget grad-w-mem idx))
-                                                              (* lambda-tl (+ (* vh duh) (* vt dut))))))))))))))))
+                       (let [s (loop [m2 0 acc 0.0]
+                                 (if (>= m2 dm) acc
+                                     (recur (inc m2) (+ acc (* (double (aget delta-u-hr (+ uk-off m2)))
+                                                               (double (aget r-mem (+ (* m1 dm) m2))))))))]
+                         (aset-float delta-u-h m1 (float s))))
+                     (dotimes [di d]
+                       (let [vh (double (aget w-embed (+ h-off di)))
+                             vt (double (aget w-embed (+ t-off di)))]
+                         (dotimes [dj dm]
+                           (let [idx (+ (* di dm) dj)
+                                 duh (double (aget delta-u-h dj))
+                                 dut (double (aget delta-u-t (+ uk-off dj)))]
+                             (aset-float grad-w-mem idx (float (+ (double (aget grad-w-mem idx))
+                                                                  (* lambda-tl (+ (* vh duh) (* vt dut))))))))))))))
+             (let [update-array (fn [^floats orig ^floats grad]
+                                  (let [len (alength orig)
+                                        updated (float-array len)]
+                                    (dotimes [i len]
+                                      (aset-float updated i (float (- (double (aget orig i)) (* eta (double (aget grad i)))))))
+                                    updated))]
+               [(update-array (:W_mem params) grad-w-mem)
+                (update-array (:R_mem params) grad-r-mem)
+                (or (:infonce-loss loss-res) 0.0)
+                infonce-p]))
 
-      ;; 3. Parameter Update: P_new = P - eta * grad_P
-     (let [update-array (fn [^floats orig ^floats grad]
-                          (let [len (alength orig)
-                                updated (float-array len)]
-                            (dotimes [i len]
-                              (aset-float updated i (float (- (double (aget orig i)) (* eta (double (aget grad i)))))))
-                            updated))
-           updated-w-mem (update-array (:W_mem params) grad-w-mem)
-           updated-r-mem (update-array (:R_mem params) grad-r-mem)]
-       (assoc params
-              :W_embed updated-embed
-              :W_mem updated-w-mem
-              :R_mem updated-r-mem
-              :loss loss-res)))))
+           :else
+           [(:W_mem params) (:R_mem params) (or (:infonce-loss loss-res) 0.0) (:infonce-probs loss-res)])
+
+         final-loss (assoc loss-res
+                           :infonce-loss rel-loss
+                           :infonce-probs infonce-probs
+                           :total-loss (+ (:lm-loss loss-res) (* lambda-tl rel-loss)))]
+     (assoc params
+            :W_embed updated-embed
+            :W_mem updated-w-mem
+            :R_mem updated-r-mem
+            :loss final-loss))))
 
 (defn estimate-tl-nano-vram
   "Calculates theoretical VRAM footprint and parameter count for TL-Nano configurations."

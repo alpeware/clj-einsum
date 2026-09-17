@@ -174,3 +174,49 @@
                 acc (/ (double hits-at-1) b)]
             ;; Hits@1 on held-out test triples must exceed chance (1/8 = 12.5%) and reach >= 75%
             (is (>= acc 0.75) (format "Test Hits@1 must be >= 75%%, got %.1f%%" (* 100.0 acc)))))))))
+
+(deftest test-in-vram-contrastive-step
+  (testing "Unified in-VRAM InfoNCE step gathers, computes softmax, adjoints, and updates 100% on device"
+    (let [v 64
+          din 16
+          k 4
+          dm 8
+          tau 0.2
+          lr 0.05
+          lambda-tl 1.0
+          w-embed (float-array (* v din))
+          _ (dotimes [i (* v din)]
+              (aset w-embed i (* (float 0.1) (float (Math/sin (double i))))))
+          ih (int-array [0 1 2 3])
+          it (int-array [4 5 6 7])
+          w (float-array (* din dm))
+          _ (dotimes [i (* din dm)]
+              (aset w i (* (float 0.1) (float (Math/cos (double i))))))
+          r (float-array (* dm dm))
+          _ (dotimes [i (* dm dm)]
+              (aset r i (if (= (mod i (inc dm)) 0) (float 1.0) (float 0.0))))
+          target (float-array (* k k))
+          _ (dotimes [i k] (aset target (+ (* i k) i) (float 1.0)))
+          mask-scale (float-array (* k k))
+          scale-val (/ 1.0 (* (double k) tau))
+          _ (dotimes [i (* k k)] (aset mask-scale i (float scale-val)))
+
+          exec (contrast/compile-in-vram-contrastive-step v din k dm {:tau tau :lr lr :lambda-tl lambda-tl})
+          out (contrast/run-in-vram-contrastive-step! exec w-embed ih it w r target mask-scale)]
+      (is (contains? out :W_new))
+      (is (contains? out :R_new))
+      (is (contains? out :P))
+      (is (contains? out :Scores))
+
+      (let [^floats p (:P out)
+            ^floats w-new (:W_new out)
+            ^floats r-new (:R_new out)]
+        (is (= (* din dm) (alength w-new)))
+        (is (= (* dm dm) (alength r-new)))
+        (is (= (* k k) (alength p)))
+
+        ;; Softmax row sums must be ~1.0
+        (dotimes [i k]
+          (let [row-sum (reduce + (map #(double (aget p (+ (* i k) %))) (range k)))]
+            (is (< (Math/abs (- row-sum 1.0)) 1e-4)
+                (format "Row %d softmax sum must be 1.0, got %f" i row-sum))))))))

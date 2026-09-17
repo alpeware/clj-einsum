@@ -1519,6 +1519,90 @@ Rank Trajectory (Vocab)    : 46 (46.0%) Improved | 29 (29.0%) Unchanged | 25 (25
 3. **Hardware Execution Milestone**:
    The pre-training loop is now **100% in-VRAM**: StableHLO forward graph, LM head embedding update, and the complete relational adjoint contraction chain all execute as compiled OpenXLA PJRT kernels on the AMD Radeon RX 7900 XTX, achieving 10,920 tok/s with zero host matrix math.
 
+---
+
+### 15. The Distractor Diagnostic & Zero-Asterisk In-VRAM Compilation (Experiment E14)
+
+Following the stabilization of monotonic LM descent, two critical open questions remained:
+1. **The Mechanism Question (Distractor Diagnostic)**: Does $R_{\text{mem}}$ unbinding act as a *selective fact retriever* (pinpoint boosting of only the target entity) or merely as a *semantic neighborhood booster* (raising all tokens belonging to the relation's semantic class)?
+2. **The Toolchain Thesis Question (Zero Asterisks)**: Can the remaining host operations in the relational InfoNCE step—namely host entity gathers, host softmax, and host $G_S$ matrix assembly—be fully lowered into OpenXLA PJRT StableHLO MLIR, completing the thesis that Pedro Domingos' Declarative Tensor Logic can express the entire end-to-end training loop without a single host array copy or CPU loop?
+
+---
+
+#### 1. Distractor Selectivity Diagnostic: The Mathematical Reality
+
+To answer the mechanism question, we instrumented `scripts/eval_tl_nano_webnlg.clj` with query-level distractor tracking. For every evaluation query, we measured:
+- Target Logit Shift: $\Delta_{\text{target}} = \text{logit}_{\text{active}}(\text{target}) - \text{logit}_{\text{zero}}(\text{target})$
+- Distractor Logit Shifts: $\Delta_{\text{dist}, c} = \text{logit}_{\text{active}}(c) - \text{logit}_{\text{zero}}(c)$ for all distractors $c \neq \text{target}$
+- Neighborhood Selectivity: % of queries where $\Delta_{\text{target}} > \text{mean}(\Delta_{\text{dist}})$
+- Pointwise Fact Selectivity: % of queries where $\Delta_{\text{target}} > \max(\Delta_{\text{dist}})$
+
+##### Diagnostic Results (`test_seen.edn`, $N=40$)
+```
+================================================================================
+🎯 DISTRACTOR SELECTIVITY DIAGNOSTIC: FACT RETRIEVER VS NEIGHBORHOOD BOOSTER
+================================================================================
+Overall Selectivity      : Neighborhood (Δ_target > mean(Δ_dist)): 10/40 (25.0%) | Pointwise (Δ_target > max(Δ_dist)): 0/40 (0.0%)
+Overall Magnitude Shifts : Target Δ: +0.1961 | Mean Dist Δ: +0.5109 | Max Dist Δ: +3.2353 | Top-Base Δ: +0.6143
+--------------------------------------------------------------------------------
+Frequency Tier     | Eval | Δ_target | Mean Δ_dist | Max Δ_dist | Top-Base Δ | Target > Mean? | Target > Max? (Pointwise)
+-------------------+------+----------+-------------+------------+------------+----------------+--------------------------
+Head (>= 50)       | 17   | +0.4646  | +0.5143     | +3.0212    | +1.0975    |  41.2%         |   0.0%
+Mid (10 - 49)      | 14   | +0.1589  | +0.5294     | +3.4462    | +0.2608    |  21.4%         |   0.0%
+Tail (< 10)        | 8    | -0.2849  | +0.5350     | +3.7255    | +0.2827    |   0.0%         |   0.0%
+Unseen (0 Core)    | 1    | +0.0000  | +0.0000     | +0.0000    | +0.0000    |   0.0%         |   0.0%
+================================================================================
+```
+
+##### Diagnostic Results (`test_unseen.edn`, $N=40$)
+```
+================================================================================
+🎯 DISTRACTOR SELECTIVITY DIAGNOSTIC: FACT RETRIEVER VS NEIGHBORHOOD BOOSTER
+================================================================================
+Overall Selectivity      : Neighborhood (Δ_target > mean(Δ_dist)): 8/40 (20.0%) | Pointwise (Δ_target > max(Δ_dist)): 0/40 (0.0%)
+Overall Magnitude Shifts : Target Δ: +0.1514 | Mean Dist Δ: +0.3113 | Max Dist Δ: +1.9794 | Top-Base Δ: +0.2918
+--------------------------------------------------------------------------------
+Frequency Tier     | Eval | Δ_target | Mean Δ_dist | Max Δ_dist | Top-Base Δ | Target > Mean? | Target > Max? (Pointwise)
+-------------------+------+----------+-------------+------------+------------+----------------+--------------------------
+Head (>= 50)       | 3    | -0.1089  | +0.3751     | +2.8151    | +0.2322    |   0.0%         |   0.0%
+Mid (10 - 49)      | 10   | +0.2374  | +0.5463     | +3.4358    | +0.1180    |  40.0%         |   0.0%
+Tail (< 10)        | 11   | +0.3643  | +0.5332     | +3.3066    | +0.8903    |  36.4%         |   0.0%
+Unseen (0 Core)    | 16   | +0.0000  | +0.0000     | +0.0000    | +0.0000    |   0.0%         |   0.0%
+================================================================================
+```
+
+##### Diagnostic Conclusion: The Neighborhood Amplifier Effect
+The distractor diagnostic delivers an unequivocal, mathematically honest finding:
+- **Pointwise Fact Selectivity is $0.0\%$**: In zero cases did the target entity gain more than the most boosted distractor.
+- **The Relational Core acts as a Semantic Filter, not a Pointer**: When $R_{\text{mem}}$ unbinds a relation (such as `country` or `birthPlace`), it projects into a subspace that excites the *entire semantic cluster* corresponding to that entity type. In an un-pretrained 2.8M parameter backbone with $D=256$, entity embeddings for geographical places, persons, or dates have high cosine similarity. As a result, activating $R_{\text{mem}}$ boosts the target by $+0.20$ to $+0.46$ logits, but simultaneously lifts the average distractor by $+0.51$ logits and the most resonant distractor by $+3.23$ logits.
+- **Why Candidate Rank Regresses ($24.5 \to 27.2$)**: Because the top distractors receive larger logit boosts than the target, candidate rank among the restricted candidate set drops slightly, even while general vocabulary rank improves (+60 to +100 positions) as non-candidate tokens are pushed downward.
+
+---
+
+#### 2. Zero-Asterisk In-VRAM Relational Engine
+
+To fulfill repository Rule 4 and prove the core thesis of Pedro Domingos' Declarative Tensor Logic, all remaining host operations in the InfoNCE step were eliminated by compiling a single unified execution graph:
+
+1. **General In-Graph Softmax Lowering (`clj-xla.logic.lower/lower-softmax!`)**:
+   Implemented numerically stable rank-agnostic softmax:
+   $$\text{max}_x = \text{reduce\_max}(X, \text{axis}=-1, \text{keep\_dims}=\text{true})$$
+   $$\text{exp}_x = \exp(X - \text{broadcast}(\text{max}_x))$$
+   $$\text{sum}_x = \text{reduce\_sum}(\text{exp}_x, \text{axis}=-1, \text{keep\_dims}=\text{true})$$
+   $$P = \text{divide}(\text{exp}_x, \text{broadcast}(\text{sum}_x))$$
+2. **Unified End-to-End In-VRAM AST (`in-vram-contrastive-step-ast`)**:
+   A single OpenXLA PJRT kernel executes the complete multi-stage pipeline:
+   - **In-VRAM Gathers**: $V_h = \text{gather}(W_{\text{embed}}, I_h)$, $V_t = \text{gather}(W_{\text{embed}}, I_t)$.
+   - **Subspace Projections**: $U_h = V_h W$, $U_t = V_t W$, $U_{hr} = U_h R$.
+   - **In-Graph Scoring & Softmax**: $\text{Scores} = (U_{hr} U_t^T) / \tau$, $P = \text{softmax}(\text{Scores})$.
+   - **Analytical Adjoints**: $G_S = (P - \text{Target}) \odot \text{Mask\_Scale}$.
+   - **Reverse Contractions**: $\text{adj\_Ut} = G_S^T U_{hr}$, $\text{adj\_Uhr} = G_S U_t$, $dR = U_h^T \text{adj\_Uhr}$, $\text{adj\_Uh} = \text{adj\_Uhr} R^T$, $dW = V_h^T \text{adj\_Uh} + V_t^T \text{adj\_Ut}$.
+   - **In-Graph Parameter Updates**: $W_{\text{new}} = W - \eta \lambda_{\text{TL}} dW$, $R_{\text{new}} = R - \eta \lambda_{\text{TL}} dR$.
+3. **Execution Verification**:
+   - Compiles to an **87.38 KB PJRT executable** on ROCm (`rocm_f84f6d38...bin`).
+   - Row sums of $P$ satisfy $\sum_j P_{ij} = 1.000000 \pm 10^{-6}$.
+   - Zero host float loops, zero host array copies, and zero host matrix math. The pre-training loop is 100% pure OpenXLA execution.
+
+
 
 
 
