@@ -74,7 +74,13 @@
                          [s1 s2])))]
     {:parent-pairs parent-pairs
      :grandparent-pairs grandparent-pairs
-     :sibling-pairs sibling-pairs}))
+     :sibling-pairs sibling-pairs
+     :mating-child mating-child
+     :other-child (first (filter #(not= % mating-child) gen1-children))
+     :founders [f1 f2]
+     :spouse gen1-spouse
+     :gen1-children gen1-children
+     :gen2-children gen2-children}))
 
 (defn- pairs->matrix
   "Converts a collection of [h t] index pairs into an N x N float matrix (nested vector)."
@@ -179,6 +185,7 @@
      {:num-entities n
       :num-trees num-trees
       :seed seed
+      :trees trees-data
       :parent-pairs parent-pairs
       :grandparent-pairs gp-pairs
       :sibling-pairs sib-pairs
