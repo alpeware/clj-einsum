@@ -16,6 +16,7 @@
             [clj-xla.logic.ast-test]
             [clj-xla.logic.autodiff-test]
             [clj-xla.logic.core-test]
+            [clj-xla.logic.data.family-trees-test]
             [clj-xla.logic.dce-test]
             [clj-xla.logic.expand-test]
             [clj-xla.logic.exl3-test]
@@ -39,6 +40,7 @@
             [clj-xla.logic.attention.kg-masked-test]
             [clj-xla.logic.models.tl-block-test]
             [clj-xla.logic.models.tl-nano-test]
+            [clj-xla.logic.predicate-invention-test]
             [clj-xla.logic.agent.state-tracker-test]
             [clj-xla.logic.agent.swe-benchmark-test]
             [clj-xla.logic.semiring-test]
@@ -93,6 +95,7 @@
                            'clj-xla.logic.ast-test
                            'clj-xla.logic.autodiff-test
                            'clj-xla.logic.core-test
+                           'clj-xla.logic.data.family-trees-test
                            'clj-xla.logic.dce-test
                            'clj-xla.logic.expand-test
                            'clj-xla.logic.gemma-test
@@ -122,6 +125,7 @@
                            'clj-xla.logic.attention.kg-masked-test
                            'clj-xla.logic.models.tl-block-test
                            'clj-xla.logic.models.tl-nano-test
+                           'clj-xla.logic.predicate-invention-test
                            'clj-xla.logic.agent.state-tracker-test
                            'clj-xla.logic.agent.swe-benchmark-test
                            'clj-xla.core-test)
