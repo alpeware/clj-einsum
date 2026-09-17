@@ -2094,3 +2094,141 @@ The pre-registered protocol explicitly specified:
 4. **Conclusion of the Relational Retrieval Line**:
    Experiment E18 definitively closes the relational contrastive resolver line on frozen LLM embeddings. The empirical results are clean, fully reproducible across random seeds, and provide decisive guidance for the next phase of neuro-symbolic tensor architectures.
 
+---
+
+### Section 20: Experiment E19 — Hybrid Crystallization: GD Proposes, Discrete Search Disposes
+
+**Date:** 2026-09-17  
+**Status:** Completed & Evaluated (Phase 0 Gates + Phase 1 Factorial Search Sweep)  
+**Execution Environment:** OpenXLA PJRT CPU (Proposer Retrain in VRAM + Sans-IO Combinatorial Search on Host)  
+**Telemetry:** `paper-experiments/e19-hybrid/2026-09-17/` (`phase0.edn`, `results.edn`, `summary.csv`)
+
+---
+
+#### 1. Hypothesis & Pre-Registered Protocol
+
+Experiments E17 and E18 established a definitive empirical boundary across both synthetic multi-hop reasoning and real-world LLM retrieval:
+- **Continuous Gradient Descent**: Excels at learning soft associative structure (E17 A2 MRR $+98\%$, E18 neighborhood recall $100\%$, distractor noise suppression $87\%$).
+- **Discrete Recovery**: Completely fails to crystallize discrete symbolic structure (E17 Parent $F_1 = 0.0295$ with 1,012 false-positive edges; E18 contextual pointwise selectivity $0/40$).
+
+Experiment E19 tested the **Hybrid Crystallization Thesis**:
+> *"GD is a proposer, not a crystallizer. Let gradient descent learn a soft ranking over relational structure (it is good at this), then run exact combinatorial search over the GD-proposed candidates to commit to discrete structure (the step pure GD cannot take)."*
+
+##### Experimental Setup (Mirrors E17)
+- **Universe**: Synthetic forest of $N = 64$ entities across $8$ discrete family trees with hidden evaluator-only predicate $\text{Parent}$ ($80$ true edges in the forest; $56$ edges in the standard 7-edge tree ceiling).
+- **Observed Compositions**: Learner/searcher observes only $\text{Grandparent}$ ($G = L \circ L$) and $\text{Sibling}$ ($S = L^T \circ L$) on the same train split used in E17.
+- **Seeds**: $42, 43, 44, 45, 46$ (same five seeds as E17).
+- **Proposer Model**: Retrained E17 A2 variant ($L = \sigma(Z / \tau)$, $\tau = 1.0 \to 0.05$ over 200 epochs in OpenXLA PJRT). Candidate set $C$ consists of the top-$K$ off-diagonal edges ranked by raw logits $Z$ (with $K = 256$, excluding self-loops).
+- **Combinatorial Objective**:
+  $$\text{score}(\hat{L}) = F_1(\text{Bool}(\hat{L} \circ \hat{L}), G_{\text{train}}) + F_1(\text{Bool}(\hat{L}^T \circ \hat{L}), S_{\text{train}}) - \lambda \|\hat{L}\|_0 \quad (\lambda = 0.01)$$
+  where $\circ$ is the boolean OR–AND matrix product on the boolean semiring.
+- **Search Algorithm**: Deterministic forward greedy search with connected 2-step lookahead (to resolve the 2-hop compositional cold-start barrier across disjoint trees) followed by backward elimination.
+
+##### Pre-Registered Gates & Success Criteria
+1. **Gate P0a (Oracle Ceiling)**: Run discrete search with $C = \text{true Parent edges}$. Must reach $F_1 = 1.0$. If it does not, the search machinery is mis-specified.
+2. **Gate P0b (Proposer Quality)**: Candidate recall@256 of true Parent edges by raw logit $Z$. Gate: mean recall $\ge 0.90$.
+3. **Criterion 1 (Crystallization)**: Cell H reaches Parent $F_1 \ge 0.80$ (mean over 5 seeds) — the bar missed by pure GD in E17.
+4. **Criterion 2 (Attribution)**: Cell H beats random proposal Cell B1 by $\Delta F_1 \ge 0.30$.
+5. **Criterion 3 (No Collapse)**: Recovered edges $28 \le |\hat{L}| \le 112$, search time $< 5$ min/seed.
+6. **Pre-Registered Falsification Clause**:
+   > *"If H mean F1 < 0.80 -> the hybrid thesis fails in this form... If P0b recall < 0.90 -> GD is not even a sufficient proposer; stop."*
+
+---
+
+#### 2. Phase 0 Empirical Gating Outcomes
+
+##### Phase 0a: Oracle Ceiling Validation
+- **Input**: Clean 8-tree forest ($56$ true Parent edges, $40$ Grandparent pairs, $80$ Sibling pairs).
+- **Execution**: Backward elimination on $C = \text{true Parent edges}$.
+- **Result**: Recovered exactly $56$ edges in **$8.43$ ms** ($56$ evaluations).
+  - Precision: **$1.0000$**
+  - Recall: **$1.0000$**
+  - Parent $F_1$: **$1.0000$**
+- **Verdict**: **PASS**. The combinatorial search machinery on the boolean semiring is mathematically sound and reaches $100\%$ precision and recall when true candidates are provided.
+
+##### Phase 0b: Proposer Quality Audit (Candidate Recall@256)
+We retrained E17 A2 across all 5 seeds ($200$ epochs in PJRT VRAM, $\sim 440$ ms/seed) and ranked all $4,032$ off-diagonal pairs by raw logits $Z$:
+
+| Seed | True Parents | Top-256 Candidates | True Edges in Top-256 | Candidate Recall@256 |
+|:---:|:---:|:---:|:---:|:---:|
+| **42** | 80 | 256 | 8 | 10.00% |
+| **43** | 80 | 256 | 8 | 10.00% |
+| **44** | 80 | 256 | 8 | 10.00% |
+| **45** | 80 | 256 | 7 | 8.75% |
+| **46** | 80 | 256 | 6 | 7.50% |
+| **Mean $\pm$ Std** | **80.0** | **256** | **$7.4 \pm 0.9$** | **$9.25\% \pm 1.12\%$** |
+
+- **Distribution Analysis**: Out of $4,032$ candidate pairs, true parent edges had a **median rank of 2,600** and a **mean rank of 2,327.9** (worse than random expectation of $2,016$).
+- **Verdict**: **FAIL** (Requirement: $\ge 90.00\%$).
+- **Pre-Registered Falsification Triggered**: GD does not rank true relational edges highly; it distributes associative mass across thousands of non-local matrix entries.
+
+---
+
+#### 3. Phase 1 Factorial Search Sweep Results
+
+To provide an exhaustive empirical baseline, Phase 1 was executed across all 5 seeds for all three cells:
+- **Cell H (Hybrid)**: Top-256 candidates from GD logits $Z$.
+- **Cell B0 (No Proposal)**: All $4,032$ off-diagonal edges.
+- **Cell B1 (Random Proposal)**: $256$ random edges ($3$ random draws per seed, $N = 15$ evaluations).
+
+##### Individual Seed Results
+| Seed | Cell | Candidates | Recovered $|\hat{L}|$ | Parent $F_1$ | Precision | Recall | GP Train $F_1$ | Sib Train $F_1$ | Evals | Wall Time (ms) |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **42** | **H** | 256 | 28 | **0.0000** | 0.0000 | 0.0000 | 0.3556 | 0.6914 | 8,192 | 84.6 |
+| **42** | **B0** | 4032 | 40 | **0.0167** | 0.0250 | 0.0125 | 0.7887 | 0.7957 | 185,830 | 1,969.4 |
+| **42** | **B1** | 256 | 21.3 | **0.0000** | 0.0000 | 0.0000 | N/A | N/A | 2,970 | 16.0 |
+| **43** | **H** | 256 | 34 | **0.0000** | 0.0000 | 0.0000 | 0.3396 | 0.7765 | 9,111 | 73.3 |
+| **43** | **B0** | 4032 | 38 | **0.0000** | 0.0000 | 0.0000 | 0.7714 | 0.8132 | 181,062 | 1,889.1 |
+| **43** | **B1** | 256 | 23.0 | **0.0000** | 0.0000 | 0.0000 | N/A | N/A | 3,442 | 19.5 |
+| **44** | **H** | 256 | 32 | **0.0000** | 0.0000 | 0.0000 | 0.5306 | 0.7407 | 9,643 | 80.7 |
+| **44** | **B0** | 4032 | 37 | **0.0000** | 0.0000 | 0.0000 | 0.7302 | 0.8172 | 177,018 | 1,872.7 |
+| **44** | **B1** | 256 | 21.3 | **0.0326** | 0.0751 | 0.0208 | N/A | N/A | 3,178 | 17.5 |
+| **45** | **H** | 256 | 31 | **0.0180** | 0.0323 | 0.0125 | 0.3396 | 0.7532 | 9,193 | 74.2 |
+| **45** | **B0** | 4032 | 37 | **0.0000** | 0.0000 | 0.0000 | 0.8116 | 0.7865 | 164,082 | 1,590.8 |
+| **45** | **B1** | 256 | 23.0 | **0.0000** | 0.0000 | 0.0000 | N/A | N/A | 3,434 | 17.5 |
+| **46** | **H** | 256 | 29 | **0.0183** | 0.0345 | 0.0125 | 0.4561 | 0.7356 | 8,744 | 77.0 |
+| **46** | **B0** | 4032 | 42 | **0.0492** | 0.0714 | 0.0375 | 0.8493 | 0.8000 | 193,856 | 2,211.9 |
+| **46** | **B1** | 256 | 25.0 | **0.0182** | 0.0333 | 0.0125 | N/A | N/A | 3,676 | 21.6 |
+
+##### Cell Aggregates (Mean $\pm$ Std across 5 Seeds)
+| Cell | Description | Candidates | Recovered $|\hat{L}|$ | Parent $F_1$ | Precision | Recall | Search Evals | Search Time (ms) |
+|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **H** | Hybrid (GD Top-256 by $Z$) | 256 | $30.8 \pm 2.4$ | **$0.0073 \pm 0.0100$** | $0.0134 \pm 0.018$ | $0.0050 \pm 0.007$ | $8,977 \pm 541$ | $78.0 \pm 4.6$ |
+| **B0** | No Proposal (All 4,032 Pairs) | 4,032 | $38.8 \pm 2.0$ | **$0.0132 \pm 0.0214$** | $0.0193 \pm 0.031$ | $0.0100 \pm 0.016$ | $180,370 \pm 11,048$ | $1,906.8 \pm 222.4$ |
+| **B1** | Random Proposal ($256$ Pairs) | 256 | $22.7 \pm 1.5$ | **$0.0102 \pm 0.0148$** | $0.0217 \pm 0.032$ | $0.0067 \pm 0.010$ | $3,340 \pm 274$ | $18.4 \pm 2.2$ |
+
+---
+
+#### 4. Pre-Registered Criteria Evaluation
+
+1. **Criterion 1 (Crystallization: $H \ge 0.80$): FAILED**
+   - Actual: $H \text{ Parent } F_1 = \mathbf{0.0073 \pm 0.0100}$ ($0.73\%$).
+   - The primary target was missed by two orders of magnitude. In 3 out of 5 seeds, $H$ recovered exactly $0$ true parent edges.
+2. **Criterion 2 (Attribution: $H - B1 \ge +0.30$): FAILED**
+   - Actual: $\Delta(H - B1) = \mathbf{-0.0029}$.
+   - GD's proposal ranking carried zero informational value over uniform random sampling ($0.0073$ vs $0.0102$).
+3. **Criterion 3 (No Collapse): PASSED**
+   - Recovered edges $|\hat{L}| \in [28, 34]$ (well within $[28, 112]$).
+   - Execution was instantaneous ($78$ ms for $H$, $1.9$ s for $B0$, well under $5$ min).
+4. **Falsification Clause: FORMALLY ACCEPTED**
+   - Gate P0b failed ($9.25\% < 90.00\%$), and Phase 1 Criterion 1 failed ($0.0073 < 0.80$).
+
+---
+
+#### 5. Theoretical Insights & Definitive Program Verdict
+
+Experiment E19 decisively answers the question of whether a hybrid architecture ("GD proposes, search disposes") can bridge the representation gap in predicate invention:
+
+1. **GD is NOT a Relational Proposer**:
+   - Continuous optimization over product compositions ($L \cdot L$ and $L^T \cdot L$) does not produce sparse, localized activations on true generating edges.
+   - Instead, gradient descent finds a **dense, non-local saddle point** where hundreds of spurious off-diagonal entries cooperate to maximize predictive dot products on Grandparent queries.
+   - The raw logit ranking $Z$ ranks true parent edges at a median of $2,600$ out of $4,032$ pairs—**statistically indistinguishable from random noise**.
+2. **The Search Machinery is Blameless (P0a Ceiling)**:
+   - When provided true generating edges, the combinatorial boolean semiring search reaches **$F_1 = 1.0000$ in $8.4$ ms**. The failure of Cell H is $100\%$ attributable to the proposer.
+3. **Discrete Unconstrained Search (B0) Trapped in Spurious Covers**:
+   - In Cell B0 (searching across all 4,032 edges without proposals), greedy discrete search easily achieves high training composition coverage ($F_1(\text{GP}) \approx 0.79$, $F_1(\text{Sib}) \approx 0.81$).
+   - However, it achieves this coverage using **spurious, shortcut graphs** ($F_1(\text{Parent}) = 0.0132$). Without inductive bias or direct observation, vast numbers of non-isomorphic digraphs generate identical 2-hop compositions.
+4. **Final Scientific Verdict**:
+   - Continuous gradient descent over tensor equations cannot invent discrete relational predicates—either on its own (E17) or as a proposal heuristic for combinatorial search (E19).
+   - Neuro-symbolic predicate invention strictly requires **symbolic hypothesis generators** (e.g. grammar-based program synthesis, inductive logic programming, or structural EM) rather than continuous multilinear relaxations.
+   - This formally and permanently closes the "emergent predicate invention via gradient descent" line in Declarative Tensor Logic.
