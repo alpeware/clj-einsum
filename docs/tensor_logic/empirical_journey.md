@@ -2379,3 +2379,104 @@ Experiment E20 delivers the definitive scientific answer to the predicate invent
    - The predicate-invention-from-compositions line is **officially closed**.
    - Inducing hidden predicates from multi-hop relational observations cannot be solved by continuous multilinear relaxations (E17), hybrid proposer-crystallizers (E19), or structurally constrained discrete search (E20).
    - Any future neuro-symbolic predicate discovery system strictly requires **richer observational modalities**: typed entity universes, explicit temporal or generational metadata, arity signatures, or partial ground supervision.
+
+
+---
+
+### 22. Experiment E21 — Schema-Constrained KB Write Path with Verified Commit
+
+**Date:** 2026-09-17  
+**Status:** Completed & Evaluated (All 7 Pre-Registered Acceptance Criteria Passed)  
+**Execution Environment:** Host CPU (Pure Clojure Sans-IO Datalog KB, Zero JVM Allocations on Query Hot-Path)  
+**Telemetry:** `paper-experiments/e21-kb/2026-09-17/` (`results.edn`)
+
+---
+
+#### 1. Thesis & Architectural Motivation
+
+Experiments E17 through E20 served as an empirical requirements document for long-horizon agent memory:
+- **E17 (Representational Boundary):** Continuous gradient descent learns soft associations but cannot crystallize discrete predicates $\to$ long-horizon memory cannot live in model weights or activations; it must be an external discrete store.
+- **E18 (Soft Proposes, $T=0$ Disposes):** In-context pointwise retrieval collapses without symbolic gating $\to$ the store's write path must be an explicit discrete verification gate. No proposition enters on confidence alone.
+- **E19 (Proposer Fallacy & Spurious Covers):** GD structural rankings are anti-informative (median rank $2,600 / 4,032$) and unconstrained search finds shortcut covers $\to$ the LLM is merely a proposer over candidates, never the decider.
+- **E20 (Domain Priors & Mating Ambiguity):** Indegree and DAG acyclicity alone were insufficient without strict schema constraints. Furthermore, some facts are mathematically unknowable from observations alone (E20 mating symmetry ceiling $F_1 = 0.70$) $\to$ the store must represent **disjunction explicitly**, rejecting arbitrary guessing as hallucination with a commit bit.
+
+Experiment E21 constructs the artifact specified by these four diagnostics: a **schema-constrained Datalog Knowledge Base with a verified write path** (`clj-xla.logic.kb`). This implements Tier 1 (the committed discrete store) of the tensor-native agent architecture (`AGENT-LOOP.md`).
+
+---
+
+#### 2. KB Architecture: Sans-IO Core & Verified Commit Pipeline
+
+The Knowledge Base is implemented as a pure Clojure immutable map conforming strictly to Repository Rules 1 and 2:
+
+1. **Declarative Schema**:
+   Relations declare arity, domain sorts, cardinality limits, denial constraints, and identity invariants:
+   ```clojure
+   {:parent {:arity 2
+             :sorts [:person :person]
+             :cardinality {:target-arg 1 :max 2}
+             :denial #{:acyclic}}
+    :sibling {:arity 2
+              :sorts [:person :person]
+              :identity {:via :parent :shared-parents true}}
+    :grandparent {:arity 2
+                  :sorts [:person :person]
+                  :derived true
+                  :rule {:head [:grandparent :?x :?z]
+                         :body [[:parent :?x :?y] [:parent :?y :?z]]}}}
+   ```
+2. **Verified Commit Pipeline**:
+   Every assertion passes through a 4-stage gate in strict order before altering KB state:
+   $$\text{Candidate Fact} \xrightarrow{\text{1. Typecheck}} \xrightarrow{\text{2. Constraint Check}} \xrightarrow{\text{3. Ambiguity Check}} \xrightarrow{\text{4. Provenance Stamp}} \text{Committed Fact}$$
+   - Any failure halts immediately and returns a named violation map (`:domain`, `:cardinality`, `:acyclicity`, `:identity`, or `:ambiguity`). No fact is ever silently stored.
+3. **First-Class Disjunction Store**:
+   - Underdetermined candidate branches (such as the E20 mating ambiguity $\{m, s\}$ vs $\{o, s\}$) are stored explicitly via `assert-disjunction`.
+   - Queries over ambiguous tuples return `{:status :ambiguous, :completions [...]}`.
+   - Attempting to commit any branch as definite fact is rejected naming an `:ambiguity` violation.
+4. **Append-Only Provenance & Retraction**:
+   - Retractions do not destroy history; they write an append-only supersede marker linking the retraction transaction back to the original assertion transaction.
+   - Full audit history is queryable via `(history kb query)`.
+5. **Derived Datalog Materialization**:
+   - Datalog rules are evaluated host-side via forward-chaining fixpoints, pre-materializing derived relations (e.g. `grandparent/2`).
+6. **Sub-Microsecond Read Path**:
+   - Ground fact queries execute via hash-set lookups with zero intermediate allocations.
+
+---
+
+#### 3. Empirical Verification: Acceptance Criteria Audit
+
+All 7 pre-registered acceptance criteria were audited against the synthetic family tree domain ($N = 64$ entities across $8$ trees):
+
+| Criterion | Specification Requirement | Empirical Result | Status |
+|:---|:---|:---|:---:|
+| **1. Schema-Checked Commit** | All 80 true parent edges commit cleanly; 81st edge giving child a 3rd parent is rejected naming `:cardinality` | 80/80 committed cleanly; 81st edge rejected (`:violation :cardinality`, target 53, count 2, max 2) | **PASS** |
+| **2. Cycle Rejection** | Asserting backward edge (child $\to$ founder) is rejected naming `:acyclicity` | Rejected (`:violation :acyclicity`, from 0, to 2) | **PASS** |
+| **3. Domain Sort Rejection** | Asserting edge with unregistered/mismatched sort is rejected naming `:domain` | Rejected (`:violation :domain`, value `:alice`, expected `:person`) | **PASS** |
+| **4. Ambiguity Store** | Fed mating ambiguity, KB stores disjunction explicitly; query returns `:ambiguous` with both completions; direct commit rejected | Query `[:parent 3 0]` returns `:ambiguous` (2 completions); premature commit rejected (`:violation :ambiguity`) | **PASS** |
+| **5. Derived Relations** | `grandparent/2` materializes generator pairs ($F_1 = 1.0000$ vs ground truth) | Materialized all 48 GP pairs in $0.36\text{ ms}$; Precision $1.0000$, Recall $1.0000$, $F_1 = \mathbf{1.0000}$ | **PASS** |
+| **6. Provenance & Retraction** | Retracted edge removed from active facts; supersede marker recorded linking assertion to retraction | Edge removed from active facts; log contains assertion tx 13 $\to$ retraction tx 81 with `:supersedes` / `:superseded-by` | **PASS** |
+| **7. Read Latency** | Ground-query latency measured host-side in microseconds | $\text{p50} = \mathbf{0.58\text{ }\mu\text{s}}$, $\text{p90} = 1.27\text{ }\mu\text{s}$, $\text{p99} = 2.12\text{ }\mu\text{s}$, $\text{Mean} = 0.76\text{ }\mu\text{s}$ | **PASS** |
+
+---
+
+#### 4. Generative Invariant Verification (Repository Rule 1)
+
+In accordance with strict TDD, three generative property tests (`clojure.test.check`) were executed over $150$ randomized trials before script execution:
+
+1. **`prop-constraint-totality` (50 trials):**
+   Across random DAGs and dense multi-parent edge streams, a fact is committed into active state **if and only if** it satisfies cardinality $\le 2$, acyclicity, and domain sorts. Every invalid candidate is rejected with its exact violation keyword, preserving KB state integrity.
+2. **`prop-disjunction-soundness` (50 trials):**
+   Across random disjunctive parent units, ambiguous queries strictly return `:ambiguous` with all completions enumerated, never returning `:true` or `:false`. Attempting to commit any branch directly is universally rejected.
+3. **`prop-supersede-chain-integrity` (50 trials):**
+   Across randomized interleaved assertion and retraction sequences, the append-only log maintains a strictly monotonic causal transaction chain with valid supersede pointers.
+
+---
+
+#### 5. Architectural Significance for the Agent Loop
+
+Experiment E21 completes the first construction milestone of the tensor-logic agent architecture:
+1. **The Guardrail Against Hallucination**:
+   The LLM in Tier 2 proposes actions, code edits, and factual assertions. The verified write path guarantees that confabulated facts (wrong entity sorts), contradictory structures (cycles in causal/parental graphs), or capacity violations (excessive resource bindings) are physically rejected before entering long-term memory.
+2. **Honest Uncertainty Representation**:
+   When observations underdetermine reality (e.g. partial tool traces or ambiguous code definitions), the KB does not hallucinate a resolution. It commits the disjunction and reports `:ambiguous` to the deliberation tier, prompting active information gathering rather than unjustified action.
+3. **Foundation for In-Graph VRAM Dispatch**:
+   With host-side commit verification established at sub-microsecond query latencies ($0.58\text{ }\mu\text{s}$), the interface is prepared for compiling materialized relation matrices into PJRT tensors for device-resident in-graph query dispatch.

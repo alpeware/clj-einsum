@@ -44,6 +44,7 @@
             [clj-xla.logic.predicate-invention-test]
             [clj-xla.logic.predicate-crystallization-test]
             [clj-xla.logic.constrained-search-test]
+            [clj-xla.logic.kb-test]
             [clj-xla.logic.agent.state-tracker-test]
             [clj-xla.logic.agent.swe-benchmark-test]
             [clj-xla.logic.semiring-test]
@@ -132,6 +133,7 @@
                            'clj-xla.logic.predicate-invention-test
                            'clj-xla.logic.predicate-crystallization-test
                            'clj-xla.logic.constrained-search-test
+                           'clj-xla.logic.kb-test
                            'clj-xla.logic.agent.state-tracker-test
                            'clj-xla.logic.agent.swe-benchmark-test
                            'clj-xla.core-test)
