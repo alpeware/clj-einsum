@@ -260,9 +260,25 @@
                    (fn [p-acc [b-idx b]]
                      (let [rel (nth relations (mod (+ (* epoch (count batches)) b-idx) (count relations)))
                            rel-triples (get triples-by-rel rel [])
+                           num-pos (count rel-triples)
+                           effective-triples
+                           (cond
+                             (zero? num-pos) []
+                             (>= num-pos 4) (vec (take 16 rel-triples))
+                             :else
+                             (let [first-t (first rel-triples)
+                                   h (:head first-t)
+                                   t (:tail first-t)
+                                   neg-pool (filterv #(not= (:active %) t) candidate-targets)
+                                   num-needed (- 4 num-pos)
+                                   neg-triples (if (pos? (count neg-pool))
+                                                 (mapv (fn [_] {:head h :tail (:active (nth neg-pool (.nextInt rnd (count neg-pool))))})
+                                                       (range num-needed))
+                                                 [])]
+                               (into (vec rel-triples) neg-triples)))
                            curr-R (get @r-maps rel)
                            p-with-r (assoc p-acc :R_mem curr-R)
-                           batch-with-tr (assoc b :triples rel-triples)
+                           batch-with-tr (assoc b :triples effective-triples :pos-count num-pos)
                            next-p (nano/train-step fwd-train-exec p-with-r batch-with-tr cfg lr embed-update-exec)
                            loss-info (:loss next-p)]
                        (when (:R_mem next-p)

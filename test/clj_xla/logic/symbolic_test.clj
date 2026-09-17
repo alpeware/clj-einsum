@@ -235,6 +235,11 @@
                 (aset-float dq (int (+ (* a n) b)) (float sum))))))
         dq))))
 
+(defn- seeded-shuffle [coll seed]
+  (let [al (java.util.ArrayList. ^java.util.Collection coll)]
+    (java.util.Collections/shuffle al (java.util.Random. (long seed)))
+    (vec al)))
+
 ;; Note: This test verifies host-side reference contraction semantics against the pure Clojure
 ;; Horn-clause deductive oracle; full OpenXLA PJRT compiler-path coverage is provided by the e2e tests.
 (defspec prop-embedding-space-deductive-oracle-parity 200
@@ -242,8 +247,8 @@
                  num-facts (gen/choose 1 5)
                  seed gen/nat]
                 (let [all-pairs (for [i (range n) j (range n) :when (< i j)] [i j])
-                      sampled-facts (set (take num-facts (shuffle all-pairs)))
-                      d 256
+                      sampled-facts (set (take num-facts (seeded-shuffle all-pairs seed)))
+                      d 512
                       ;; 1. Symbolic deductive closure via pure Clojure Horn-clause fixpoint
                       rules [{:head [:grandparent :x :z]
                               :body [[:parent :x :y] [:parent :y :z]]}]

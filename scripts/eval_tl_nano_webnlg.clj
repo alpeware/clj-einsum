@@ -42,6 +42,35 @@
           "--max-eval" (recur (subvec remaining 2) (assoc opts :max-eval (Long/parseLong v)))
           (recur (subvec remaining 1) opts))))))
 
+(defn- compute-rank
+  "Computes 1-based rank of target value in array slice [row-off, row-off + vocab-size)."
+  [^floats logits row-off target-idx vocab-size]
+  (let [target-l (aget logits (+ row-off target-idx))]
+    (loop [vi 0 rank 1]
+      (if (>= vi vocab-size)
+        rank
+        (recur (inc vi) (if (> (aget logits (+ row-off vi)) target-l) (inc rank) rank))))))
+
+(defn- compute-cand-rank
+  "Computes 1-based rank of target value among candidate target entities."
+  [^floats logits row-off target-idx candidate-targets]
+  (let [target-l (aget logits (+ row-off target-idx))]
+    (loop [ci 0 rank 1]
+      (if (>= ci (count candidate-targets))
+        rank
+        (let [act (:active (nth candidate-targets ci))]
+          (recur (inc ci) (if (> (aget logits (+ row-off act)) target-l) (inc rank) rank)))))))
+
+(defn- median [xs]
+  (if (empty? xs)
+    0.0
+    (let [s (sort xs)
+          n (count s)
+          mid (quot n 2)]
+      (if (odd? n)
+        (double (nth s mid))
+        (/ (+ (double (nth s (dec mid))) (double (nth s mid))) 2.0)))))
+
 (defn run-webnlg-evaluation
   [opts]
   (let [{:keys [backend checkpoint-file eval-file train-file max-eval model-dir]} opts
@@ -156,6 +185,8 @@
                       z-tgt-l (aget z-logits (+ row-off tgt-act))
                       z-cand-act (:active (apply max-key (fn [c] (aget z-logits (+ row-off (:active c)))) candidate-targets))
                       z-cand-str (proto/decode tokenizer [(get active->bpe z-cand-act 0)])
+                      z-rank (compute-rank z-logits row-off tgt-act vocab-size)
+                      z-cand-rank (compute-cand-rank z-logits row-off tgt-act candidate-targets)
 
                       ;; Active Deductive Grounding (Active R_mem if trained, else zero)
                       rel-R (get r-maps rel (float-array (* dm dm) (float 0.0)))
@@ -169,8 +200,12 @@
                       a-tgt-l (aget a-logits (+ row-off tgt-act))
                       a-cand-act (:active (apply max-key (fn [c] (aget a-logits (+ row-off (:active c)))) candidate-targets))
                       a-cand-str (proto/decode tokenizer [(get active->bpe a-cand-act 0)])
+                      a-rank (compute-rank a-logits row-off tgt-act vocab-size)
+                      a-cand-rank (compute-cand-rank a-logits row-off tgt-act candidate-targets)
 
                       delta-l (- (double a-tgt-l) (double z-tgt-l))
+                      delta-rank (- z-rank a-rank)
+                      delta-cand-rank (- z-cand-rank a-cand-rank)
                       match? (= a-cand-act tgt-act)
                       tier-str (case tier
                                  :head "HEAD"
@@ -178,18 +213,43 @@
                                  :tail "TAIL"
                                  :unseen "UNSEEN")]
 
-                  (println (format "%-30s | %-15s | %-6s | %-14s | %-14s | %-10s | %+.4f"
-                                   (if (> (count p-str) 30) (str (subs p-str 0 27) "...") p-str)
-                                   (if (> (count t-str) 15) (subs t-str 0 15) t-str)
+                  (println (format "%-28s | %-14s | %-6s | %-10s | %-10s | %-6s | %+.4f | %4d->%-4d (%+4d) | %2d->%-2d (%+2d)"
+                                   (if (> (count p-str) 28) (str (subs p-str 0 25) "...") p-str)
+                                   (if (> (count t-str) 14) (subs t-str 0 14) t-str)
                                    tier-str
-                                   z-cand-str a-cand-str (if match? "YES ✅" "NO ❌") delta-l))
-                  {:prompt p-str :target t-str :match? match? :delta-logit delta-l :tier tier :count cnt}))
+                                   z-cand-str a-cand-str (if match? "YES" "NO") delta-l
+                                   z-rank a-rank delta-rank
+                                   z-cand-rank a-cand-rank delta-cand-rank))
+                  {:prompt p-str :target t-str :match? match? :delta-logit delta-l
+                   :z-rank z-rank :a-rank a-rank :delta-rank delta-rank
+                   :z-cand-rank z-cand-rank :a-cand-rank a-cand-rank :delta-cand-rank delta-cand-rank
+                   :z-rr (/ 1.0 (double z-rank)) :a-rr (/ 1.0 (double a-rank))
+                   :z-cand-rr (/ 1.0 (double z-cand-rank)) :a-cand-rr (/ 1.0 (double a-cand-rank))
+                   :tier tier :count cnt}))
               selected-evals)
 
         correct-count (count (filter :match? eval-results))
         total-eval (count eval-results)
         acc-pct (* 100.0 (/ (double correct-count) total-eval))
         avg-delta (/ (reduce + (map :delta-logit eval-results)) (double total-eval))
+
+        mean-z-rank (/ (reduce + (map :z-rank eval-results)) (double total-eval))
+        mean-a-rank (/ (reduce + (map :a-rank eval-results)) (double total-eval))
+        med-z-rank (median (map :z-rank eval-results))
+        med-a-rank (median (map :a-rank eval-results))
+        mrr-z (/ (reduce + (map :z-rr eval-results)) (double total-eval))
+        mrr-a (/ (reduce + (map :a-rr eval-results)) (double total-eval))
+
+        mean-z-crank (/ (reduce + (map :z-cand-rank eval-results)) (double total-eval))
+        mean-a-crank (/ (reduce + (map :a-cand-rank eval-results)) (double total-eval))
+        med-z-crank (median (map :z-cand-rank eval-results))
+        med-a-crank (median (map :a-cand-rank eval-results))
+        mrr-z-cand (/ (reduce + (map :z-cand-rr eval-results)) (double total-eval))
+        mrr-a-cand (/ (reduce + (map :a-cand-rr eval-results)) (double total-eval))
+
+        pos-rank-cnt (count (filter #(pos? (:delta-rank %)) eval-results))
+        neg-rank-cnt (count (filter #(neg? (:delta-rank %)) eval-results))
+        zero-rank-cnt (count (filter #(zero? (:delta-rank %)) eval-results))
 
         ;; 5. Stratified Breakdown Table
         tier-summary
@@ -200,8 +260,22 @@
               {:n n
                :matches (count (filter :match? subset))
                :acc (* 100.0 (/ (double (count (filter :match? subset))) n))
-               :mean-delta (/ (reduce + (map :delta-logit subset)) (double n))}
-              {:n 0 :matches 0 :acc 0.0 :mean-delta 0.0})))
+               :mean-delta (/ (reduce + (map :delta-logit subset)) (double n))
+               :mean-z-rank (/ (reduce + (map :z-rank subset)) (double n))
+               :mean-a-rank (/ (reduce + (map :a-rank subset)) (double n))
+               :med-z-rank (median (map :z-rank subset))
+               :med-a-rank (median (map :a-rank subset))
+               :mean-z-crank (/ (reduce + (map :z-cand-rank subset)) (double n))
+               :mean-a-crank (/ (reduce + (map :a-cand-rank subset)) (double n))
+               :mrr-z (/ (reduce + (map :z-rr subset)) (double n))
+               :mrr-a (/ (reduce + (map :a-rr subset)) (double n))
+               :mrr-z-cand (/ (reduce + (map :z-cand-rr subset)) (double n))
+               :mrr-a-cand (/ (reduce + (map :a-cand-rr subset)) (double n))
+               :pos-rank (count (filter #(pos? (:delta-rank %)) subset))}
+              {:n 0 :matches 0 :acc 0.0 :mean-delta 0.0
+               :mean-z-rank 0.0 :mean-a-rank 0.0 :med-z-rank 0.0 :med-a-rank 0.0
+               :mean-z-crank 0.0 :mean-a-crank 0.0 :mrr-z 0.0 :mrr-a 0.0
+               :mrr-z-cand 0.0 :mrr-a-cand 0.0 :pos-rank 0})))
 
         head-stats (tier-summary :head)
         mid-stats (tier-summary :mid)
@@ -215,21 +289,31 @@
     (println "------------------------------------------------------------------------------------------------")
     (println (format "Overall Cloze QA Accuracy: %d / %d (%.1f%%) | Mean Target Logit Shift: %+.4f"
                      correct-count total-eval acc-pct avg-delta))
+    (println (format "Full Vocab Rank (1-%d)   : Mean %5.1f -> %5.1f (Shift: %+.1f) | Median %4.0f -> %4.0f | MRR %.4f -> %.4f"
+                     vocab-size mean-z-rank mean-a-rank (- mean-z-rank mean-a-rank) med-z-rank med-a-rank mrr-z mrr-a))
+    (println (format "Candidate Rank (1-%-3d)  : Mean %5.1f -> %5.1f (Shift: %+.1f) | Median %4.0f -> %4.0f | MRR %.4f -> %.4f"
+                     (count candidate-targets) mean-z-crank mean-a-crank (- mean-z-crank mean-a-crank) med-z-crank med-a-crank mrr-z-cand mrr-a-cand))
+    (println (format "Rank Trajectory (Vocab)  : %d (%.1f%%) Improved | %d (%.1f%%) Unchanged | %d (%.1f%%) Worsened"
+                     pos-rank-cnt (* 100.0 (/ (double pos-rank-cnt) total-eval))
+                     zero-rank-cnt (* 100.0 (/ (double zero-rank-cnt) total-eval))
+                     neg-rank-cnt (* 100.0 (/ (double neg-rank-cnt) total-eval))))
 
     (println "\n================================================================================")
-    (println "📈 STRATIFIED ACCURACY & LOGIT BOOST BY TRAINING FREQUENCY TIER")
+    (println "📈 STRATIFIED ACCURACY, LOGIT BOOST & RANK SHIFT BY TRAINING FREQUENCY TIER")
     (println "================================================================================")
-    (println "Frequency Tier         | Train Count | Evaluated | Top-1 Match (%) | Mean Target Logit Shift")
-    (println "-----------------------+-------------+-----------+-----------------+------------------------")
-    (println (format "Head Tier (>= 50)      | >= 50       | %-9d | %5.1f%%          | %+.4f"
-                     (:n head-stats) (:acc head-stats) (:mean-delta head-stats)))
-    (println (format "Mid Tier (10 - 49)     | 10 - 49     | %-9d | %5.1f%%          | %+.4f"
-                     (:n mid-stats) (:acc mid-stats) (:mean-delta mid-stats)))
-    (println (format "Tail Tier (< 10)       | 1 - 9       | %-9d | %5.1f%%          | %+.4f"
-                     (:n tail-stats) (:acc tail-stats) (:mean-delta tail-stats)))
-    (println (format "Unseen (0 Core)        | 0 (Fallback)| %-9d | %5.1f%%          | %+.4f"
-                     (:n unseen-stats) (:acc unseen-stats) (:mean-delta unseen-stats)))
-    (println "-----------------------+-------------+-----------+-----------------+------------------------")
+    (println "Frequency Tier     | Train Cnt | Eval | Top-1 | Mean Logit Δ | Vocab Rank (Z->A) | Cand Rank (Z->A) | Rank Imprv")
+    (println "-------------------+-----------+------+-------+--------------+-------------------+------------------+-----------")
+    (doseq [[lbl t-stat] [["Head (>= 50)" head-stats]
+                          ["Mid (10 - 49)" mid-stats]
+                          ["Tail (< 10)" tail-stats]
+                          ["Unseen (0 Core)" unseen-stats]]]
+      (println (format "%-18s | %-9s | %-4d | %4.1f%% | %+.4f       | %5.1f -> %-5.1f     | %4.1f -> %-4.1f      | %4.1f%%"
+                       lbl (case lbl "Head (>= 50)" ">= 50" "Mid (10 - 49)" "10 - 49" "Tail (< 10)" "1 - 9" "0")
+                       (:n t-stat) (:acc t-stat) (:mean-delta t-stat)
+                       (:mean-z-rank t-stat) (:mean-a-rank t-stat)
+                       (:mean-z-crank t-stat) (:mean-a-crank t-stat)
+                       (if (pos? (:n t-stat)) (* 100.0 (/ (double (:pos-rank t-stat)) (:n t-stat))) 0.0))))
+    (println "-------------------+-----------+------+-------+--------------+-------------------+------------------+-----------")
     (println (format "NATURAL ABLATION GAP (Seen Active R_r vs Unseen Zero R_mem): %+.4f logits" ablation-gap))
     (println "================================================================================")
 
@@ -242,12 +326,19 @@
     (println "GPT-2 Medium           | Dense Xformer   | 355 Million  | Cloud Cluster     | 42.1% (PPL: 18.2)")
     (println "T5-Small (Raffel 2020) | Dense Enc-Dec   | 60 Million   | TPU Pod           | 51.4% (BLEU: 41.2)")
     (println "KG-BART (Liu 2021)     | KG-Augmented    | 139 Million  | 8x V100 GPUs      | 58.7% (BLEU: 44.8)")
-    (println (format "TL-Nano (Ours, WebNLG) | Pure OpenXLA TL | 2.8 Million  | 1x RX 7900 XTX    | %.1f%% (Boost: %+.2f)"
-                     acc-pct avg-delta))
+    (println (format "TL-Nano (Ours, WebNLG) | Pure OpenXLA TL | 2.8 Million  | 1x RX 7900 XTX    | %.1f%% (MRR: %.4f)"
+                     acc-pct mrr-a))
     (println "================================================================================\n")
 
     {:accuracy-pct acc-pct
      :mean-delta-logit avg-delta
+     :mrr-z mrr-z
+     :mrr-a mrr-a
+     :mrr-cand-z mrr-z-cand
+     :mrr-cand-a mrr-a-cand
+     :mean-z-rank mean-z-rank
+     :mean-a-rank mean-a-rank
+     :pos-rank-pct (* 100.0 (/ (double pos-rank-cnt) total-eval))
      :total-evaluated total-eval
      :correct-count correct-count}))
 
