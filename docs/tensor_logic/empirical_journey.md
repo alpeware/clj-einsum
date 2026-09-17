@@ -1409,50 +1409,116 @@ To resolve the root causes of weak relational learning flagged during E12 diagno
 
 ---
 
-### Retrained Model Telemetry & Comparative Diagnostics
+### Red Flag Analysis, In-VRAM Autodiff Lowering, and Stabilized Pre-training
 
-Following the deployment of exact InfoNCE autodiff adjoints and tail negative sampling, TL-Nano was retrained from scratch on the WebNLG training set ($N=3,500$ entries, 527 batches/epoch, batch size 16, sequence length 24, 2,048 active sub-vocabulary).
+#### 1. The Red Flag: Intermediate LM Loss Divergence & Root-Cause Analysis
+In the initial retraining pass with exact InfoNCE adjoints, telemetry showed a sharp contrast:
+- InfoNCE loss dropped steadily ($1.13 \to 0.77$).
+- However, **Language Model loss nearly doubled from epoch 4 to 10** ($4.03 \to 7.47$).
 
-#### 1. In-VRAM Pre-training Telemetry
+A rigorous code audit uncovered three distinct interacting root causes:
+1. **The Batch Stride Misalignment in `embed-exec`**:
+   The forward model outputs `H_final` with shape `[b, l, d]` (where $l=24$). The LM cross-entropy gradient $G_{\text{logit}}$ has shape $[b \times (l - 1), V]$ (368 active prediction steps for $b=16, l=24$). In the original implementation of `embed-exec`, `h-final` was passed directly as a contiguous buffer to a kernel expecting $[368, 256]$.
+   Consequently, row 23 of `H` (which was position 23 of batch 0—a token with no corresponding gradient in $G$) was aligned against position 0 of batch 1. Every subsequent batch $bi$ was offset by $bi \times d$ floats! By batch 15, the contraction was matching gradients with hidden vectors from completely unrelated sentences. Compounding over 5,270 batches, this corrupted the shared $W_{\text{embed}}$ matrix.
+2. **Host-Side Relational Hot Loops vs. In-VRAM Compilation**:
+   While forward logits and embedding contractions ran in VRAM, the relational backward adjoint pass was executing in host-side nested `dotimes` loops over $m1 \times m2 \times k \times d$. This violated the pure VRAM execution objective and incurred synchronization overhead.
+3. **Learning Rate Overshooting**:
+   A constant learning rate of $\eta = 0.03$ without warmup or decay on standard SGD proved too aggressive once real, non-vanishing InfoNCE gradients were flowing into shared parameters.
+
+---
+
+#### 2. Architecture & Engine Fixes Deployed
+
+1. **Exact Row-Aligned Hidden Buffer Extraction**:
+   In `nano/train-step`, `h-flat` of exact shape $[b \times (l - 1), d]$ is extracted via row-wise `System/arraycopy` chunks of size $(l - 1) \times d$, skipping position $l-1$ of each batch. Every row of $G_{\text{logit}}$ now corresponds 1-to-1 to its exact forward hidden state.
+2. **Full In-VRAM Relational Autodiff Contraction Chain**:
+   Lowered the complete relational adjoint contraction chain into OpenXLA PJRT via `nano/compile-relational-backward` (backed by `clj-xla.logic.memory.contrastive`):
+   $$\Delta U_{hr} = G_S U_t \in \mathbb{R}^{K \times D_m}, \quad \Delta U_t = G_S^T U_{hr} \in \mathbb{R}^{K \times D_m}$$
+   $$\Delta R_{\text{mem}} = U_h^T \Delta U_{hr} \in \mathbb{R}^{D_m \times D_m}, \quad \Delta U_h = \Delta U_{hr} R_{\text{mem}}^T \in \mathbb{R}^{K \times D_m}$$
+   $$\Delta W_{\text{mem}} = V_h^T \Delta U_h + V_t^T \Delta U_t \in \mathbb{R}^{D \times D_m}$$
+   All relational batches are padded to a static $K = 16$ with negative distractors and `:pos-count`, compiling once into StableHLO MLIR and running 100% in device VRAM on the GPU.
+3. **Stabilized Learning Rate & Compilation Scaling**:
+   Set default learning rate to $\eta = 0.01$ and baked dynamic scaling directly into the compiled graph update.
+
+---
+
+#### 3. Stabilized In-VRAM Pre-training Telemetry (ROCm / RX 7900 XTX)
+
 ```
 Epoch | L_total | L_LM   | L_InfoNCE | Epoch Time | Throughput
 ------+---------+--------+-----------+------------+-----------
-    1 |  4.8252 | 4.4291 |    1.1317 | 19,818 ms  | 10,211 tok/s
-    2 |  4.5258 | 4.1265 |    1.1410 | 19,310 ms  | 10,480 tok/s
-    3 |  4.4121 | 4.0514 |    1.0308 | 19,198 ms  | 10,541 tok/s
-    4 |  4.3849 | 4.0319 |    1.0086 | 19,320 ms  | 10,474 tok/s
-    5 |  4.9745 | 4.6479 |    0.9332 | 19,005 ms  | 10,648 tok/s
-   10 |  7.7437 | 7.4744 |    0.7694 | 19,194 ms  | 10,543 tok/s
-Pre-training completed in 192.22 s (192,216 ms) | Mean Throughput: 10,533 tok/s
-Checkpoint written: 50,221,950 bytes (47.90 MB)
+    1 |  5.1374 | 4.4639 |    1.9245 | 19,365 ms  | 10,450 tok/s
+    2 |  4.6855 | 4.0030 |    1.9503 | 18,628 ms  | 10,863 tok/s
+    3 |  4.5146 | 3.8610 |    1.8674 | 18,564 ms  | 10,901 tok/s
+    4 |  4.4200 | 3.7648 |    1.8720 | 18,643 ms  | 10,855 tok/s
+    5 |  4.3324 | 3.6938 |    1.8248 | 18,345 ms  | 11,031 tok/s
+    6 |  4.2592 | 3.6322 |    1.7914 | 18,346 ms  | 11,031 tok/s
+    7 |  4.1939 | 3.5779 |    1.7600 | 18,374 ms  | 11,014 tok/s
+    8 |  4.1283 | 3.5317 |    1.7047 | 18,360 ms  | 11,022 tok/s
+    9 |  4.0861 | 3.4893 |    1.7052 | 18,363 ms  | 11,020 tok/s
+   10 |  4.0252 | 3.4519 |    1.6379 | 18,370 ms  | 11,016 tok/s
+Total Pre-training Time: 185.43 s (3.09 min) | Mean Throughput: 10,920 tok/s
+Loss Descent: 5.1374 --> 4.0252 (Drop: 1.1123, LM Loss Drop: 4.4639 -> 3.4519)
 ```
-- **Real Gradient Flow**: Under exact row-wise softmax probabilities, the contrastive InfoNCE loss monotonically dropped from **$1.1317 \to 0.7694$** (a **$32.0\%$ relative reduction**), confirming that relational cores receive genuine contrastive separation signal rather than artificial gradient noise.
+- **Monotonic Dual Convergence**: With the stride bug resolved, LM loss dropped monotonically across all 10 epochs ($4.46 \to 3.45$). InfoNCE loss dropped steadily ($1.92 \to 1.63$). Zero divergence was observed.
+- **Throughput**: Pinned VRAM execution for both LM head updates and relational contractions achieved a sustained **10,920 tok/s** (34.8 ms per complete multi-task batch).
 
-#### 2. Before vs. After Retraining Comparative Matrix
+---
 
-| Evaluation Dimension | Previous Run (Heuristic Adjoint) | Retrained Run (Exact Adjoints + Neg Sampling) | Delta / Diagnostic Implication |
-| :--- | :--- | :--- | :--- |
-| **InfoNCE Gradient Source** | Hardcoded placeholder (`0.8/0.2`) | Exact row-wise softmax $P_{ij} = \frac{\exp(S_{ij} - M_i)}{\sum_k \exp(S_{ik} - M_i)}$ | Mathematically exact matrix calculus backprop |
-| **Tail Relations ($< 4$ triples)** | No distractors ($P_{00}=1.0 \implies \nabla=0$) | Candidate pool augmented with random distractors | Restores active contrastive repulsion for tail |
-| **`test_seen.edn` Top-1 Accuracy** | $1.0\%$ (1 / 100) | **$2.0\%$ (2 / 100)** | Memory unbinding directly yields correct Top-1 |
-| **`test_seen.edn` Mid Rank Imprv** | $61.8\%$ ($+0.4773$ logits) | **$68.0\%$ ($+0.4794$ logits, $+204.6$ rank shift)** | Robust relational attractor in mid-frequency regime |
-| **`test_seen.edn` Tail Rank Imprv**| $60.0\%$ ($+0.3303$ logits) | **$80.0\%$ ($+0.4031$ logits, $+200.4$ rank shift)** | Direct benefit of negative distractor sampling |
-| **`test_unseen.edn` Head Shift** | **$-0.1472$ logits** (Negative transfer) | **$+0.0260$ logits** ($57.9\%$ improved) | Bounded exact gradients attenuate negative transfer |
-| **`test_unseen.edn` Top-1 Accuracy**| $0.0\%$ (0 / 100) | **$4.0\%$ (4 / 100)** | Memory drives generalization on novel entities |
-| **Full Vocab MRR (`test_seen.edn`)** | $0.0061 \to 0.0098$ | $0.0026 \to 0.0089$ | $+242\%$ relative MRR increase under active memory |
+#### 4. Ground-Truth Test Evaluation & Rank Diagnostics
 
-#### 3. Key Diagnostic Findings from Retraining
-1. **Tail Starvation is Mitigated by In-Batch Distractors**:
-   - In `test_seen.edn`, Tail-tier relations jumped from $60.0\%$ rank improvement to **$80.0\%$ rank improvement**, with an average vocabulary rank leap of **$+200.4$** ($844.0 \to 643.6$) and $+0.4031$ mean target logit boost. Providing negative candidates to singleton relations successfully activates contrastive repulsion.
-2. **Negative Transfer on Out-of-Domain Entities is Attenuated**:
-   - In `test_unseen.edn`, Head-tier relations previously exhibited severe negative transfer ($-0.1472$ logits, only $42.1\%$ improved). Under exact autodiff adjoints, the logit shift became positive (**$+0.0260$**) and **$57.9\%$** of Head queries improved in vocabulary rank. Exact softmax scaling $\frac{P_{ij} - \mathbb{I}[i=j]}{K_{\text{pos}} \cdot \tau}$ prevents weights from blowing up on head entities.
-3. **Relational Unbinding Drives Top-1 Predictions for Strongly Grounded Queries**:
-   - In both splits, queries with strong relational signatures demonstrated large logit shifts that propelled target tokens from deep in the vocabulary directly to the argmax position:
-     - *The isPartOf of Abilene, Texas* $\to$ *Texas*: Zero-memory predicted *"United"* (rank 843, candidate rank 21). Active memory injected **$+3.577$ logits**, leaping to **candidate rank 1** and predicting *"Texas"*.
-     - *The demonym of India is* $\to$ *Indian*: Zero-memory predicted *"35"* (rank 114, candidate rank 2). Active memory injected **$+1.844$ logits**, leaping to **candidate rank 1** and predicting *"Indian"*.
-     - *The populationTotal of United States is* $\to$ *324720797*: Zero-memory target was rank 803 (candidate rank 19). Active memory injected **$+3.510$ logits**, leaping to **candidate rank 1**.
-4. **The Global Retrieval Reality**:
-   - While targeted queries experience massive $+2$ to $+3.5$ logit interventions that conquer the Top-1 spot, the average perturbation across all relations remains modest ($+0.2366$ on seen, $+0.0563$ on unseen). Because the language model backbone has only 2.8M parameters trained on small text slices, the baseline token distribution has substantial entropy. As a result, moving from rank $1024 \to 949$ on average demonstrates that the relational memory reliably biases representations in the correct semantic direction, but cannot substitute for deep autoregressive sequence modeling.
+##### 1. Seen Test Split (`test_seen.edn`, $N=100$)
+```
+================================================================================
+📈 STRATIFIED ACCURACY, LOGIT BOOST & RANK SHIFT BY TIER (test_seen.edn)
+================================================================================
+Frequency Tier     | Train Cnt | Eval | Top-1 | Mean Logit Δ | Vocab Rank (Z->A) | Cand Rank (Z->A) | Rank Imprv
+-------------------+-----------+------+-------+--------------+-------------------+------------------+-----------
+Head (>= 50)       | >= 50     | 33   |  6.1% | +0.3914       | 684.2 -> 652.9     | 20.3 -> 24.7      | 51.5%
+Mid (10 - 49)      | 10 - 49   | 34   |  0.0% | +0.2875       | 1027.1 -> 882.2    | 30.7 -> 31.2      | 64.7%
+Tail (< 10)        | 1 - 9     | 30   |  0.0% | +0.2981       | 754.2 -> 652.1     | 21.8 -> 25.6      | 46.7%
+Unseen (0 Core)    | 0         | 3    |  0.0% | +0.0000       | 940.0 -> 940.0     | 27.0 -> 27.0      |  0.0%
+-------------------+-----------+------+-------+--------------+-------------------+------------------+-----------
+NATURAL ABLATION GAP (Seen Active R_r vs Unseen Zero R_mem): +0.3262 logits
+================================================================================
+Overall Cloze QA Top-1 Accuracy: 2 / 100 (2.0%) | Mean Target Logit Shift: +0.3164
+Full Vocab Rank (1-2048)   : Mean 829.4 -> 739.3 (Shift: +90.2) | Median 741 -> 630 | MRR 0.0075 -> 0.0104
+Candidate Rank (1-55)      : Mean  24.5 ->  27.2 (Shift: -2.7)  | Median  22 ->  25 | MRR 0.1746 -> 0.0888
+Rank Trajectory (Vocab)    : 53 (53.0%) Improved | 9 (9.0%) Unchanged | 38 (38.0%) Worsened
+```
+
+##### 2. Unseen Test Split (`test_unseen.edn`, $N=100$)
+```
+================================================================================
+📈 STRATIFIED ACCURACY, LOGIT BOOST & RANK SHIFT BY TIER (test_unseen.edn)
+================================================================================
+Frequency Tier     | Train Cnt | Eval | Top-1 | Mean Logit Δ | Vocab Rank (Z->A) | Cand Rank (Z->A) | Rank Imprv
+-------------------+-----------+------+-------+--------------+-------------------+------------------+-----------
+Head (>= 50)       | >= 50     | 19   |  0.0% | -0.0772       | 804.6 -> 844.4     | 25.8 -> 30.9      | 42.1%
+Mid (10 - 49)      | 10 - 49   | 29   |  0.0% | +0.3128       | 1112.4 -> 957.6    | 32.0 -> 32.4      | 82.8%
+Tail (< 10)        | 1 - 9     | 23   |  0.0% | +0.2482       | 901.2 -> 821.0     | 27.4 -> 29.2      | 60.9%
+Unseen (0 Core)    | 0         | 29   |  0.0% | +0.0000       | 785.1 -> 785.1     | 24.2 -> 24.2      |  0.0%
+-------------------+-----------+------+-------+--------------+-------------------+------------------+-----------
+NATURAL ABLATION GAP (Seen Active R_r vs Unseen Zero R_mem): +0.1875 logits
+================================================================================
+Overall Cloze QA Top-1 Accuracy: 0 / 100 (0.0%) | Mean Target Logit Shift: +0.1331
+Full Vocab Rank (1-2048)   : Mean 910.5 -> 854.6 (Shift: +55.8) | Median 936 -> 838 | MRR 0.0037 -> 0.0047
+Rank Trajectory (Vocab)    : 46 (46.0%) Improved | 29 (29.0%) Unchanged | 25 (25.0%) Worsened
+```
+
+---
+
+#### 5. Honest Synthesis & Scientific Takeaway
+
+1. **The Backbone Integrity Restored**:
+   Fixing the stride alignment produced a genuine LM loss drop ($4.46 \to 3.45$). This immediately lowered the baseline mean rank from $1024.1$ to $829.4$ and baseline median rank from $1071$ to $741$.
+2. **Subspace Steering vs. Argmax Dominance**:
+   - On Mid-frequency relations, relational unbinding consistently steers token representations in the correct semantic direction across both splits (**$64.7\%$ improved** on seen, **$82.8\%$ improved** on unseen, with $+144$ to $+154$ mean vocabulary rank jumps).
+   - On Head relations, the active memory injected $+0.3914$ logits on seen data, lifting Top-1 accuracy to **$6.1\%$** (2 / 33), including causal target conversions (*Nie Haisheng $\to$ Hubei*, $+2.44$ logits, candidate rank $7 \to 1$).
+   - However, **Top-1 retrieval across the entire distribution remains low ($2.0\%$ seen, $0.0\%$ unseen)**. The average logit perturbation ($+0.3164$ seen, $+0.1331$ unseen) is insufficient to consistently overcome the entropy of an un-pretrained 2.8M parameter backbone.
+3. **Hardware Execution Milestone**:
+   The pre-training loop is now **100% in-VRAM**: StableHLO forward graph, LM head embedding update, and the complete relational adjoint contraction chain all execute as compiled OpenXLA PJRT kernels on the AMD Radeon RX 7900 XTX, achieving 10,920 tok/s with zero host matrix math.
+
 
 
 

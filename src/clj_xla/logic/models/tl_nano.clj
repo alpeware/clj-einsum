@@ -4,6 +4,7 @@
    with Declarative Tensor Logic layers (hybrid KG-attention and relational memory unbinding)
    and joint autoregressive LM + InfoNCE contrastive pre-training."
   (:require [clj-xla.core :as xla]
+            [clj-xla.logic.memory.contrastive :as contrast]
             [clj-xla.logic.symbolic :as sym]
             [clj-xla.pjrt :as pjrt]))
 
@@ -476,8 +477,12 @@
    dW_embed[v, d] = G_logit[n, v]^T @ H_final[n, d]
    W_embed_new = W_embed - lr * dW_embed"
   ([batch-size seq-len cfg]
-   (compile-embedding-update (xla/get-context) batch-size seq-len cfg))
-  ([ctx batch-size seq-len cfg]
+   (compile-embedding-update (xla/get-context) batch-size seq-len cfg (or (:lr cfg) 0.01)))
+  ([a b c d]
+   (if (map? a)
+     (compile-embedding-update a b c d (or (:lr d) 0.01))
+     (compile-embedding-update (xla/get-context) a b c d)))
+  ([ctx batch-size seq-len cfg lr]
    (let [n (* (long batch-size) (dec (long seq-len)))
          v (long (:vocab-size cfg))
          d (long (:hidden-dim cfg))
@@ -486,18 +491,37 @@
                  [:W [:tensor [v d] :f32]]]
          ast [:block {:name :embedding_update}
               [:= [:dW :v :d] [:G :n :v] [:H :n :d]]
-              [:= [:scaled_dW :v :d] {:scale (double (or (:lr cfg) 0.03))} [:dW :v :d]]
+              [:= [:scaled_dW :v :d] {:scale (double lr)} [:dW :v :d]]
               [:- [:W_new :v :d] [:W :v :d] [:scaled_dW :v :d]]]
          target-heads [:W_new]]
      (sym/compile-query ctx "embedding_update" invars ast target-heads))))
 
+(defn compile-relational-forward
+  "Compiles OpenXLA PJRT executable for in-VRAM forward relational subspace projections:
+   U_h = V_h * W, U_t = V_t * W, U_hr = U_h * R, Scores = (U_hr * U_t^T) / tau."
+  ([batch-size hidden-dim dim-mem opts]
+   (contrast/compile-contrastive-forward (xla/get-context) batch-size hidden-dim dim-mem opts))
+  ([ctx batch-size hidden-dim dim-mem opts]
+   (contrast/compile-contrastive-forward ctx batch-size hidden-dim dim-mem opts)))
+
+(defn compile-relational-backward
+  "Compiles OpenXLA PJRT executable for in-VRAM relational InfoNCE adjoint contractions:
+   adj_Ut = G_S^T * U_hr, adj_Uhr = G_S * U_t, dR = U_h^T * adj_Uhr,
+   adj_Uh = adj_Uhr * R^T, dW_h = V_h^T * adj_Uh, dW_t = V_t^T * adj_Ut, dW = dW_h + dW_t."
+  ([batch-size hidden-dim dim-mem]
+   (contrast/compile-contrastive-backward (xla/get-context) batch-size hidden-dim dim-mem))
+  ([ctx batch-size hidden-dim dim-mem]
+   (contrast/compile-contrastive-backward ctx batch-size hidden-dim dim-mem)))
+
 (defn train-step
   "Executes an OpenXLA pre-training step via algebraic autodiff adjoints.
    Updates W_embed, W_mem, R_mem, and output weights with learning rate `lr`.
-   Accepts optional `embed-exec` compiled OpenXLA kernel for in-VRAM dW_embed contraction."
+   Accepts optional `embed-exec` and `rel-bwd-exec` compiled OpenXLA kernels for in-VRAM contractions."
   ([exec params batch cfg lr]
-   (train-step exec params batch cfg lr nil))
+   (train-step exec params batch cfg lr nil nil))
   ([exec params batch cfg lr embed-exec]
+   (train-step exec params batch cfg lr embed-exec nil))
+  ([exec params batch cfg lr embed-exec rel-bwd-exec]
    (let [loss-res (compute-joint-loss exec params batch cfg)
          ^floats probs (:probs loss-res)
          ^floats h-final (:H_final loss-res)
@@ -518,12 +542,16 @@
          ;; 1. Language Model Head Gradients: In-VRAM GPU vs CPU
          updated-embed
          (if embed-exec
-           (let [n (long (* b (dec l)))
+           (let [dec-l (dec l)
+                 n (long (* b dec-l))
                  g-arr (float-array (* n v))
-                 inv-n (/ 1.0 valid-pos)]
+                 h-flat (float-array (* n d))
+                 inv-n (/ 1.0 valid-pos)
+                 chunk-len (* dec-l d)]
              (dotimes [bi b]
-               (dotimes [pos (dec l)]
-                 (let [flat-idx (+ (* bi (dec l)) pos)
+               (System/arraycopy h-final (* bi l d) h-flat (* bi dec-l d) chunk-len)
+               (dotimes [pos dec-l]
+                 (let [flat-idx (+ (* bi dec-l) pos)
                        src-row (+ (* bi l v) (* pos v))
                        tgt (aget targets (+ (* bi l) pos))
                        dst-row (* flat-idx v)]
@@ -531,7 +559,7 @@
                      (let [p (double (aget probs (+ src-row vi)))
                            diff (if (= vi tgt) (- p 1.0) p)]
                        (aset-float g-arr (+ dst-row vi) (float (* diff inv-n))))))))
-             (let [update-res (sym/run-query! embed-exec {:G g-arr :H h-final :W (:W_embed params)})]
+             (let [update-res (sym/run-query! embed-exec {:G g-arr :H h-flat :W (:W_embed params)})]
                (:W_new update-res)))
            (let [^floats grad-embed (float-array (* v d))]
              (dotimes [bi b]
@@ -558,7 +586,7 @@
                  (aset-float upd i (float (- (double (aget orig i)) (* eta (double (aget grad-embed i)))))))
                upd)))]
 
-    ;; 2. Relational Contrastive Subspace Gradients (if triples present)
+     ;; 2. Relational Contrastive Subspace Gradients (if triples present)
      (when (and (seq triples) (:W_mem params) (:R_mem params) (:infonce-probs loss-res))
        (let [k-cnt (count triples)
              ^floats r-mem (:R_mem params)
@@ -568,60 +596,85 @@
              ^floats u-hr (:u-hr loss-res)
              ^floats infonce-probs (:infonce-probs loss-res)
              pos-cnt (min k-cnt (long (or (:pos-count batch) k-cnt)))
-             inv-k-tau (/ 1.0 (* (double (max 1 pos-cnt)) tau))
-             delta-u-hr (float-array (* k-cnt dm))
-             delta-u-t (float-array (* k-cnt dm))]
-        ;; Exact InfoNCE Adjoints:
-        ;; g_s[i, j] = (P_ij - I[i==j]) / (pos_cnt * tau)
-        ;; dR_mem += lambda_tl * sum_{i in [0, pos_cnt), j} g_s[i, j] * (u_h,i @ u_t,j)
-         (dotimes [i pos-cnt]
-           (let [uk-i (* i dm)
-                 row-off (* i k-cnt)]
-             (dotimes [j k-cnt]
-               (let [uk-j (* j dm)
-                     target (if (= i j) 1.0 0.0)
-                     prob (double (aget infonce-probs (+ row-off j)))
-                     g-s (* (- prob target) inv-k-tau)]
-                ;; Accumulate dR_mem
+             inv-k-tau (/ 1.0 (* (double (max 1 pos-cnt)) tau))]
+         (if rel-bwd-exec
+           ;; In-VRAM Relational Contraction via OpenXLA PJRT
+           (let [g-s-arr (float-array (* k-cnt k-cnt))
+                 vh (float-array (* k-cnt d))
+                 vt (float-array (* k-cnt d))]
+             (dotimes [k-idx k-cnt]
+               (let [{:keys [head tail]} (nth triples k-idx)]
+                 (System/arraycopy w-embed (* (long head) d) vh (* k-idx d) d)
+                 (System/arraycopy w-embed (* (long tail) d) vt (* k-idx d) d)))
+             (dotimes [i pos-cnt]
+               (let [row-off (* i k-cnt)]
+                 (dotimes [j k-cnt]
+                   (let [target (if (= i j) 1.0 0.0)
+                         prob (double (aget infonce-probs (+ row-off j)))
+                         g-s (* (- prob target) inv-k-tau)]
+                     (aset-float g-s-arr (+ row-off j) (float g-s))))))
+             (let [bwd-res (sym/run-query! rel-bwd-exec
+                                           {:G_S g-s-arr
+                                            :U_hr u-hr
+                                            :U_t u-t
+                                            :U_h u-h
+                                            :V_h vh
+                                            :V_t vt
+                                            :R r-mem})
+                   ^floats dw (:dW bwd-res)
+                   ^floats dr (:dR bwd-res)
+                   dw-len (alength dw)
+                   dr-len (alength dr)]
+               (dotimes [i dw-len]
+                 (aset-float grad-w-mem i (float (* lambda-tl (double (aget dw i))))))
+               (dotimes [i dr-len]
+                 (aset-float grad-r-mem i (float (* lambda-tl (double (aget dr i))))))))
+           ;; CPU Fallback Loop
+           (let [delta-u-hr (float-array (* k-cnt dm))
+                 delta-u-t (float-array (* k-cnt dm))]
+             (dotimes [i pos-cnt]
+               (let [uk-i (* i dm)
+                     row-off (* i k-cnt)]
+                 (dotimes [j k-cnt]
+                   (let [uk-j (* j dm)
+                         target (if (= i j) 1.0 0.0)
+                         prob (double (aget infonce-probs (+ row-off j)))
+                         g-s (* (- prob target) inv-k-tau)]
+                     (dotimes [m1 dm]
+                       (let [v-uh (double (aget u-h (+ uk-i m1)))]
+                         (dotimes [m2 dm]
+                           (let [idx (+ (* m1 dm) m2)
+                                 v-ut (double (aget u-t (+ uk-j m2)))]
+                             (aset-float grad-r-mem idx (float (+ (double (aget grad-r-mem idx))
+                                                                  (* lambda-tl g-s v-uh v-ut))))))))
+                     (dotimes [m dm]
+                       (let [v-ut (double (aget u-t (+ uk-j m)))
+                             v-uhr (double (aget u-hr (+ uk-i m)))]
+                         (aset-float delta-u-hr (+ uk-i m) (float (+ (double (aget delta-u-hr (+ uk-i m)))
+                                                                     (* g-s v-ut))))
+                         (aset-float delta-u-t (+ uk-j m) (float (+ (double (aget delta-u-t (+ uk-j m)))
+                                                                    (* g-s v-uhr))))))))))
+             (dotimes [k-idx k-cnt]
+               (let [{:keys [head tail]} (nth triples k-idx)
+                     h-off (* (long head) d)
+                     t-off (* (long tail) d)
+                     uk-off (* k-idx dm)
+                     delta-u-h (float-array dm)]
                  (dotimes [m1 dm]
-                   (let [v-uh (double (aget u-h (+ uk-i m1)))]
-                     (dotimes [m2 dm]
-                       (let [idx (+ (* m1 dm) m2)
-                             v-ut (double (aget u-t (+ uk-j m2)))]
-                         (aset-float grad-r-mem idx (float (+ (double (aget grad-r-mem idx))
-                                                              (* lambda-tl g-s v-uh v-ut))))))))
-                ;; Accumulate delta_u_hr and delta_u_t
-                 (dotimes [m dm]
-                   (let [v-ut (double (aget u-t (+ uk-j m)))
-                         v-uhr (double (aget u-hr (+ uk-i m)))]
-                     (aset-float delta-u-hr (+ uk-i m) (float (+ (double (aget delta-u-hr (+ uk-i m)))
-                                                                 (* g-s v-ut))))
-                     (aset-float delta-u-t (+ uk-j m) (float (+ (double (aget delta-u-t (+ uk-j m)))
-                                                                (* g-s v-uhr))))))))))
-
-        ;; Compute delta_u_h = delta_u_hr @ R_mem^T
-        ;; and backpropagate to dW_mem = lambda_tl * (e_h^T @ delta_u_h + e_t^T @ delta_u_t)
-         (dotimes [k-idx k-cnt]
-           (let [{:keys [head tail]} (nth triples k-idx)
-                 h-off (* (long head) d)
-                 t-off (* (long tail) d)
-                 uk-off (* k-idx dm)
-                 delta-u-h (float-array dm)]
-             (dotimes [m1 dm]
-               (let [s (loop [m2 0 acc 0.0]
-                         (if (>= m2 dm) acc
-                             (recur (inc m2) (+ acc (* (double (aget delta-u-hr (+ uk-off m2)))
-                                                       (double (aget r-mem (+ (* m1 dm) m2))))))))]
-                 (aset-float delta-u-h m1 (float s))))
-             (dotimes [di d]
-               (let [vh (double (aget w-embed (+ h-off di)))
-                     vt (double (aget w-embed (+ t-off di)))]
-                 (dotimes [dj dm]
-                   (let [idx (+ (* di dm) dj)
-                         duh (double (aget delta-u-h dj))
-                         dut (double (aget delta-u-t (+ uk-off dj)))]
-                     (aset-float grad-w-mem idx (float (+ (double (aget grad-w-mem idx))
-                                                          (* lambda-tl (+ (* vh duh) (* vt dut))))))))))))))
+                   (let [s (loop [m2 0 acc 0.0]
+                             (if (>= m2 dm) acc
+                                 (recur (inc m2) (+ acc (* (double (aget delta-u-hr (+ uk-off m2)))
+                                                           (double (aget r-mem (+ (* m1 dm) m2))))))))]
+                     (aset-float delta-u-h m1 (float s))))
+                 (dotimes [di d]
+                   (let [vh (double (aget w-embed (+ h-off di)))
+                         vt (double (aget w-embed (+ t-off di)))]
+                     (dotimes [dj dm]
+                       (let [idx (+ (* di dm) dj)
+                             duh (double (aget delta-u-h dj))
+                             dut (double (aget delta-u-t (+ uk-off dj)))]
+                         (aset-float grad-w-mem idx (float (+ (double (aget grad-w-mem idx))
+                                                              (* lambda-tl (+ (* vh duh) (* vt dut))))))))))))))))
 
       ;; 3. Parameter Update: P_new = P - eta * grad_P
      (let [update-array (fn [^floats orig ^floats grad]

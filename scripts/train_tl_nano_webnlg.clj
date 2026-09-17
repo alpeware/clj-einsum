@@ -14,7 +14,7 @@
 
 (def DEFAULT_OPTS
   {:backend :rocm
-   :epochs 15
+   :epochs 10
    :batch-size 16
    :seq-len 24
    :vocab-size 4096
@@ -24,7 +24,7 @@
    :head-dim 64
    :intermediate-dim 512
    :dim-mem 64
-   :lr 0.03
+   :lr 0.01
    :lambda-tl 0.35
    :gamma 5.0
    :lambda-mem 0.8
@@ -203,7 +203,8 @@
         _ (println "\nCompiling OpenXLA PJRT Training Executables...")
         t-c0 (System/nanoTime)
         fwd-train-exec (nano/compile-tl-nano-forward ctx batch-size seq-len cfg)
-        embed-update-exec (nano/compile-embedding-update ctx batch-size seq-len cfg)
+        embed-update-exec (nano/compile-embedding-update ctx batch-size seq-len cfg lr)
+        bwd-rel-exec (nano/compile-relational-backward ctx 16 hidden-dim dim-mem)
         t-comp (/ (- (System/nanoTime) t-c0) 1e6)
         _ (println (format "OpenXLA Graph Compilation completed in %.2f ms." t-comp))
 
@@ -262,24 +263,24 @@
                            rel-triples (get triples-by-rel rel [])
                            num-pos (count rel-triples)
                            effective-triples
-                           (cond
-                             (zero? num-pos) []
-                             (>= num-pos 4) (vec (take 16 rel-triples))
-                             :else
-                             (let [first-t (first rel-triples)
-                                   h (:head first-t)
-                                   t (:tail first-t)
-                                   neg-pool (filterv #(not= (:active %) t) candidate-targets)
-                                   num-needed (- 4 num-pos)
-                                   neg-triples (if (pos? (count neg-pool))
-                                                 (mapv (fn [_] {:head h :tail (:active (nth neg-pool (.nextInt rnd (count neg-pool))))})
-                                                       (range num-needed))
-                                                 [])]
-                               (into (vec rel-triples) neg-triples)))
+                           (let [real-t (vec (take 16 rel-triples))
+                                 n-real (count real-t)
+                                 n-pad (- 16 n-real)]
+                             (if (pos? n-pad)
+                               (let [first-t (first real-t)
+                                     h (if first-t (:head first-t) (:active (first candidate-targets)))
+                                     t (if first-t (:tail first-t) (:active (second candidate-targets)))
+                                     neg-pool (filterv #(not= (:active %) t) candidate-targets)
+                                     neg-triples (if (pos? (count neg-pool))
+                                                   (mapv (fn [_] {:head h :tail (:active (nth neg-pool (.nextInt rnd (count neg-pool))))})
+                                                         (range n-pad))
+                                                   [])]
+                                 (into real-t neg-triples))
+                               real-t))
                            curr-R (get @r-maps rel)
                            p-with-r (assoc p-acc :R_mem curr-R)
-                           batch-with-tr (assoc b :triples effective-triples :pos-count num-pos)
-                           next-p (nano/train-step fwd-train-exec p-with-r batch-with-tr cfg lr embed-update-exec)
+                           batch-with-tr (assoc b :triples effective-triples :pos-count (min 16 num-pos))
+                           next-p (nano/train-step fwd-train-exec p-with-r batch-with-tr cfg lr embed-update-exec bwd-rel-exec)
                            loss-info (:loss next-p)]
                        (when (:R_mem next-p)
                          (swap! r-maps assoc rel (:R_mem next-p)))
@@ -297,9 +298,8 @@
                   avg-info (/ @ep-info n-b)
                   tok-s (* (/ (double total-toks-per-epoch) t-ep) 1000.0)]
 
-              (when (or (<= epoch 5) (zero? (mod epoch 5)) (= epoch epochs))
-                (println (format "%5d | %7.4f | %6.4f | %9.4f | %7.1f ms | %7.0f tok/s"
-                                 epoch avg-tot avg-lm avg-info t-ep tok-s)))
+              (println (format "%5d | %7.4f | %6.4f | %9.4f | %7.1f ms | %7.0f tok/s"
+                               epoch avg-tot avg-lm avg-info t-ep tok-s))
               (swap! trace-acc conj {:epoch epoch
                                      :loss avg-tot
                                      :lm-loss avg-lm
