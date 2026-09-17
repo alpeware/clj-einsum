@@ -1,0 +1,435 @@
+{:stream-20-count 20,
+ :stream-60-count 60,
+ :events-20
+ [{:step 0,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 1,
+   :kind :trap-noop,
+   :valid? false,
+   :text "Revocation notice: revoke Heidi's deployer role.",
+   :proposal [:retract [:has_role :heidi :deployer]]}
+  {:step 2,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Grace the developer role.",
+   :proposal [:assert [:has_role :grace :developer]]}
+  {:step 3,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Ivan the viewer role.",
+   :proposal [:assert [:has_role :ivan :viewer]]}
+  {:step 4,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 5,
+   :kind :ambiguous,
+   :valid? true,
+   :text
+   "Ticket #412 scan is blurry: role oncall was granted to either Erin or Frank.",
+   :proposal
+   [:ambiguous [[:has_role :erin :oncall] [:has_role :frank :oncall]]]}
+  {:step 6,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Oscar the developer role.",
+   :proposal [:assert [:has_role :oscar :developer]]}
+  {:step 7,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Heidi the viewer role.",
+   :proposal [:assert [:has_role :heidi :viewer]]}
+  {:step 8,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 9,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Oscar the developer role.",
+   :proposal [:assert [:has_role :oscar :developer]]}
+  {:step 10,
+   :kind :trap-domain,
+   :valid? false,
+   :text "External request: grant Trent the viewer role.",
+   :proposal [:assert [:has_role :trent :viewer]]}
+  {:step 11,
+   :kind :trap-noop,
+   :valid? false,
+   :text "Revocation notice: revoke Heidi's deployer role.",
+   :proposal [:retract [:has_role :heidi :deployer]]}
+  {:step 12,
+   :kind :disambiguate,
+   :valid? true,
+   :text "HR confirmed: oncall ticket #412 was assigned to Erin.",
+   :proposal [:disambiguate 0 [:has_role :erin :oncall]]}
+  {:step 13,
+   :kind :trap-domain,
+   :valid? false,
+   :text "External request: grant Trent the viewer role.",
+   :proposal [:assert [:has_role :trent :viewer]]}
+  {:step 14,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Frank the viewer role.",
+   :proposal [:assert [:has_role :frank :viewer]]}
+  {:step 15,
+   :kind :trap-sod,
+   :valid? false,
+   :text "Internal request: grant Carol the developer role.",
+   :proposal [:assert [:has_role :carol :developer]]}
+  {:step 16,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Heidi the viewer role.",
+   :proposal [:assert [:has_role :heidi :viewer]]}
+  {:step 17,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Mallory the viewer role.",
+   :proposal [:assert [:has_role :mallory :viewer]]}
+  {:step 18,
+   :kind :trap-domain,
+   :valid? false,
+   :text "External request: grant Trent the viewer role.",
+   :proposal [:assert [:has_role :trent :viewer]]}
+  {:step 19,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Oscar from the developer role.",
+   :proposal [:retract [:has_role :oscar :developer]]}],
+ :events-60
+ [{:step 0,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 1,
+   :kind :trap-noop,
+   :valid? false,
+   :text "Revocation notice: revoke Heidi's deployer role.",
+   :proposal [:retract [:has_role :heidi :deployer]]}
+  {:step 2,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Grace the developer role.",
+   :proposal [:assert [:has_role :grace :developer]]}
+  {:step 3,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Ivan the viewer role.",
+   :proposal [:assert [:has_role :ivan :viewer]]}
+  {:step 4,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 5,
+   :kind :ambiguous,
+   :valid? true,
+   :text
+   "Ticket #412 scan is blurry: role oncall was granted to either Erin or Frank.",
+   :proposal
+   [:ambiguous [[:has_role :erin :oncall] [:has_role :frank :oncall]]]}
+  {:step 6,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Oscar the developer role.",
+   :proposal [:assert [:has_role :oscar :developer]]}
+  {:step 7,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Heidi the viewer role.",
+   :proposal [:assert [:has_role :heidi :viewer]]}
+  {:step 8,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 9,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Oscar the developer role.",
+   :proposal [:assert [:has_role :oscar :developer]]}
+  {:step 10,
+   :kind :trap-domain,
+   :valid? false,
+   :text "External request: grant Trent the viewer role.",
+   :proposal [:assert [:has_role :trent :viewer]]}
+  {:step 11,
+   :kind :trap-noop,
+   :valid? false,
+   :text "Revocation notice: revoke Heidi's deployer role.",
+   :proposal [:retract [:has_role :heidi :deployer]]}
+  {:step 12,
+   :kind :disambiguate,
+   :valid? true,
+   :text "HR confirmed: oncall ticket #412 was assigned to Erin.",
+   :proposal [:disambiguate 0 [:has_role :erin :oncall]]}
+  {:step 13,
+   :kind :trap-domain,
+   :valid? false,
+   :text "External request: grant Trent the viewer role.",
+   :proposal [:assert [:has_role :trent :viewer]]}
+  {:step 14,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Frank the viewer role.",
+   :proposal [:assert [:has_role :frank :viewer]]}
+  {:step 15,
+   :kind :trap-sod,
+   :valid? false,
+   :text "Internal request: grant Carol the developer role.",
+   :proposal [:assert [:has_role :carol :developer]]}
+  {:step 16,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Heidi the viewer role.",
+   :proposal [:assert [:has_role :heidi :viewer]]}
+  {:step 17,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Mallory the viewer role.",
+   :proposal [:assert [:has_role :mallory :viewer]]}
+  {:step 18,
+   :kind :trap-domain,
+   :valid? false,
+   :text "External request: grant Trent the viewer role.",
+   :proposal [:assert [:has_role :trent :viewer]]}
+  {:step 19,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Oscar from the developer role.",
+   :proposal [:retract [:has_role :oscar :developer]]}
+  {:step 20,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Ivan the viewer role.",
+   :proposal [:assert [:has_role :ivan :viewer]]}
+  {:step 21,
+   :kind :trap-cardinality,
+   :valid? false,
+   :text "Escalation ticket: grant Judy the admin role.",
+   :proposal [:assert [:has_role :judy :admin]]}
+  {:step 22,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Mallory the viewer role.",
+   :proposal [:assert [:has_role :mallory :viewer]]}
+  {:step 23,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Heidi the viewer role.",
+   :proposal [:assert [:has_role :heidi :viewer]]}
+  {:step 24,
+   :kind :trap-noop,
+   :valid? false,
+   :text "Revocation notice: revoke Heidi's deployer role.",
+   :proposal [:retract [:has_role :heidi :deployer]]}
+  {:step 25,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Ivan the viewer role.",
+   :proposal [:assert [:has_role :ivan :viewer]]}
+  {:step 26,
+   :kind :trap-noop,
+   :valid? false,
+   :text "Routine access review: grant Alice the developer role.",
+   :proposal [:assert [:has_role :alice :developer]]}
+  {:step 27,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 28,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Grace the developer role.",
+   :proposal [:assert [:has_role :grace :developer]]}
+  {:step 29,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Oscar the developer role.",
+   :proposal [:assert [:has_role :oscar :developer]]}
+  {:step 30,
+   :kind :trap-cardinality,
+   :valid? false,
+   :text "Escalation ticket: grant Judy the admin role.",
+   :proposal [:assert [:has_role :judy :admin]]}
+  {:step 31,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Erin from the viewer role.",
+   :proposal [:retract [:has_role :erin :viewer]]}
+  {:step 32,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Grace from the developer role.",
+   :proposal [:retract [:has_role :grace :developer]]}
+  {:step 33,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 34,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 35,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Oscar from the developer role.",
+   :proposal [:retract [:has_role :oscar :developer]]}
+  {:step 36,
+   :kind :trap-sod,
+   :valid? false,
+   :text "Internal request: grant Dan the deployer role.",
+   :proposal [:assert [:has_role :dan :deployer]]}
+  {:step 37,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Judy the developer role.",
+   :proposal [:assert [:has_role :judy :developer]]}
+  {:step 38,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Grace from the developer role.",
+   :proposal [:retract [:has_role :grace :developer]]}
+  {:step 39,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Mallory the viewer role.",
+   :proposal [:assert [:has_role :mallory :viewer]]}
+  {:step 40,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Erin from the viewer role.",
+   :proposal [:retract [:has_role :erin :viewer]]}
+  {:step 41,
+   :kind :trap-noop,
+   :valid? false,
+   :text "Routine access review: grant Dan the admin role.",
+   :proposal [:assert [:has_role :dan :admin]]}
+  {:step 42,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Ivan the viewer role.",
+   :proposal [:assert [:has_role :ivan :viewer]]}
+  {:step 43,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Grace from the developer role.",
+   :proposal [:retract [:has_role :grace :developer]]}
+  {:step 44,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Grace the developer role.",
+   :proposal [:assert [:has_role :grace :developer]]}
+  {:step 45,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Mallory the viewer role.",
+   :proposal [:assert [:has_role :mallory :viewer]]}
+  {:step 46,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Erin from the viewer role.",
+   :proposal [:retract [:has_role :erin :viewer]]}
+  {:step 47,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Ivan the viewer role.",
+   :proposal [:assert [:has_role :ivan :viewer]]}
+  {:step 48,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Mallory the viewer role.",
+   :proposal [:assert [:has_role :mallory :viewer]]}
+  {:step 49,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Grace the developer role.",
+   :proposal [:assert [:has_role :grace :developer]]}
+  {:step 50,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Oscar the developer role.",
+   :proposal [:assert [:has_role :oscar :developer]]}
+  {:step 51,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Oscar the developer role.",
+   :proposal [:assert [:has_role :oscar :developer]]}
+  {:step 52,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Erin from the viewer role.",
+   :proposal [:retract [:has_role :erin :viewer]]}
+  {:step 53,
+   :kind :trap-noop,
+   :valid? false,
+   :text "Routine access review: grant Dan the admin role.",
+   :proposal [:assert [:has_role :dan :admin]]}
+  {:step 54,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Frank the viewer role.",
+   :proposal [:assert [:has_role :frank :viewer]]}
+  {:step 55,
+   :kind :revoke,
+   :valid? true,
+   :text "HR update: revoke Oscar from the developer role.",
+   :proposal [:retract [:has_role :oscar :developer]]}
+  {:step 56,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Judy the developer role.",
+   :proposal [:assert [:has_role :judy :developer]]}
+  {:step 57,
+   :kind :grant,
+   :valid? true,
+   :text "Ticket update: grant Alice the oncall role.",
+   :proposal [:assert [:has_role :alice :oncall]]}
+  {:step 58,
+   :kind :trap-domain,
+   :valid? false,
+   :text "External request: grant Trent the viewer role.",
+   :proposal [:assert [:has_role :trent :viewer]]}
+  {:step 59,
+   :kind :trap-sod,
+   :valid? false,
+   :text "Internal request: grant Dan the deployer role.",
+   :proposal [:assert [:has_role :dan :deployer]]}],
+ :oracle-20-facts
+ [[:heidi :viewer]
+  [:ivan :viewer]
+  [:erin :oncall]
+  [:mallory :viewer]
+  [:carol :auditor]
+  [:alice :developer]
+  [:dan :admin]
+  [:frank :viewer]
+  [:bob :deployer]
+  [:grace :developer]
+  [:alice :oncall]
+  [:erin :viewer]],
+ :oracle-60-facts
+ [[:heidi :viewer]
+  [:ivan :viewer]
+  [:erin :oncall]
+  [:mallory :viewer]
+  [:judy :developer]
+  [:carol :auditor]
+  [:alice :developer]
+  [:dan :admin]
+  [:frank :viewer]
+  [:bob :deployer]
+  [:grace :developer]
+  [:alice :oncall]
+  [:judy :admin]]}

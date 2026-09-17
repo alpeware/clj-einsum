@@ -27,6 +27,9 @@ elif [ "$1" = "relational" ] || [ "$1" = "--relational" ]; then
 elif [ "$1" = "e22" ] || [ "$1" = "--e22" ]; then
   MODE="e22"
   shift
+elif [ "$1" = "e23" ] || [ "$1" = "--e23" ]; then
+  MODE="e23"
+  shift
 fi
 
 if [ "$MODE" = "agent" ]; then
@@ -35,6 +38,8 @@ elif [ "$MODE" = "relational" ]; then
   exec clojure -M:gemma4-relational "$@"
 elif [ "$MODE" = "e22" ]; then
   exec clojure -M:e22 "$@"
+elif [ "$MODE" = "e23" ]; then
+  exec clojure -M:e23 "$@"
 else
   exec clojure -M:gemma4 "$@"
 fi

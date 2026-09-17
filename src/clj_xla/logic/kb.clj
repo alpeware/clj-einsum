@@ -102,32 +102,54 @@
      :message (format "Undeclared relation in schema: %s" rel)}))
 
 (defn check-cardinality
-  "Validates cardinality constraints, e.g. indegree <= max on child argument."
+  "Validates cardinality constraints, e.g. indegree <= max on child argument or role cap."
   [kb rel args]
   (if-let [card (get-in kb [:schema rel :cardinality])]
     (let [target-arg (long (:target-arg card))
-          max-allowed (long (:max card))
           target-val (nth args target-arg)
           existing-facts (or (get-in kb [:facts rel]) #{})]
       (if (contains? existing-facts (vec args))
         nil ;; Idempotent commit of already present fact
-        (let [current-matches (filter #(= (nth % target-arg) target-val) existing-facts)
-              current-count (count current-matches)]
-          (if (>= current-count max-allowed)
-            {:error :schema-violation
-             :violation :cardinality
-             :relation rel
-             :target-arg target-val
-             :current-count current-count
-             :max max-allowed}
-            nil))))
+        (cond
+          ;; Value-specific caps, e.g. {:caps {:admin 3}}
+          (and (:caps card) (contains? (:caps card) target-val))
+          (let [max-allowed (long (get (:caps card) target-val))
+                current-matches (filter #(= (nth % target-arg) target-val) existing-facts)
+                current-count (count current-matches)]
+            (if (>= current-count max-allowed)
+              {:error :schema-violation
+               :violation :cardinality
+               :relation rel
+               :target-arg target-val
+               :current-count current-count
+               :max max-allowed
+               :message (format "Cardinality cap exceeded for %s: current %d, max %d" target-val current-count max-allowed)}
+              nil))
+
+          ;; General max cap, e.g. {:target-arg 1 :max 2}
+          (:max card)
+          (let [max-allowed (long (:max card))
+                current-matches (filter #(= (nth % target-arg) target-val) existing-facts)
+                current-count (count current-matches)]
+            (if (>= current-count max-allowed)
+              {:error :schema-violation
+               :violation :cardinality
+               :relation rel
+               :target-arg target-val
+               :current-count current-count
+               :max max-allowed}
+              nil))
+
+          :else nil)))
     nil))
 
 (defn check-denial
-  "Validates denial constraints such as acyclicity on directed relations."
+  "Validates denial constraints such as acyclicity on directed relations or separation-of-duty."
   [kb rel args]
   (if-let [denial (get-in kb [:schema rel :denial])]
-    (if (contains? denial :acyclic)
+    (cond
+      ;; 1. Acyclicity denial
+      (and (set? denial) (contains? denial :acyclic))
       (let [from (nth args 0)
             to (nth args 1)]
         (if (= from to)
@@ -145,7 +167,29 @@
                :from from
                :to to}
               nil))))
-      nil)
+
+      ;; 2. Separation-of-Duty denial: {:sod-pairs #{[:deployer :auditor] ...}}
+      (or (:sod-pairs denial) (:sod denial))
+      (let [sod-pairs (or (:sod-pairs denial) (:sod denial))
+            u (nth args 0)
+            r (nth args 1)
+            existing-roles (set (map second (filter #(= (first %) u) (or (get-in kb [:facts rel]) #{}))))]
+        (if-let [conflicting-pair
+                 (some (fn [[r1 r2]]
+                         (when (or (and (= r r1) (contains? existing-roles r2))
+                                   (and (= r r2) (contains? existing-roles r1)))
+                           [r1 r2]))
+                       sod-pairs)]
+          {:error :schema-violation
+           :violation :separation-of-duty
+           :relation rel
+           :pair conflicting-pair
+           :user u
+           :message (format "Separation-of-duty violation: user %s cannot hold both %s and %s"
+                            u (first conflicting-pair) (second conflicting-pair))}
+          nil))
+
+      :else nil)
     nil))
 
 (defn check-identity
@@ -289,12 +333,129 @@
   ([kb branches provenance]
    (let [disj-id (count (:disjunctions kb))
          prov (or provenance {:source :disjunction})
-         branches-set (vec (map set branches))
+         branches-set (mapv (fn [b]
+                              (if (and (vector? b) (keyword? (first b)))
+                                #{b}
+                                (set b)))
+                            branches)
          entry {:id disj-id
                 :branches branches-set
                 :provenance prov
                 :timestamp (System/currentTimeMillis)}]
      (update kb :disjunctions conj entry))))
+
+(defn resolve-disjunction
+  "Resolves an active disjunction to a definite fact, removing the disjunction from active store
+   and asserting the chosen fact with :op :resolve-disjunction in the transaction log."
+  ([kb disj-id chosen-fact] (resolve-disjunction kb disj-id chosen-fact nil))
+  ([kb disj-id chosen-fact provenance]
+   (let [disjunctions (:disjunctions kb)
+         disj (some #(when (= (:id %) disj-id) %) disjunctions)]
+     (cond
+       (nil? disj)
+       {:error :not-found :message (format "Disjunction id %s not found" disj-id)}
+
+       (not (some #(contains? % chosen-fact) (:branches disj)))
+       {:error :schema-violation :violation :invalid-branch :message "Chosen fact is not in disjunction branches"}
+
+       :else
+       (let [kb-without-disj (assoc kb :disjunctions (filterv #(not= (:id %) disj-id) disjunctions))
+             rel (first chosen-fact)
+             args (vec (rest chosen-fact))]
+         (or (check-domain kb-without-disj rel args)
+             (check-cardinality kb-without-disj rel args)
+             (check-denial kb-without-disj rel args)
+             (check-identity kb-without-disj rel args)
+             (check-ambiguity kb-without-disj rel args)
+             (let [new-tx (inc (:tx-counter kb-without-disj))
+                   prov (or provenance {:source :resolve-disjunction :disjunction-id disj-id})
+                   log-entry {:tx-id new-tx
+                              :op :resolve-disjunction
+                              :fact chosen-fact
+                              :disjunction-id disj-id
+                              :provenance prov
+                              :timestamp (System/currentTimeMillis)
+                              :superseded-by nil}
+                   existing-facts (or (get-in kb-without-disj [:facts rel]) #{})]
+               (-> kb-without-disj
+                   (assoc :tx-counter new-tx)
+                   (update :log conj log-entry)
+                   (assoc-in [:facts rel] (conj existing-facts args))))))))))
+
+(defn commit-with-schema
+  "Commits an agent proposal through the verified schema pipeline:
+   - :assert -> check no-op, validate schema (domain, cardinality, denial, identity, ambiguity), append log
+   - :retract -> check no-op, validate held, stamp supersede marker
+   - :ambiguous -> record first-class disjunction
+   - :disambiguate -> resolve disjunction to definite fact
+   Returns {:committed updated-kb} on success, or {:rejected violation-map} on failure."
+  ([kb proposal]
+   (let [[op payload prov]
+         (cond
+           (vector? proposal)
+           [(first proposal) (rest proposal) nil]
+
+           (map? proposal)
+           [(:op proposal)
+            (case (:op proposal)
+              :assert [(:fact proposal)]
+              :retract [(:fact proposal)]
+              :ambiguous [(:branches proposal)]
+              :disambiguate [(:disjunction-id proposal) (:chosen-fact proposal)]
+              nil)
+            (:provenance proposal)]
+
+           :else
+           [:unknown nil nil])]
+     (case op
+       :assert
+       (let [fact (first payload)
+             rel (first fact)
+             args (vec (rest fact))
+             existing (or (get-in kb [:facts rel]) #{})]
+         (if (contains? existing args)
+           {:rejected {:error :schema-violation
+                       :violation :no-op
+                       :fact fact
+                       :message "Fact already held in KB"}}
+           (let [res (assert-fact kb fact prov)]
+             (if (:error res)
+               {:rejected res}
+               {:committed res}))))
+
+       :retract
+       (let [fact (first payload)
+             rel (first fact)
+             args (vec (rest fact))
+             existing (or (get-in kb [:facts rel]) #{})]
+         (if-not (contains? existing args)
+           {:rejected {:error :schema-violation
+                       :violation :no-op
+                       :fact fact
+                       :message "Fact not held in KB"}}
+           (let [res (retract-fact kb fact prov)]
+             (if (:error res)
+               {:rejected res}
+               {:committed res}))))
+
+       :ambiguous
+       (let [branches (first payload)
+             res (assert-disjunction kb branches prov)]
+         (if (:error res)
+           {:rejected res}
+           {:committed res}))
+
+       :disambiguate
+       (let [disj-id (first payload)
+             chosen-fact (second payload)
+             res (resolve-disjunction kb disj-id chosen-fact prov)]
+         (if (:error res)
+           {:rejected res}
+           {:committed res}))
+
+       {:rejected {:error :invalid-op :proposal proposal}})))
+  ([schema kb proposal]
+   (commit-with-schema (assoc kb :schema schema) proposal)))
 
 ;; ==============================================================================
 ;; 6. Host-Side Read Path & Datalog Materialization

@@ -33,6 +33,9 @@
   :e22
   {:main-opts ["-m" "scripts.e22-kb-dispatch"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
+  :e23
+  {:main-opts ["-m" "scripts.e23-reduce"]
+   :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :benchmark
   {:main-opts ["-m" "scripts.benchmark"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx8g"]}

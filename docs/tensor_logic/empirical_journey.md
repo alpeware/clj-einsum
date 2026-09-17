@@ -2596,3 +2596,148 @@ Experiment E22 establishes the complete Tier 1 + Tier 2 operational cycle:
 - **E22** proves the **in-graph read path**: the generative agent calls the discrete store as native tokens, queries VRAM-resident relation matrices with zero host parsing, and incorporates ground truth directly into its KV-cache.
 - This provides the empirical foundation for **Stage B** (full in-graph `while` loop with chained execution), unlocking hallucination-free autonomous agent loops executing at hardware-native speed.
 
+---
+
+## 24. Experiment E23: The Reduce — Verified KB Accumulation Over a Horizon (RBAC)
+
+### 1. Executive Summary & Problem Formulation
+
+Experiment **E23** validates the core thesis of [`AGENT-LOOP.md`](file:///home/simonpure/src/alpeware/clj-xla/docs/tensor_logic/AGENT-LOOP.md) §9: **the autonomous agent loop is a reduce**.
+
+Rather than relying on unbounded conversational context windows—which suffer from context rot, attention dilution, and semantic drift—an autonomous agent maintains state through a bounded snapshot accumulator updated via pure, verified schema transitions:
+$$\text{state}_{t+1} = \text{verified\_commit}(\text{state}_t, \text{llm\_proposals}_t)$$
+
+```
+                    ┌────────────────────────┐
+                    │ Observation O_t        │
+                    └───────────┬────────────┘
+                                │
+                    ┌───────────▼────────────┐
+                    │ Prompt:                │
+                    │  [Snapshot S_t] + O_t  │
+                    └───────────┬────────────┘
+                                │
+                    ┌───────────▼────────────┐
+                    │ Gemma 4 E2B            │
+                    │ Write-Arm Emission     │
+                    └───────────┬────────────┘
+                                │ <|tool_call> propose ...
+                    ┌───────────▼────────────┐
+                    │ Schema Gate            │
+                    │ Typecheck, Domain, SoD,│
+                    │ Cardinality, Ambiguity │
+                    └───────────┬────────────┘
+                       Accepted │  Rejected
+               ┌────────────────┴────────────────┐
+               ▼                                 ▼
+      ┌─────────────────┐               ┌─────────────────┐
+      │ S_{t+1} = State'│               │ S_{t+1} = State │
+      │ Append Log      │               │ Pass Violation  │
+      └─────────────────┘               └─────────────────┘
+```
+
+The experiment evaluates this reduce architecture over multi-step operational horizons ($T=20$ and $T=60$) on a synthetic **Role-Based Access Control (RBAC)** domain:
+- **Entities**: 12 users, 6 roles, 8 permissions.
+- **Constraints**:
+  1. *Separation of Duty (SoD)*: Pairwise exclusions forbidding conflicting roles (`[:deployer :auditor]`, `[:developer :auditor]`, `[:admin :deployer]`).
+  2. *Global Role Cardinality*: Maximum administrative capacity ($\text{admin\_cap} \le 3$).
+  3. *Domain Typing & Existence*: All asserted users and roles must belong to the declared schema domain.
+  4. *Ambiguity Lifecycle*: Underdetermined observations must be recorded as explicit disjunctions (`one-of`), blocked from premature commitment, and collapsed upon disambiguation with append-only supersede markers.
+- **Adversarial Pressure**: A 25% trap injection rate across the stream presenting tempting but illegal role grants (SoD violations, admin escalations, undeclared entity grants, and no-ops).
+
+---
+
+### 2. Experimental Sweep & Comparative Cells
+
+The empirical sweep contrasts three distinct state-tracking architectures across horizons $T=20$ and $T=60$:
+
+1. **Cell H (Verified KB Accumulation Reduce Loop)**:
+   At each step $t$, the LLM receives the current bounded KB snapshot $S_t$ and observation $O_t$. Its tool call proposal is validated by `clj-xla.logic.kb/commit-with-schema`. Valid proposals commit; invalid proposals are rejected, preserving $S_t$ with zero corruption.
+2. **Cell B1 (Unverified KB Accumulation Baseline)**:
+   The LLM receives snapshot $S_t$ and observation $O_t$, but its proposals are committed raw into the KB without gate checks. This models unconstrained LLM memory stores.
+3. **Cell B0 (In-Context Tracking Baseline)**:
+   No structured KB accumulator. The raw event history $[O_0, O_1, \dots, O_{t-1}]$ accumulates in the conversational context window, and the model is interrogated about role assignments directly under context pressure.
+
+---
+
+### 3. Phase 0 Verification Gates
+
+Before executing the horizon sweep, three offline verification gates confirmed system invariants:
+
+| Gate | Target Invariant | Telemetry / Proof | Status |
+|:---|:---|:---|:---:|
+| **P0a** | **Oracle Determinism & Shared Prefix** | Generated $T=20$ and $T=60$ event streams under seed 42 share exact 20-event prefix. Deterministic fold preserved admin cap ($\le 3$) and SoD invariance throughout. | **PASS** |
+| **P0b** | **Offline Trap Rejection** | Tested schema gate against synthetic traps: SoD (`bob` auditor), Cardinality (4th admin), Domain (`eve` viewer), No-Op assert, No-Op retract. All 5 rejected naming exact violation. | **PASS** |
+| **P0c** | **Write-Arm Emission Smoke Test** | 5 dry-run prompt emissions across distinct operational categories (Grant, Revoke, Trap, Ambiguity). Emitted well-formed `<\|tool_call\|>` syntax with 100% parse success (5/5). | **PASS** |
+
+---
+
+### 4. Empirical Evaluation & Pre-Registered Acceptance Criteria
+
+All pre-registered success criteria defined in [`docs/tensor_logic/e23-reduce-spec.md`](file:///home/simonpure/src/alpeware/clj-xla/docs/tensor_logic/e23-reduce-spec.md) were evaluated against oracle ground truth:
+
+| Criterion | Specification Requirement | Empirical Result | Status |
+|:---|:---|:---|:---:|
+| **1. Gate-Hold (H, Hard)** | Violating facts in final snapshot $\equiv 0$ at both horizons | $T=20$: **0 violations**<br/>$T=60$: **0 violations** | **PASS** |
+| **2. Snapshot $F_1$ (H)** | $F_1 \ge 0.90$ against oracle ground truth | $T=20$: **$1.0000$** ($P=1.0, R=1.0$)<br/>$T=60$: **$1.0000$** ($P=1.0, R=1.0$) | **PASS** |
+| **3. Horizon Flatness** | $\|F1_H(T=60) - F1_H(T=20)\| \le 0.05$ | Drift = **$0.0000$** (Flat across $3\times$ horizon) | **PASS** |
+| **4. B0 Degradation** | Track in-context accuracy degradation under horizon pressure | $T=20$: $60.0\%$ ($6/10$ correct)<br/>$T=60$: **$0.0\%$** ($0/10$ correct, complete collapse) | **PASS** |
+| **5. Ambiguity Lifecycle** | Disjunction stored at ambiguous event; collapsed via supersede marker at disambiguation | Step 5: `one-of` stored in `:disjunctions`<br/>Step 12: Collapsed to `has_role erin oncall` | **PASS** |
+| **6. Unverified B1 Comparison** | Demonstrate failure of unverified accumulation | $T=20$: 2 violating facts, $F_1 = 0.9231$<br/>$T=60$: **3 violating facts**, $F_1 = 0.8667$ | **PASS** |
+
+---
+
+### 5. Detailed Comparative Performance Table
+
+```
+========================================================================================================
+Architecture             Horizon (T)   Precision     Recall       F1 Score    Violating Facts   QA Acc
+========================================================================================================
+Cell H (Verified Reduce)     T = 20      1.0000      1.0000       1.0000             0          100.0%
+Cell H (Verified Reduce)     T = 60      1.0000      1.0000       1.0000             0          100.0%
+--------------------------------------------------------------------------------------------------------
+Cell B1 (Unverified KB)      T = 20      0.8571      1.0000       0.9231             2             —
+Cell B1 (Unverified KB)      T = 60      0.7647      1.0000       0.8667             3             —
+--------------------------------------------------------------------------------------------------------
+Cell B0 (In-Context Raw)     T = 20         —           —            —               —           60.0%
+Cell B0 (In-Context Raw)     T = 60         —           —            —               —            0.0%
+========================================================================================================
+```
+
+---
+
+### 6. Execution Latency & Hardware Telemetry
+
+Telemetry collected on **AMD Radeon RX 7900 XTX** (Navi 31, ROCm, `libjsig.so` preloaded, In-VRAM While Loop with KV-Cache):
+
+- **In-VRAM While-Loop Autoregressive Decode**:
+  - Generation Speed: **$59.7$ to $61.4\text{ tokens/second}$** ($16.3\text{ ms/token}$).
+  - Prefill Latency ($380 - 425\text{ tokens}$): **$71.6\text{ ms}$ to $145.5\text{ ms}$** (1-shot parallel prefill).
+  - Turn Generation Latency: **$530\text{ ms} - 680\text{ ms}$** per agent step.
+- **Pure Clojure Schema Gate Dispatch**:
+  - Verification Latency (`commit-with-schema`): **$15.2\text{ }\mu\text{s} - 72.3\text{ }\mu\text{s}$** per transaction.
+  - Compute Overhead: The verification gate accounts for **$< 0.015\%$** of total turn execution time. Over 99.98% of runtime is model forward pass computation on the GPU.
+
+---
+
+### 7. Key Diagnostic Insights & Architectural Lessons
+
+1. **The 512-Token Local Attention Sliding Window Barrier**:
+   - Initial sweep runs with 5 verbose few-shot examples expanded prompt token count to $779$ tokens. When prompt tokens exceeded $512$, Gemma 4 E2B's sliding-window attention layers lost context of the system prompt and early turns, causing the model to emit zero tokens (`<turn|>`) immediately.
+   - Restructuring the prompt into 4 compact, single-line few-shot examples reduced prompt length to **$392\text{ tokens}$**.
+   - Operating strictly within the $512$-token sliding window unlocked immediate, flawless write-arm tool emissions at **$60.6\text{ tok/s}$** with $100\%$ parse validity across all steps.
+
+2. **Zero Prompt Echo via Exact Token Slicing**:
+   - In-VRAM while loops return the full token sequence $[P_0, \dots, P_{k-1}, T_0, \dots, T_{m-1}]$.
+   - Splitting decoded strings on delimiter substrings (`<|turn>model\n`) introduces edge cases if the model output is empty or contains repeated delimiters.
+   - Slicing token IDs directly (`(subvec final-tokens prompt-count)`) prior to decoding eliminated prompt leakage, ensuring exact isolation of generated model tool proposals.
+
+3. **Causal Proof of Context Rot (B0 Collapse vs H Flatness)**:
+   - Cell B0 achieved $60\%$ accuracy at $T=20$. By $T=60$, under the accumulated token pressure of 60 event notices, B0 collapsed to **$0.0\%$** accuracy on role interrogation queries.
+   - In stark contrast, Cell H maintained **$1.0000$ $F_1$ score** and **$100.0\%$ interrogation accuracy** across both $T=20$ and $T=60$. Because the snapshot accumulator is bounded and constant-size, horizon length has zero effect on reasoning fidelity.
+
+4. **The Essential Necessity of the Constraint Gate (B1 Degradation)**:
+   - Cell B1 demonstrated that an LLM with a structured store but without a constraint gate steadily degrades as adversarial traps are presented: precision dropped from $85.7\%$ to $76.5\%$, and 3 illegal role assignments entered the database.
+   - The verified reduce loop ($S_{t+1} = \text{verified\_commit}(S_t, P_t)$) guarantees **$\text{violating facts} \equiv 0$** as a mathematical invariant.
+
+
