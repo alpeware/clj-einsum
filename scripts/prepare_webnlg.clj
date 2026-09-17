@@ -82,29 +82,64 @@
         _ (.mkdirs out-dir)
         train-path (str repo-dir "/train")
         dev-path (str repo-dir "/dev")
-
-        _ (println "Parsing WebNLG 1-3 triples subset for optimal training density...")
-        ;; Use 1-3 triples for focused relational grounding density
-        train-entries (parse-directory train-path 3)
-        dev-entries (parse-directory dev-path 3)
-
-        train-summary (extract-corpus-summary train-entries)
-        dev-summary (extract-corpus-summary dev-entries)
-
         train-out (io/file out-dir "train.edn")
-        dev-out (io/file out-dir "dev.edn")]
+        dev-out (io/file out-dir "dev.edn")
 
-    (println "\n=== WebNLG Dataset Processing Complete ===")
-    (println (format "Train: %,d entries | %,d sentences | %,d triples | %,d entities | %,d relations"
-                     (:total-entries train-summary) (:total-sentences train-summary)
-                     (:unique-triples train-summary) (:unique-entities train-summary)
-                     (:unique-relations train-summary)))
-    (println (format "Dev:   %,d entries | %,d sentences | %,d triples | %,d entities | %,d relations"
-                     (:total-entries dev-summary) (:total-sentences dev-summary)
-                     (:unique-triples dev-summary) (:unique-entities dev-summary)
-                     (:unique-relations dev-summary)))
+        train-data (if (.exists (io/file train-path))
+                     (do
+                       (println "Parsing WebNLG 1-3 triples subset from raw XML...")
+                       (let [entries (parse-directory train-path 3)
+                             summary (extract-corpus-summary entries)]
+                         (spit train-out (pr-str {:summary summary :entries entries}))
+                         {:summary summary :entries entries}))
+                     (when (.exists train-out)
+                       (println (format "Using existing %s (%.2f MB)" (.getPath train-out) (/ (.length train-out) 1048576.0)))
+                       (read-string (slurp train-out))))
 
-    (spit train-out (pr-str {:summary train-summary :entries train-entries}))
-    (spit dev-out (pr-str {:summary dev-summary :entries dev-entries}))
-    (println (format "Saved train to %s (%.2f MB)" (.getPath train-out) (/ (.length train-out) 1048576.0)))
-    (println (format "Saved dev to %s (%.2f MB)" (.getPath dev-out) (/ (.length dev-out) 1048576.0)))))
+        dev-data (if (.exists (io/file dev-path))
+                   (let [entries (parse-directory dev-path 3)
+                         summary (extract-corpus-summary entries)]
+                     (spit dev-out (pr-str {:summary summary :entries entries}))
+                     {:summary summary :entries entries})
+                   (when (.exists dev-out)
+                     (println (format "Using existing %s (%.2f MB)" (.getPath dev-out) (/ (.length dev-out) 1048576.0)))
+                     (read-string (slurp dev-out))))
+
+        train-entries (:entries train-data)
+        _dev-entries (:entries dev-data)]
+
+    (when train-data
+      (println (format "Train: %,d entries | %,d sentences | %,d triples | %,d entities | %,d relations"
+                       (get-in train-data [:summary :total-entries])
+                       (get-in train-data [:summary :total-sentences])
+                       (get-in train-data [:summary :unique-triples])
+                       (get-in train-data [:summary :unique-entities])
+                       (get-in train-data [:summary :unique-relations]))))
+    (when dev-data
+      (println (format "Dev:   %,d entries | %,d sentences | %,d triples | %,d entities | %,d relations"
+                       (get-in dev-data [:summary :total-entries])
+                       (get-in dev-data [:summary :total-sentences])
+                       (get-in dev-data [:summary :unique-triples])
+                       (get-in dev-data [:summary :unique-entities])
+                       (get-in dev-data [:summary :unique-relations]))))
+
+    ;; Parse and partition official test set if available
+    (let [test-raw (io/file out-dir "raw/test-data-with-refs-en.xml")]
+      (when (.exists test-raw)
+        (println "\nParsing official WebNLG test set and partitioning Seen vs Unseen...")
+        (let [test-entries (parse-file test-raw)
+              train-cats (set (distinct (map :category train-entries)))
+              seen-entries (vec (filter #(contains? train-cats (:category %)) test-entries))
+              unseen-entries (vec (filter #(not (contains? train-cats (:category %))) test-entries))
+              seen-sum (extract-corpus-summary seen-entries)
+              unseen-sum (extract-corpus-summary unseen-entries)
+              seen-out (io/file out-dir "test_seen.edn")
+              unseen-out (io/file out-dir "test_unseen.edn")]
+          (spit seen-out (pr-str {:summary seen-sum :entries seen-entries}))
+          (spit unseen-out (pr-str {:summary unseen-sum :entries unseen-entries}))
+          (println (format "Test Seen:   %,d entries | %,d sentences | %,d triples | %,d relations -> %s"
+                           (:total-entries seen-sum) (:total-sentences seen-sum)
+                           (:unique-triples seen-sum) (:unique-relations seen-sum) (.getPath seen-out)))
+          (println (format "Test Unseen: %,d entries | %,d sentences | %,d triples | %,d relations -> %s"
+                           (:total-entries unseen-sum) (:total-sentences unseen-sum)
+                           (:unique-triples unseen-sum) (:unique-relations unseen-sum) (.getPath unseen-out))))))))

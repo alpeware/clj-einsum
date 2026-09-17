@@ -4,7 +4,8 @@
    with Declarative Tensor Logic layers (hybrid KG-attention and relational memory unbinding)
    and joint autoregressive LM + InfoNCE contrastive pre-training."
   (:require [clj-xla.core :as xla]
-            [clj-xla.logic.symbolic :as sym]))
+            [clj-xla.logic.symbolic :as sym]
+            [clj-xla.pjrt :as pjrt]))
 
 ;; ==============================================================================
 ;; 1. Architecture Configurations
@@ -306,6 +307,42 @@
                              (range num-layers)))]
      (merge base layer-params))))
 
+(defn pin-params-in-vram
+  "Transfers and pins static layer weights in PJRT device VRAM.
+   Returns a params map where static layer weights are MemorySegment device buffers."
+  [ctx params cfg]
+  (let [d (long (:hidden-dim cfg))
+        dff (long (:intermediate-dim cfg))
+        num-layers (long (:num-layers cfg))
+        client (:client ctx)
+        pin (fn [arr shape]
+              (if (instance? java.lang.foreign.MemorySegment arr)
+                arr
+                (pjrt/buffer-from-host-buffer ctx client arr shape 11)))
+        layer-pins
+        (into {}
+              (mapcat
+               (fn [i]
+                 [[(keyword (str "W_q_" i)) (pin (get params (keyword (str "W_q_" i))) [d d])]
+                  [(keyword (str "W_k_" i)) (pin (get params (keyword (str "W_k_" i))) [d d])]
+                  [(keyword (str "W_v_" i)) (pin (get params (keyword (str "W_v_" i))) [d d])]
+                  [(keyword (str "W_o_" i)) (pin (get params (keyword (str "W_o_" i))) [d d])]
+                  [(keyword (str "W_gate_" i)) (pin (get params (keyword (str "W_gate_" i))) [d dff])]
+                  [(keyword (str "W_up_" i)) (pin (get params (keyword (str "W_up_" i))) [d dff])]
+                  [(keyword (str "W_down_" i)) (pin (get params (keyword (str "W_down_" i))) [dff d])]])
+               (range num-layers)))
+        base-pins {:threshold (pin (:threshold params) [1])
+                   :T (pin (:T params) [(:max-seq-len cfg) (:entity-count cfg)])
+                   :R_adj (pin (:R_adj params) [(:entity-count cfg) (:entity-count cfg)])}]
+    (merge params layer-pins base-pins)))
+
+(defn free-pinned-params!
+  "Releases VRAM device buffers allocated by pin-params-in-vram."
+  [params]
+  (doseq [[_k v] params]
+    (when (instance? java.lang.foreign.MemorySegment v)
+      (try (xla/destroy-buffer! v) (catch Exception _ nil)))))
+
 (defn compute-joint-loss
   "Computes joint autoregressive LM cross-entropy loss + InfoNCE relational contrastive loss:
    L_total = L_LM + lambda_TL * L_InfoNCE."
@@ -421,112 +458,156 @@
        :H_final h-final
        :outputs outputs})))
 
+(defn compile-embedding-update
+  "Compiles OpenXLA PJRT executable for in-VRAM dW_embed contraction and SGD update:
+   dW_embed[v, d] = G_logit[n, v]^T @ H_final[n, d]
+   W_embed_new = W_embed - lr * dW_embed"
+  ([batch-size seq-len cfg]
+   (compile-embedding-update (xla/get-context) batch-size seq-len cfg))
+  ([ctx batch-size seq-len cfg]
+   (let [n (* (long batch-size) (dec (long seq-len)))
+         v (long (:vocab-size cfg))
+         d (long (:hidden-dim cfg))
+         invars [[:G [:tensor [n v] :f32]]
+                 [:H [:tensor [n d] :f32]]
+                 [:W [:tensor [v d] :f32]]]
+         ast [:block {:name :embedding_update}
+              [:= [:dW :v :d] [:G :n :v] [:H :n :d]]
+              [:= [:scaled_dW :v :d] {:scale (double (or (:lr cfg) 0.03))} [:dW :v :d]]
+              [:- [:W_new :v :d] [:W :v :d] [:scaled_dW :v :d]]]
+         target-heads [:W_new]]
+     (sym/compile-query ctx "embedding_update" invars ast target-heads))))
+
 (defn train-step
   "Executes an OpenXLA pre-training step via algebraic autodiff adjoints.
-   Updates W_embed, W_mem, R_mem, and output weights with learning rate `lr`."
-  [exec params batch cfg lr]
-  (let [loss-res (compute-joint-loss exec params batch cfg)
-        ^floats probs (:probs loss-res)
-        ^floats h-final (:H_final loss-res)
-        ^ints targets (:targets batch)
-        triples (:triples batch)
-        b (long (or (:batch-size batch) 1))
-        l (long (:max-seq-len cfg))
-        v (long (:vocab-size cfg))
-        d (long (:hidden-dim cfg))
-        dm (long (:dim-mem cfg))
-        lambda-tl (double (or (:lambda-tl cfg) 0.3))
-        tau (double (or (:tau cfg) 0.2))
-        eta (double lr)
-        valid-pos (double (* b (dec l)))
+   Updates W_embed, W_mem, R_mem, and output weights with learning rate `lr`.
+   Accepts optional `embed-exec` compiled OpenXLA kernel for in-VRAM dW_embed contraction."
+  ([exec params batch cfg lr]
+   (train-step exec params batch cfg lr nil))
+  ([exec params batch cfg lr embed-exec]
+   (let [loss-res (compute-joint-loss exec params batch cfg)
+         ^floats probs (:probs loss-res)
+         ^floats h-final (:H_final loss-res)
+         ^ints targets (:targets batch)
+         triples (:triples batch)
+         b (long (or (:batch-size batch) 1))
+         l (long (:max-seq-len cfg))
+         v (long (:vocab-size cfg))
+         d (long (:hidden-dim cfg))
+         dm (long (:dim-mem cfg))
+         lambda-tl (double (or (:lambda-tl cfg) 0.3))
+         tau (double (or (:tau cfg) 0.2))
+         eta (double lr)
+         valid-pos (double (* b (dec l)))
+         ^floats grad-w-mem (float-array (* d dm))
+         ^floats grad-r-mem (float-array (* dm dm))
 
-        ;; 1. Language Model Head Gradients: dL/d(logits) = (probs - target) / N
-        ^floats grad-embed (float-array (* v d))]
-
-    (dotimes [bi b]
-      (dotimes [pos (dec l)]
-        (let [row-idx (+ (* bi l v) (* pos v))
-              target-tok (aget targets (+ (* bi l) pos))
-              h-off (+ (* bi l d) (* pos d))]
-          (dotimes [vi v]
-            (let [p (double (aget probs (+ row-idx vi)))
-                  is-target? (= vi target-tok)]
-              (when (or is-target? (> p 1e-4))
-                (let [target-val (if is-target? 1.0 0.0)
-                      g-logit (/ (- p target-val) valid-pos)
-                      v-off (* vi d)]
-                  ;; dW_embed[v, d] += g_logit * H_final[d]
-                  (dotimes [di d]
-                    (let [h-val (double (aget h-final (+ h-off di)))
-                          idx (+ v-off di)]
-                      (aset-float grad-embed idx
-                                  (float (+ (double (aget grad-embed idx)) (* g-logit h-val)))))))))))))
+         ;; 1. Language Model Head Gradients: In-VRAM GPU vs CPU
+         updated-embed
+         (if embed-exec
+           (let [n (long (* b (dec l)))
+                 g-arr (float-array (* n v))
+                 inv-n (/ 1.0 valid-pos)]
+             (dotimes [bi b]
+               (dotimes [pos (dec l)]
+                 (let [flat-idx (+ (* bi (dec l)) pos)
+                       src-row (+ (* bi l v) (* pos v))
+                       tgt (aget targets (+ (* bi l) pos))
+                       dst-row (* flat-idx v)]
+                   (dotimes [vi v]
+                     (let [p (double (aget probs (+ src-row vi)))
+                           diff (if (= vi tgt) (- p 1.0) p)]
+                       (aset-float g-arr (+ dst-row vi) (float (* diff inv-n))))))))
+             (let [update-res (sym/run-query! embed-exec {:G g-arr :H h-final :W (:W_embed params)})]
+               (:W_new update-res)))
+           (let [^floats grad-embed (float-array (* v d))]
+             (dotimes [bi b]
+               (dotimes [pos (dec l)]
+                 (let [row-idx (+ (* bi l v) (* pos v))
+                       target-tok (aget targets (+ (* bi l) pos))
+                       h-off (+ (* bi l d) (* pos d))]
+                   (dotimes [vi v]
+                     (let [p (double (aget probs (+ row-idx vi)))
+                           is-target? (= vi target-tok)]
+                       (when (or is-target? (> p 1e-4))
+                         (let [target-val (if is-target? 1.0 0.0)
+                               g-logit (/ (- p target-val) valid-pos)
+                               v-off (* vi d)]
+                           (dotimes [di d]
+                             (let [h-val (double (aget h-final (+ h-off di)))
+                                   idx (+ v-off di)]
+                               (aset-float grad-embed idx
+                                           (float (+ (double (aget grad-embed idx)) (* g-logit h-val)))))))))))))
+             (let [orig ^floats (:W_embed params)
+                   len (alength orig)
+                   upd (float-array len)]
+               (dotimes [i len]
+                 (aset-float upd i (float (- (double (aget orig i)) (* eta (double (aget grad-embed i)))))))
+               upd)))]
 
     ;; 2. Relational Contrastive Subspace Gradients (if triples present)
-    (let [^floats grad-w-mem (float-array (* d dm))
-          ^floats grad-r-mem (float-array (* dm dm))]
-      (when (and (seq triples) (:W_mem params) (:R_mem params))
-        (let [k-cnt (count triples)
-              ^floats w-mem (:W_mem params)
-              ^floats r-mem (:R_mem params)
-              ^floats w-embed (:W_embed params)
-              u-h (float-array (* k-cnt dm))
-              u-t (float-array (* k-cnt dm))
-              u-hr (float-array (* k-cnt dm))]
+     (when (and (seq triples) (:W_mem params) (:R_mem params))
+       (let [k-cnt (count triples)
+             ^floats w-mem (:W_mem params)
+             ^floats r-mem (:R_mem params)
+             ^floats w-embed (:W_embed params)
+             u-h (float-array (* k-cnt dm))
+             u-t (float-array (* k-cnt dm))
+             u-hr (float-array (* k-cnt dm))]
           ;; Forward projections
-          (doseq [k-idx (range k-cnt)]
-            (let [{:keys [head tail]} (nth triples k-idx)
-                  h-off (* (long head) d)
-                  t-off (* (long tail) d)
-                  uk-off (* k-idx dm)]
-              (dotimes [j dm]
-                (let [sh (loop [i 0 s 0.0] (if (>= i d) s (recur (inc i) (+ s (* (double (aget w-embed (+ h-off i))) (double (aget w-mem (+ (* i dm) j))))))))
-                      st (loop [i 0 s 0.0] (if (>= i d) s (recur (inc i) (+ s (* (double (aget w-embed (+ t-off i))) (double (aget w-mem (+ (* i dm) j))))))))]
-                  (aset-float u-h (+ uk-off j) (float sh))
-                  (aset-float u-t (+ uk-off j) (float st))))
-              (dotimes [j dm]
-                (let [shr (loop [i 0 s 0.0] (if (>= i dm) s (recur (inc i) (+ s (* (double (aget u-h (+ uk-off i))) (double (aget r-mem (+ (* i dm) j))))))))]
-                  (aset-float u-hr (+ uk-off j) (float shr))))))
+         (doseq [k-idx (range k-cnt)]
+           (let [{:keys [head tail]} (nth triples k-idx)
+                 h-off (* (long head) d)
+                 t-off (* (long tail) d)
+                 uk-off (* k-idx dm)]
+             (dotimes [j dm]
+               (let [sh (loop [i 0 s 0.0] (if (>= i d) s (recur (inc i) (+ s (* (double (aget w-embed (+ h-off i))) (double (aget w-mem (+ (* i dm) j))))))))
+                     st (loop [i 0 s 0.0] (if (>= i d) s (recur (inc i) (+ s (* (double (aget w-embed (+ t-off i))) (double (aget w-mem (+ (* i dm) j))))))))]
+                 (aset-float u-h (+ uk-off j) (float sh))
+                 (aset-float u-t (+ uk-off j) (float st))))
+             (dotimes [j dm]
+               (let [shr (loop [i 0 s 0.0] (if (>= i dm) s (recur (inc i) (+ s (* (double (aget u-h (+ uk-off i))) (double (aget r-mem (+ (* i dm) j))))))))]
+                 (aset-float u-hr (+ uk-off j) (float shr))))))
           ;; InfoNCE Adjoints via autodiff
-          (dotimes [i k-cnt]
-            (dotimes [j k-cnt]
-              (let [uk-i (* i dm)
-                    uk-j (* j dm)
-                    target (if (= i j) 1.0 0.0)
-                    prob (if (= i j) 0.8 0.2)
-                    g-s (/ (- prob target) (* (double k-cnt) tau))]
+         (dotimes [i k-cnt]
+           (dotimes [j k-cnt]
+             (let [uk-i (* i dm)
+                   uk-j (* j dm)
+                   target (if (= i j) 1.0 0.0)
+                   prob (if (= i j) 0.8 0.2)
+                   g-s (/ (- prob target) (* (double k-cnt) tau))]
                 ;; dR += U_h^T * (g_s * U_t)
-                (dotimes [m1 dm]
-                  (dotimes [m2 dm]
-                    (let [idx (+ (* m1 dm) m2)
-                          v-uh (double (aget u-h (+ uk-i m1)))
-                          v-ut (double (aget u-t (+ uk-j m2)))]
-                      (aset-float grad-r-mem idx (float (+ (double (aget grad-r-mem idx)) (* lambda-tl g-s v-uh v-ut)))))))
+               (dotimes [m1 dm]
+                 (dotimes [m2 dm]
+                   (let [idx (+ (* m1 dm) m2)
+                         v-uh (double (aget u-h (+ uk-i m1)))
+                         v-ut (double (aget u-t (+ uk-j m2)))]
+                     (aset-float grad-r-mem idx (float (+ (double (aget grad-r-mem idx)) (* lambda-tl g-s v-uh v-ut)))))))
                 ;; dW_mem += V_h^T * (g_s * (U_t @ R^T))
-                (let [{:keys [head tail]} (nth triples i)
-                      h-off (* (long head) d)
-                      t-off (* (long tail) d)]
-                  (dotimes [di d]
-                    (dotimes [dj dm]
-                      (let [idx (+ (* di dm) dj)
-                            vh (double (aget w-embed (+ h-off di)))
-                            vt (double (aget w-embed (+ t-off di)))]
-                        (aset-float grad-w-mem idx (float (+ (double (aget grad-w-mem idx)) (* lambda-tl g-s (+ vh vt) 0.01)))))))))))))
+               (let [{:keys [head tail]} (nth triples i)
+                     h-off (* (long head) d)
+                     t-off (* (long tail) d)]
+                 (dotimes [di d]
+                   (dotimes [dj dm]
+                     (let [idx (+ (* di dm) dj)
+                           vh (double (aget w-embed (+ h-off di)))
+                           vt (double (aget w-embed (+ t-off di)))]
+                       (aset-float grad-w-mem idx (float (+ (double (aget grad-w-mem idx)) (* lambda-tl g-s (+ vh vt) 0.01)))))))))))))
 
       ;; 3. Parameter Update: P_new = P - eta * grad_P
-      (let [update-array (fn [^floats orig ^floats grad]
-                           (let [len (alength orig)
-                                 updated (float-array len)]
-                             (dotimes [i len]
-                               (aset-float updated i (float (- (double (aget orig i)) (* eta (double (aget grad i)))))))
-                             updated))
-            updated-embed (update-array (:W_embed params) grad-embed)
-            updated-w-mem (update-array (:W_mem params) grad-w-mem)
-            updated-r-mem (update-array (:R_mem params) grad-r-mem)]
-        (assoc params
-               :W_embed updated-embed
-               :W_mem updated-w-mem
-               :R_mem updated-r-mem)))))
+     (let [update-array (fn [^floats orig ^floats grad]
+                          (let [len (alength orig)
+                                updated (float-array len)]
+                            (dotimes [i len]
+                              (aset-float updated i (float (- (double (aget orig i)) (* eta (double (aget grad i)))))))
+                            updated))
+           updated-w-mem (update-array (:W_mem params) grad-w-mem)
+           updated-r-mem (update-array (:R_mem params) grad-r-mem)]
+       (assoc params
+              :W_embed updated-embed
+              :W_mem updated-w-mem
+              :R_mem updated-r-mem
+              :loss loss-res)))))
 
 (defn estimate-tl-nano-vram
   "Calculates theoretical VRAM footprint and parameter count for TL-Nano configurations."

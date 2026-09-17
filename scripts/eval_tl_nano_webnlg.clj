@@ -16,7 +16,8 @@
   {:backend :rocm
    :checkpoint-file ".dataset/webnlg/checkpoint_tl_nano.bin"
    :eval-file ".dataset/webnlg/dev.edn"
-   :max-eval 25
+   :train-file ".dataset/webnlg/train.edn"
+   :max-eval 40
    :model-dir ".models/gpt2"})
 
 (defn- normalize-args [args]
@@ -37,12 +38,13 @@
           "--backend" (recur (subvec remaining 2) (assoc opts :backend (keyword v)))
           "--checkpoint" (recur (subvec remaining 2) (assoc opts :checkpoint-file v))
           "--eval-file" (recur (subvec remaining 2) (assoc opts :eval-file v))
+          "--train-file" (recur (subvec remaining 2) (assoc opts :train-file v))
           "--max-eval" (recur (subvec remaining 2) (assoc opts :max-eval (Long/parseLong v)))
           (recur (subvec remaining 1) opts))))))
 
 (defn run-webnlg-evaluation
   [opts]
-  (let [{:keys [backend checkpoint-file eval-file max-eval model-dir]} opts
+  (let [{:keys [backend checkpoint-file eval-file train-file max-eval model-dir]} opts
         _ (println "\n================================================================================")
         _ (println "📊 TL-NANO WEBNLG EVALUATION BENCHMARK (Held-out Dev Set)")
         _ (println "================================================================================")
@@ -87,35 +89,48 @@
         t-comp (/ (- (System/nanoTime) t-c0) 1e6)
         _ (println (format "OpenXLA Eval Graph Compilation completed in %.2f ms." t-comp))
 
-        ;; 4. Extract Dev Cloze Prompts from Dev Triples
+        ;; 4. Extract Cloze Prompts and Relation Frequencies from Train
+        train-f (io/file train-file)
+        rel-counts (if (.exists train-f)
+                     (frequencies (map second (distinct (mapcat :triples (:entries (read-string (slurp train-f)))))))
+                     {})
         dev-triples (distinct (mapcat :triples dev-entries))
         cloze-candidates
         (vec
          (keep (fn [[h rel t]]
-                 (when (contains? r-maps rel)
-                   (let [t-toks (proto/encode tokenizer (str " " t) false)
-                         t-first (first t-toks)
-                         t-act (get bpe->active t-first)
-                         prompt-str (str "The " (name rel) " of " h " is")]
-                     (when t-act
-                       {:prompt prompt-str
-                        :head h
-                        :rel rel
-                        :target t
-                        :target-act t-act}))))
+                 (let [t-toks (proto/encode tokenizer (str " " t) false)
+                       t-first (first t-toks)
+                       t-act (get bpe->active t-first)
+                       prompt-str (str "The " (name rel) " of " h " is")
+                       cnt (get rel-counts rel 0)
+                       tier (cond
+                              (zero? cnt) :unseen
+                              (>= cnt 50) :head
+                              (>= cnt 10) :mid
+                              :else :tail)]
+                   (when t-act
+                     {:prompt prompt-str
+                      :head h
+                      :rel rel
+                      :target t
+                      :target-act t-act
+                      :train-count cnt
+                      :tier tier})))
                dev-triples))
 
         selected-evals (vec (take (long max-eval) (distinct cloze-candidates)))
         _ (println (format "Formulated %,d valid cloze test prompts (evaluating top %d):\n"
                            (count cloze-candidates) (count selected-evals)))
 
-        _ (println "Prompt (truncated)             | Target          | Zero Top-1     | Active Top-1   | Deductive? | Delta Logit")
-        _ (println "-------------------------------+-----------------+----------------+----------------+------------+------------")
+        _ (println "Prompt (truncated)             | Target          | Tier   | Zero Top-1     | Active Top-1   | Deductive? | Delta Logit")
+        _ (println "-------------------------------+-----------------+--------+----------------+----------------+------------+------------")
 
         eval-results
         (mapv (fn [ep]
                 (let [p-str (:prompt ep)
                       rel (:rel ep)
+                      tier (:tier ep)
+                      cnt (:train-count ep)
                       t-str (:target ep)
                       tgt-act (:target-act ep)
                       p-bpe (proto/encode tokenizer p-str false)
@@ -142,8 +157,8 @@
                       z-cand-act (:active (apply max-key (fn [c] (aget z-logits (+ row-off (:active c)))) candidate-targets))
                       z-cand-str (proto/decode tokenizer [(get active->bpe z-cand-act 0)])
 
-                      ;; Active Deductive Grounding (Active R_mem)
-                      rel-R (get r-maps rel)
+                      ;; Active Deductive Grounding (Active R_mem if trained, else zero)
+                      rel-R (get r-maps rel (float-array (* dm dm) (float 0.0)))
                       a-params (assoc params
                                       :R_mem rel-R
                                       :x p-arr
@@ -156,24 +171,67 @@
                       a-cand-str (proto/decode tokenizer [(get active->bpe a-cand-act 0)])
 
                       delta-l (- (double a-tgt-l) (double z-tgt-l))
-                      match? (= a-cand-act tgt-act)]
+                      match? (= a-cand-act tgt-act)
+                      tier-str (case tier
+                                 :head "HEAD"
+                                 :mid  "MID "
+                                 :tail "TAIL"
+                                 :unseen "UNSEEN")]
 
-                  (println (format "%-30s | %-15s | %-14s | %-14s | %-10s | %+.4f"
+                  (println (format "%-30s | %-15s | %-6s | %-14s | %-14s | %-10s | %+.4f"
                                    (if (> (count p-str) 30) (str (subs p-str 0 27) "...") p-str)
                                    (if (> (count t-str) 15) (subs t-str 0 15) t-str)
+                                   tier-str
                                    z-cand-str a-cand-str (if match? "YES ✅" "NO ❌") delta-l))
-                  {:prompt p-str :target t-str :match? match? :delta-logit delta-l}))
+                  {:prompt p-str :target t-str :match? match? :delta-logit delta-l :tier tier :count cnt}))
               selected-evals)
 
         correct-count (count (filter :match? eval-results))
         total-eval (count eval-results)
         acc-pct (* 100.0 (/ (double correct-count) total-eval))
-        avg-delta (/ (reduce + (map :delta-logit eval-results)) (double total-eval))]
+        avg-delta (/ (reduce + (map :delta-logit eval-results)) (double total-eval))
+
+        ;; 5. Stratified Breakdown Table
+        tier-summary
+        (fn [tier-kw]
+          (let [subset (filter #(= (:tier %) tier-kw) eval-results)
+                n (count subset)]
+            (if (pos? n)
+              {:n n
+               :matches (count (filter :match? subset))
+               :acc (* 100.0 (/ (double (count (filter :match? subset))) n))
+               :mean-delta (/ (reduce + (map :delta-logit subset)) (double n))}
+              {:n 0 :matches 0 :acc 0.0 :mean-delta 0.0})))
+
+        head-stats (tier-summary :head)
+        mid-stats (tier-summary :mid)
+        tail-stats (tier-summary :tail)
+        unseen-stats (tier-summary :unseen)
+        seen-evals (filter #(not= (:tier %) :unseen) eval-results)
+        seen-mean-delta (if (seq seen-evals) (/ (reduce + (map :delta-logit seen-evals)) (double (count seen-evals))) 0.0)
+        unseen-mean-delta (:mean-delta unseen-stats)
+        ablation-gap (- seen-mean-delta unseen-mean-delta)]
 
     (println "------------------------------------------------------------------------------------------------")
-    (println (format "Deductive Cloze QA Accuracy on Dev Set: %d / %d (%.1f%%)"
-                     correct-count total-eval acc-pct))
-    (println (format "Mean Target Logit Shift Across Dev:   %+.4f" avg-delta))
+    (println (format "Overall Cloze QA Accuracy: %d / %d (%.1f%%) | Mean Target Logit Shift: %+.4f"
+                     correct-count total-eval acc-pct avg-delta))
+
+    (println "\n================================================================================")
+    (println "📈 STRATIFIED ACCURACY & LOGIT BOOST BY TRAINING FREQUENCY TIER")
+    (println "================================================================================")
+    (println "Frequency Tier         | Train Count | Evaluated | Top-1 Match (%) | Mean Target Logit Shift")
+    (println "-----------------------+-------------+-----------+-----------------+------------------------")
+    (println (format "Head Tier (>= 50)      | >= 50       | %-9d | %5.1f%%          | %+.4f"
+                     (:n head-stats) (:acc head-stats) (:mean-delta head-stats)))
+    (println (format "Mid Tier (10 - 49)     | 10 - 49     | %-9d | %5.1f%%          | %+.4f"
+                     (:n mid-stats) (:acc mid-stats) (:mean-delta mid-stats)))
+    (println (format "Tail Tier (< 10)       | 1 - 9       | %-9d | %5.1f%%          | %+.4f"
+                     (:n tail-stats) (:acc tail-stats) (:mean-delta tail-stats)))
+    (println (format "Unseen (0 Core)        | 0 (Fallback)| %-9d | %5.1f%%          | %+.4f"
+                     (:n unseen-stats) (:acc unseen-stats) (:mean-delta unseen-stats)))
+    (println "-----------------------+-------------+-----------+-----------------+------------------------")
+    (println (format "NATURAL ABLATION GAP (Seen Active R_r vs Unseen Zero R_mem): %+.4f logits" ablation-gap))
+    (println "================================================================================")
 
     ;; 5. Published Benchmark Comparison Table
     (println "\n================================================================================")

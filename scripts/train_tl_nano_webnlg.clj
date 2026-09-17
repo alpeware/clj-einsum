@@ -200,9 +200,10 @@
               :lambda-mem lambda-mem
               :threshold threshold})
 
-        _ (println "\nCompiling OpenXLA PJRT Training Executable...")
+        _ (println "\nCompiling OpenXLA PJRT Training Executables...")
         t-c0 (System/nanoTime)
         fwd-train-exec (nano/compile-tl-nano-forward ctx batch-size seq-len cfg)
+        embed-update-exec (nano/compile-embedding-update ctx batch-size seq-len cfg)
         t-comp (/ (- (System/nanoTime) t-c0) 1e6)
         _ (println (format "OpenXLA Graph Compilation completed in %.2f ms." t-comp))
 
@@ -241,9 +242,12 @@
         trace-acc (atom [])
         total-toks-per-epoch (* (long (count batches)) (long batch-size) (long seq-len))
 
+        _ (println "Pinning static layer weights into PJRT device VRAM...")
+        pinned-base (nano/pin-params-in-vram ctx (sync-e-cand base-params) cfg)
+
         final-params
         (loop [epoch 1
-               curr-params (sync-e-cand base-params)]
+               curr-params pinned-base]
           (if (> epoch epochs)
             curr-params
             (let [t-ep0 (System/nanoTime)
@@ -259,8 +263,8 @@
                            curr-R (get @r-maps rel)
                            p-with-r (assoc p-acc :R_mem curr-R)
                            batch-with-tr (assoc b :triples rel-triples)
-                           loss-info (nano/compute-joint-loss fwd-train-exec p-with-r batch-with-tr cfg)
-                           next-p (nano/train-step fwd-train-exec p-with-r batch-with-tr cfg lr)]
+                           next-p (nano/train-step fwd-train-exec p-with-r batch-with-tr cfg lr embed-update-exec)
+                           loss-info (:loss next-p)]
                        (when (:R_mem next-p)
                          (swap! r-maps assoc rel (:R_mem next-p)))
                        (swap! ep-tot + (:total-loss loss-info))
@@ -317,7 +321,8 @@
                    :entities candidate-targets
                    :relations relations
                    :r-maps @r-maps
-                   :params final-params}
+                   :params (merge base-params (select-keys final-params [:W_embed :W_mem :R_mem :E_cand]))}
+        _ (nano/free-pinned-params! final-params)
         bytes-written (ckpt/save-checkpoint checkpoint-file ckpt-data)]
 
     (println (format "✅ Checkpoint successfully written: %,d bytes (%.2f MB)"

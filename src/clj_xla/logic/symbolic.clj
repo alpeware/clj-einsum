@@ -302,14 +302,20 @@
   (let [ctx (or (:ctx executable) (xla/get-context))
         invars (or (get-in executable [:graph :invars]) [])
         outvars (or (get-in executable [:graph :outvars]) [])
-        input-buffers (mapv (fn [[invar-name [_kw shape dtype]]]
-                              (let [data (get inputs invar-name)
-                                    _ (when-not data
-                                        (throw (ex-info "Missing input data for invar"
-                                                        {:invar invar-name :available (keys inputs)})))
-                                    dtype-enum (case dtype :f32 11 :bf16 13 :i32 4 :i8 2 11)]
-                                (pjrt/buffer-from-host-buffer ctx (:client ctx) data shape dtype-enum)))
-                            invars)]
+        ephemeral-buffers (atom [])
+        input-buffers
+        (mapv (fn [[invar-name [_kw shape dtype]]]
+                (let [data (get inputs invar-name)
+                      _ (when-not data
+                          (throw (ex-info "Missing input data for invar"
+                                          {:invar invar-name :available (keys inputs)})))]
+                  (if (instance? java.lang.foreign.MemorySegment data)
+                    data
+                    (let [dtype-enum (case dtype :f32 11 :bf16 13 :i32 4 :i8 2 11)
+                          buf (pjrt/buffer-from-host-buffer ctx (:client ctx) data shape dtype-enum)]
+                      (swap! ephemeral-buffers conj buf)
+                      buf))))
+              invars)]
     (try
       (let [num-outs (count outvars)
             raw-out (pjrt/execute-executable ctx (or (:handle executable) executable) input-buffers num-outs)
@@ -329,8 +335,8 @@
           (try (xla/destroy-buffer! b) (catch Exception _ nil)))
         results)
       (finally
-        ;; Destroy device input buffers
-        (doseq [b input-buffers]
+        ;; Destroy only ephemeral device input buffers
+        (doseq [b @ephemeral-buffers]
           (try (xla/destroy-buffer! b) (catch Exception _ nil)))))))
 
 ;; ==============================================================================
