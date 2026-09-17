@@ -2480,3 +2480,119 @@ Experiment E21 completes the first construction milestone of the tensor-logic ag
    When observations underdetermine reality (e.g. partial tool traces or ambiguous code definitions), the KB does not hallucinate a resolution. It commits the disjunction and reports `:ambiguous` to the deliberation tier, prompting active information gathering rather than unjustified action.
 3. **Foundation for In-Graph VRAM Dispatch**:
    With host-side commit verification established at sub-microsecond query latencies ($0.58\text{ }\mu\text{s}$), the interface is prepared for compiling materialized relation matrices into PJRT tensors for device-resident in-graph query dispatch.
+
+---
+
+### 23. Experiment E22 — In-Graph KB Query Dispatch with Gemma 4 E2B
+
+**Status:** COMPLETE (Evaluated on AMD Radeon RX 7900 XTX via OpenXLA PJRT ROCm)  
+**Date:** 2026-09-17  
+**Artifacts:**
+- Core Library: [`src/clj_xla/logic/kb_device.clj`](../../src/clj_xla/logic/kb_device.clj)
+- Generative Test Suite: [`test/clj_xla/logic/kb_device_test.clj`](../../test/clj_xla/logic/kb_device_test.clj)
+- Execution Script: [`scripts/e22_kb_dispatch.clj`](../../scripts/e22_kb_dispatch.clj)
+- Telemetry & Results: [`paper-experiments/e22-dispatch/2026-09-17/`](../../paper-experiments/e22-dispatch/2026-09-17/) (`phase0.edn`, `results.edn`)
+
+---
+
+#### 1. Thesis & Theoretical Context
+
+Experiment E21 built the verified write path for long-term memory. Experiment E22 builds the operational **read path** required by autonomous agents (`AGENT-LOOP.md` §9):
+1. The LLM emits a Knowledge Base query as native tokens.
+2. The query is recognized in-graph by token-ID compare (`<|tool_call>` / `<tool_call|>`) without JSON or string parsing.
+3. The query executes directly against VRAM-resident relation tensors (`[3 N N]`) via a compiled OpenXLA dynamic-slice row gather, remaining entirely on the accelerator.
+4. The retrieved entity activations are mapped into digit tokens via the device-resident verbalization bridge and injected back into the autoregressive KV-cache decode stream (`<|tool_response> ... <tool_response|>`).
+5. The model verbalizes the certified answer without host round-trip re-prefill.
+
+Under Stage A semantics (`AGENT-LOOP.md` §9), the host pumps the autoregressive step executable, while query recognition, tensor slicing, and answer injection execute entirely on device. To rigorously test the causal necessity of the tool, the model is evaluated on synthetic family tree entities ($N = 64$ across 8 trees) that it has never encountered during pre-training: without calling the in-graph KB, the model must hallucinate.
+
+---
+
+#### 2. Phase 0 Verification Gates (Gates P0a, P0b, P0c)
+
+Before conducting the comparative sweep, all three pre-registered Phase 0 gates were audited and passed:
+
+1. **Gate P0a — Tokenizer Single-Token Check:**
+   - Evaluated candidate delimiters and relations under the Gemma 4 SentencePiece/BPE vocabulary.
+   - Arbitrary text tags `<kbq>` and `</kbq>` split into 4 tokens each (`[236820 41597 236809 236813]` and `[954 41597 236809 236813]`). Per spec (§5, P0a), single-token alternates were selected: Gemma 4's native special tokens `<|tool_call>` (id `48`), `<tool_call|>` (id `49`), `<|tool_response>` (id `50`), and `<tool_response|>` (id `51`), which are verified single tokens.
+   - Relations `" ancestors"` (`41903`), `" siblings"` (`36791`), and `" parent"` (`3724`) are verified single tokens.
+   - Digits `0` through `9` (`236771`, `236770`, `236778`, `236800`, `236812`, `236810`, `236825`, `236832`, `236828`, `236819`) are verified single tokens.
+   - **Gate P0a Status: PASS**.
+
+2. **Gate P0b — Query Parity (64 entities $\times$ 3 relations = 192 assertions):**
+   - For all 64 nodes in the E21 family forest across `:parent`, `:sibling`, and transitive closure `:ancestor`, the OpenXLA dynamic-slice row gather on the device-pinned `[3 64 64]` tensor was compared against the host Datalog reference.
+   - Result: Exactly **$192 / 192$ matches ($100.0\%$ exact parity, 0 mismatches)**.
+   - **Gate P0b Status: PASS**.
+
+3. **Gate P0c — Emission Smoke Test (5 dry-run prompts at T=0):**
+   - Evaluated 5 diverse dry-run prompts against Gemma 4 E2B IT with few-shot demonstration.
+   - Result: Exactly **$5 / 5$ prompts ($100.0\%$)** emitted well-formed `<|tool_call> RELATION ARG<tool_call|>`, well exceeding the $\ge 3/5$ pre-registered threshold.
+   - **Gate P0c Status: PASS**.
+
+Telemetry logged in [`paper-experiments/e22-dispatch/2026-09-17/phase0.edn`](../../paper-experiments/e22-dispatch/2026-09-17/phase0.edn).
+
+---
+
+#### 3. Phase 1 Evaluation Sweep (48 Questions across Cells H, B0, B1)
+
+A systematic evaluation suite of 48 distinct questions was constructed spanning all entities $0$ to $7$ (Tree 0) $\times$ relations {`ancestor`, `sibling`} $\times$ 3 distinct phrasings (*"Who are the..."*, *"List all..."*, *"Find the..."*).
+
+The evaluation compared three architectural conditions:
+- **Cell H (In-Graph Dispatch):** Full hardware-accelerated pipeline — few-shot prompt $\to$ decode $\to$ interrupt on token 49 $\to$ OpenXLA PJRT dynamic slice on resident VRAM relation tensor $\to$ `<|tool_response>` injected directly into KV-cache $\to$ verbalization.
+- **Cell B0 (No-Tool Baseline):** Identical task prompt minus tool instructions and worked examples; the model must answer directly from weights and context.
+- **Cell B1 (Host-Side Lookup Baseline):** Same prompt as Cell H, but queries are routed host-side to `clj-xla.logic.kb` before returning tokens to the decode loop, isolating latency and architectural overhead.
+
+```
+========================================================================================
+📊 EXPERIMENT E22: IN-GRAPH KB QUERY DISPATCH COMPARATIVE BENCHMARK (48 QUESTIONS)
+========================================================================================
+Metric                               Cell H (In-Graph)   Cell B0 (No-Tool)   Cell B1 (Host-Side)
+----------------------------------------------------------------------------------------
+Protocol Emission Rate                     100.0% (48/48)         N/A              100.0% (48/48)
+End-to-End Exact-Match Accuracy            100.0% (48/48)       29.2% (14/48)      100.0% (48/48)
+Exact-Match on Well-Formed Queries         100.0% (48/48)         N/A              100.0% (48/48)
+Causal Accuracy Gap (H - B0)               +70.8%                 —                  —
+Average Query Execution Latency             691.94 µs             —                  42.20 µs
+Average Total Question Turn Latency         582.40 ms          480.12 ms           584.10 ms
+Failure Modes (Emiss / Malf / Misread)          0                   34                  0
+========================================================================================
+```
+
+---
+
+#### 4. Audit of Pre-Registered Acceptance Criteria
+
+| Criterion | Requirement | Empirical Result | Status |
+|:---|:---|:---|:---:|
+| **1. Gate P0b Parity** | 100% exact parity across all 64 entities $\times$ 3 relations | 192 / 192 exact matches ($100.0\%$) | **PASS** |
+| **2. Protocol Emission** | Cell H protocol emission rate $\ge 80.0\%$ | **$100.0\%$** (48 / 48 emitted) | **PASS** |
+| **3. Exact-Match Accuracy** | Cell H accuracy $\ge 90.0\%$ on well-formed queries; Causal gap $H - B0 \ge +50.0\%$ | H Accuracy = **$100.0\%$** (48/48)<br/>B0 Accuracy = $29.2\%$ (14/48)<br/>Causal Gap = **$+70.8\%$** | **PASS** |
+| **4. Query Latency** | Per-query execution latency reported; H vs B1 compared | Device gather = **$691.94\text{ }\mu\text{s}$**<br/>Host lookup = $42.20\text{ }\mu\text{s}$<br/>Decode loop dominates ($>99.8\%$ of turn) | **PASS** |
+
+---
+
+#### 5. Behavioral Analysis & Failure Modes
+
+1. **Cell B0 Failure Pattern (The Causal Proof):**
+   - For every question where the true relation is non-empty (e.g., person 0 has ancestors `[2 3 4 6]`, person 5 has siblings `[0 7]`), Cell B0 scored **$0.0\%$ accuracy**. It either hallucinated incorrect family relations or issued conversational disclaimers (*"Please provide the person you are referring to... "*).
+   - Cell B0 only scored on root nodes that truly had no ancestors or siblings (`#{}`), where generic default assertions happened to match the empty set ($14 / 48 = 29.2\%$).
+   - This empirically confirms that no entity relations leaked into the base model's pre-training or prompt context, validating the $+70.8\%$ causal gap.
+
+2. **Cell H Zero-Failure Invariant:**
+   - In 48 out of 48 questions across three phrasing styles, the model emitted the exact target tool call on its first attempt (`<|tool_call> RELATION ARG<tool_call|>`).
+   - The device gather dynamically sliced the resident VRAM table in under $1\text{ ms}$ ($691.94\text{ }\mu\text{s}$ mean), injected the answer tokens, and the model verbalized the exact answer set in natural English without a single dropped entity or hallucination.
+
+3. **Latency Comparison (H vs B1):**
+   - The host hash-set lookup ($42.20\text{ }\mu\text{s}$) is faster in raw CPU cycles than a discrete PJRT runtime dispatch ($691.94\text{ }\mu\text{s}$) for tiny tables ($64 \times 64$).
+   - However, both query pathways are sub-millisecond and account for less than **$0.15\%$** of end-to-end turn latency, which is entirely dominated by autoregressive token generation ($\sim 580\text{ ms}$).
+   - The true triumph of Cell H is **architectural**: memory access is unified on the accelerator. The host does not branch, does not parse JSON or code strings, and does not evaluate ASTs. It pumps an uninterrupted token stream where symbolic memory is queried and returned in-graph.
+
+---
+
+#### 6. Architectural Significance for AGENT-LOOP
+
+Experiment E22 establishes the complete Tier 1 + Tier 2 operational cycle:
+- **E21** proved the **verified write path**: discrete relational assertions are verified by type-checkers and acyclicity solvers before updating the store.
+- **E22** proves the **in-graph read path**: the generative agent calls the discrete store as native tokens, queries VRAM-resident relation matrices with zero host parsing, and incorporates ground truth directly into its KV-cache.
+- This provides the empirical foundation for **Stage B** (full in-graph `while` loop with chained execution), unlocking hallucination-free autonomous agent loops executing at hardware-native speed.
+

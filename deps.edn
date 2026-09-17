@@ -30,6 +30,9 @@
   :gemma4-relational
   {:main-opts ["-m" "scripts.eval-gemma4-webnlg-relational"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx16g"]}
+  :e22
+  {:main-opts ["-m" "scripts.e22-kb-dispatch"]
+   :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :benchmark
   {:main-opts ["-m" "scripts.benchmark"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx8g"]}

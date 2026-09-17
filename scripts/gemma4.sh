@@ -24,12 +24,17 @@ elif [ "$1" = "agent" ] || [ "$1" = "--agent" ]; then
 elif [ "$1" = "relational" ] || [ "$1" = "--relational" ]; then
   MODE="relational"
   shift
+elif [ "$1" = "e22" ] || [ "$1" = "--e22" ]; then
+  MODE="e22"
+  shift
 fi
 
 if [ "$MODE" = "agent" ]; then
   exec clojure -M:gemma4-agent "$@"
 elif [ "$MODE" = "relational" ]; then
   exec clojure -M:gemma4-relational "$@"
+elif [ "$MODE" = "e22" ]; then
+  exec clojure -M:e22 "$@"
 else
   exec clojure -M:gemma4 "$@"
 fi
