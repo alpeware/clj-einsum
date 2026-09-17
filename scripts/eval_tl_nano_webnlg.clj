@@ -38,6 +38,7 @@
           "--backend" (recur (subvec remaining 2) (assoc opts :backend (keyword v)))
           "--checkpoint" (recur (subvec remaining 2) (assoc opts :checkpoint-file v))
           "--eval-file" (recur (subvec remaining 2) (assoc opts :eval-file v))
+          "--test-file" (recur (subvec remaining 2) (assoc opts :eval-file v))
           "--train-file" (recur (subvec remaining 2) (assoc opts :train-file v))
           "--max-eval" (recur (subvec remaining 2) (assoc opts :max-eval (Long/parseLong v)))
           (recur (subvec remaining 1) opts))))))
