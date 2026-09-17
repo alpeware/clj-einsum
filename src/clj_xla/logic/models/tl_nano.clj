@@ -441,7 +441,7 @@
         valid-pos (double (* b (dec l)))
 
         ;; 1. Language Model Head Gradients: dL/d(logits) = (probs - target) / N
-        grad-embed (float-array (* v d))]
+        ^floats grad-embed (float-array (* v d))]
 
     (dotimes [bi b]
       (dotimes [pos (dec l)]
@@ -450,18 +450,21 @@
               h-off (+ (* bi l d) (* pos d))]
           (dotimes [vi v]
             (let [p (double (aget probs (+ row-idx vi)))
-                  target-val (if (= vi target-tok) 1.0 0.0)
-                  g-logit (/ (- p target-val) valid-pos)]
-              ;; dW_embed[v, d] += g_logit * H_final[d]
-              (dotimes [di d]
-                (let [h-val (double (aget h-final (+ h-off di)))
-                      idx (+ (* vi d) di)]
-                  (aset-float grad-embed idx
-                              (float (+ (double (aget grad-embed idx)) (* g-logit h-val)))))))))))
+                  is-target? (= vi target-tok)]
+              (when (or is-target? (> p 1e-4))
+                (let [target-val (if is-target? 1.0 0.0)
+                      g-logit (/ (- p target-val) valid-pos)
+                      v-off (* vi d)]
+                  ;; dW_embed[v, d] += g_logit * H_final[d]
+                  (dotimes [di d]
+                    (let [h-val (double (aget h-final (+ h-off di)))
+                          idx (+ v-off di)]
+                      (aset-float grad-embed idx
+                                  (float (+ (double (aget grad-embed idx)) (* g-logit h-val)))))))))))))
 
     ;; 2. Relational Contrastive Subspace Gradients (if triples present)
-    (let [grad-w-mem (float-array (* d dm))
-          grad-r-mem (float-array (* dm dm))]
+    (let [^floats grad-w-mem (float-array (* d dm))
+          ^floats grad-r-mem (float-array (* dm dm))]
       (when (and (seq triples) (:W_mem params) (:R_mem params))
         (let [k-cnt (count triples)
               ^floats w-mem (:W_mem params)
