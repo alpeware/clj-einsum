@@ -21,10 +21,15 @@ if [ "$SCRIPT_NAME" = "gemma4_agent.sh" ] || [ "$SCRIPT_NAME" = "gemma4-agent.sh
 elif [ "$1" = "agent" ] || [ "$1" = "--agent" ]; then
   MODE="agent"
   shift
+elif [ "$1" = "relational" ] || [ "$1" = "--relational" ]; then
+  MODE="relational"
+  shift
 fi
 
 if [ "$MODE" = "agent" ]; then
   exec clojure -M:gemma4-agent "$@"
+elif [ "$MODE" = "relational" ]; then
+  exec clojure -M:gemma4-relational "$@"
 else
   exec clojure -M:gemma4 "$@"
 fi

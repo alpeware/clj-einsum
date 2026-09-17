@@ -234,13 +234,14 @@
          din (long dim-in)
          k (long k-triples)
          dm (long dim-mem)
-         invars [[:W_embed [:tensor [v din] :f32]]
+         dt (or (:dtype opts) :f32)
+         invars [[:W_embed [:tensor [v din] dt]]
                  [:I_h [:tensor [k] :i32]]
                  [:I_t [:tensor [k] :i32]]
-                 [:W [:tensor [din dm] :f32]]
-                 [:R [:tensor [dm dm] :f32]]
-                 [:Target [:tensor [k k] :f32]]
-                 [:Mask_Scale [:tensor [k k] :f32]]]
+                 [:W [:tensor [din dm] dt]]
+                 [:R [:tensor [dm dm] dt]]
+                 [:Target [:tensor [k k] dt]]
+                 [:Mask_Scale [:tensor [k k] dt]]]
          ast (in-vram-contrastive-step-ast k din dm opts)
          targets [:W_new :R_new :P :Scores]]
      (sym/compile-query ctx "in_vram_contrastive_step" invars ast targets))))

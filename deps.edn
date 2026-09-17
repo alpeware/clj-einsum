@@ -27,6 +27,9 @@
   :gemma4-agent
   {:main-opts ["-m" "scripts.gemma4-agent"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
+  :gemma4-relational
+  {:main-opts ["-m" "scripts.eval-gemma4-webnlg-relational"]
+   :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx16g"]}
   :benchmark
   {:main-opts ["-m" "scripts.benchmark"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx8g"]}

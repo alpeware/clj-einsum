@@ -907,3 +907,40 @@
     (let [ctx (xla/get-context)
           compiled (xla/compile-graph ctx graph)]
       (is (some? compiled)))))
+
+(defspec prop-gemma4-unbinding-ast-validity 20
+  (prop/for-all [dim (gen/elements [256 512 1536])
+                 dm (gen/elements [64 128 256])
+                 vocab-size (gen/elements [1000 5000 10000])]
+                (let [ast (gemma/gemma4-unbinding-ast dim dm vocab-size 1.0)
+                      expanded (expand/expand-ast {} ast)]
+                  (and (vector? ast)
+                       (seq expanded)
+                       (every? ast/valid-node? expanded)))))
+
+(defspec prop-gemma4-entity-unbinding-ast-validity 20
+  (prop/for-all [dim (gen/elements [256 512 1536])
+                 dm (gen/elements [64 128 256])
+                 vocab-size (gen/elements [1000 5000 10000])]
+                (let [ast (gemma/gemma4-entity-unbinding-ast dim dm vocab-size 1.0)
+                      expanded (expand/expand-ast {} ast)]
+                  (and (vector? ast)
+                       (seq expanded)
+                       (every? ast/valid-node? expanded)))))
+
+(deftest test-gemma4-unbinding-ast-compilation
+  (let [dim 1536
+        dm 128
+        vocab-size 2000
+        invars [[:h [:tensor [1 1 dim] :f32]]
+                [:logits_base [:tensor [1 1 vocab-size] :f32]]
+                [:W_mem [:tensor [dim dm] :f32]]
+                [:R [:tensor [dm dm] :f32]]
+                [:W_embed [:tensor [vocab-size dim] :f32]]]
+        ast (gemma/gemma4-unbinding-ast dim dm vocab-size 1.0)
+        graph (lower/ast->graph "gemma_unbinding_test" invars ast [:logits_grounded :delta_logits])]
+    (is (shlo/validate-graph graph))
+    (is (= [:logits_grounded :delta_logits] (:outvars graph)))
+    (let [ctx (xla/get-context)
+          compiled (xla/compile-graph ctx graph)]
+      (is (some? compiled)))))

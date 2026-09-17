@@ -518,6 +518,50 @@
       [:threshold_const [:tensor [1 1 entity-count] dtype]]
       [:w_entity_to_vocab [:tensor [entity-count vocab-size] dtype]]])))
 
+(defn gemma4-unbinding-ast
+  "Constructs Tensor Logic AST for linear relational memory unbinding and vocabulary projection:
+   u_q = h * W_mem               [B, 1, dim] x [dim, dm] -> [B, 1, dm]
+   u_target = u_q * R            [B, 1, dm] x [dm, dm] -> [B, 1, dm]
+   u_norm = rms_norm(u_target)   [B, 1, dm] -> [B, 1, dm]
+   v_bias = u_norm * W_mem^T     [B, 1, dm] x [dim, dm]^T -> [B, 1, dim]
+   delta_logits = v_bias * W_embed^T  [B, 1, dim] x [v, dim]^T -> [B, 1, v]
+   logits_grounded = logits_base + lambda * delta_logits"
+  ([_dim _dm _vocab-size]
+   (gemma4-unbinding-ast _dim _dm _vocab-size 1.0))
+  ([_dim _dm _vocab-size lambda-mem]
+   (let [scale-factor (double (or lambda-mem 1.0))]
+     [:block {:name :gemma_unbinding_logits}
+      [:= [:u_q :b :one :dm] [:h :b :one :din] [:W_mem :din :dm]]
+      [:= [:u_target :b :one :dm2] [:u_q :b :one :dm1] [:R :dm1 :dm2]]
+      [:rms-norm [:u_norm :b :one :dm2] [:u_target :b :one :dm2]]
+      [:= [:v_bias :b :one :din] [:u_norm :b :one :dm] [:W_mem :din :dm]]
+      [:= [:delta_logits :b :one :v] [:v_bias :b :one :din] [:W_embed :v :din]]
+      [:= [:scaled_delta :b :one :v] {:scale scale-factor} [:delta_logits :b :one :v]]
+      [:+ [:logits_grounded :b :one :v] [:logits_base :b :one :v] [:scaled_delta :b :one :v]]])))
+
+(defn gemma4-entity-unbinding-ast
+  "Constructs Tensor Logic AST for direct subject entity unbinding:
+   v_h = gather(W_embed, i_h)    [1] x [v, dim] -> [1, dim]
+   u_q = v_h * W_mem             [1, 1, dim] x [dim, dm] -> [1, 1, dm]
+   u_target = u_q * R            [1, 1, dm] x [dm, dm] -> [1, 1, dm]
+   u_norm = rms_norm(u_target)   [1, 1, dm] -> [1, 1, dm]
+   v_bias = u_norm * W_mem^T     [1, 1, dm] x [dim, dm]^T -> [1, 1, dim]
+   delta_logits = v_bias * W_embed^T  [1, 1, dim] x [v, dim]^T -> [1, 1, v]
+   logits_grounded = logits_base + lambda * delta_logits"
+  ([_dim _dm _vocab-size]
+   (gemma4-entity-unbinding-ast _dim _dm _vocab-size 1.0))
+  ([_dim _dm _vocab-size lambda-mem]
+   (let [scale-factor (double (or lambda-mem 1.0))]
+     [:block {:name :gemma_entity_unbinding_logits}
+      [:gather [:v_h :b :one :din] [:W_embed :v :din] [:i_h :b :one]]
+      [:= [:u_q :b :one :dm] [:v_h :b :one :din] [:W_mem :din :dm]]
+      [:= [:u_target :b :one :dm2] [:u_q :b :one :dm1] [:R :dm1 :dm2]]
+      [:rms-norm [:u_norm :b :one :dm2] [:u_target :b :one :dm2]]
+      [:= [:v_bias :b :one :din] [:u_norm :b :one :dm] [:W_mem :din :dm]]
+      [:= [:delta_logits :b :one :v] [:v_bias :b :one :din] [:W_embed :v :din]]
+      [:= [:scaled_delta :b :one :v] {:scale scale-factor} [:delta_logits :b :one :v]]
+      [:+ [:logits_grounded :b :one :v] [:logits_base :b :one :v] [:scaled_delta :b :one :v]]])))
+
 (defn gemma4-prefill-outvars
   "Constructs output variable list for Gemma 4 prefill: [:logits (k_ro_sl_i | k_ro_i) (v_heads_sl_i | v_heads_i) ...]."
   ([config] (gemma4-prefill-outvars config (:max-seq-len config)))
