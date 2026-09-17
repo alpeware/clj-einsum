@@ -107,6 +107,65 @@
       [:= [:scaled_dR :dm1 :dm2] {:scale step-scale} [:dR :dm1 :dm2]]
       [:- [:R_new :dm1 :dm2] [:R :dm1 :dm2] [:scaled_dR :dm1 :dm2]]])))
 
+(defn in-vram-resolver-step-ast
+  "Constructs Tensor Logic AST for an end-to-end, zero-host-transfer training step for
+   the Stage 2 Non-Linear Resolver (W_Q and W_K).
+   Performs 100% in OpenXLA PJRT VRAM:
+   1. Gathers entity embeddings from W_embed:
+      V_h = gather(W_embed, I_h), V_t = gather(W_embed, I_t)
+   2. Relational type modulation from Stage 1:
+      U_h = V_h * W_mem, U_hr = U_h * R, U_norm = rms_norm(U_hr)
+   3. Non-linear query and key projections:
+      Q_raw = V_h * W_Q
+      Q_mod = Q_raw * U_norm
+      Q_rel = rms_norm(Q_mod)
+      K_raw = V_t * W_K
+      K_cand = rms_norm(K_raw)
+   4. Scores & in-graph Softmax:
+      Scores = (Q_rel * K_cand^T) / tau
+      P = softmax(Scores)
+   5. Analytical InfoNCE adjoint matrix:
+      D_P = P - Target
+      G_S = D_P * Mask_Scale
+   6. Backward adjoint gradient contractions:
+      adj_K = G_S^T * Q_rel
+      adj_Q = G_S * K_cand
+      adj_Q_raw = adj_Q * U_norm
+      dW_K = V_t^T * adj_K
+      dW_Q = V_h^T * adj_Q_raw
+   7. In-graph SGD parameter updates:
+      W_Q_new = W_Q - (lr * lambda_tl) * dW_Q
+      W_K_new = W_K - (lr * lambda_tl) * dW_K"
+  ([_k-triples _dim-in _dim-mem opts]
+   (let [tau (double (or (:tau opts) 0.1))
+         lr (double (or (:lr opts) 0.05))
+         lambda-tl (double (or (:lambda-tl opts) 1.0))
+         step-scale (* lr lambda-tl)]
+     [:block {:name :in_vram_resolver_step}
+      [:gather [:V_h :k :din] [:W_embed :v :din] [:I_h :k]]
+      [:gather [:V_t :k :din] [:W_embed :v :din] [:I_t :k]]
+      [:= [:U_h :k :dm] [:V_h :k :din] [:W_mem :din :dm]]
+      [:= [:U_hr :k :dm2] [:U_h :k :dm1] [:R :dm1 :dm2]]
+      [:rms-norm [:U_norm :k :dm2] [:U_hr :k :dm2]]
+      [:= [:Q_raw :k :dm] [:V_h :k :din] [:W_Q :din :dm]]
+      [:* [:Q_mod :k :dm] [:Q_raw :k :dm] [:U_norm :k :dm]]
+      [:rms-norm [:Q_rel :k :dm] [:Q_mod :k :dm]]
+      [:= [:K_raw :k :dm] [:V_t :k :din] [:W_K :din :dm]]
+      [:rms-norm [:K_cand :k :dm] [:K_raw :k :dm]]
+      [:= [:Scores :k1 :k2] {:scale (/ 1.0 tau)} [:Q_rel :k1 :dm] [:K_cand :k2 :dm]]
+      [:softmax [:P :k1 :k2] [:Scores :k1 :k2]]
+      [:- [:D_P :k1 :k2] [:P :k1 :k2] [:Target :k1 :k2]]
+      [:* [:G_S :k1 :k2] [:D_P :k1 :k2] [:Mask_Scale :k1 :k2]]
+      [:= [:adj_K :k2 :dm] [:G_S :k1 :k2] [:Q_rel :k1 :dm]]
+      [:= [:adj_Q :k1 :dm] [:G_S :k1 :k2] [:K_cand :k2 :dm]]
+      [:* [:adj_Q_raw :k :dm] [:adj_Q :k :dm] [:U_norm :k :dm]]
+      [:= [:dW_K :din :dm] [:V_t :k :din] [:adj_K :k :dm]]
+      [:= [:dW_Q :din :dm] [:V_h :k :din] [:adj_Q_raw :k :dm]]
+      [:= [:scaled_dW_Q :din :dm] {:scale step-scale} [:dW_Q :din :dm]]
+      [:- [:W_Q_new :din :dm] [:W_Q :din :dm] [:scaled_dW_Q :din :dm]]
+      [:= [:scaled_dW_K :din :dm] {:scale step-scale} [:dW_K :din :dm]]
+      [:- [:W_K_new :din :dm] [:W_K :din :dm] [:scaled_dW_K :din :dm]]])))
+
 ;; ==============================================================================
 ;; 2. InfoNCE Loss & Gradient Utilities
 ;; ==============================================================================
@@ -245,6 +304,27 @@
          ast (in-vram-contrastive-step-ast k din dm opts)
          targets [:W_new :R_new :P :Scores]]
      (sym/compile-query ctx "in_vram_contrastive_step" invars ast targets))))
+
+(defn compile-in-vram-resolver-step
+  "Compiles OpenXLA PJRT executable for Stage 2 Non-Linear Resolver training step."
+  ([ctx vocab-size dim-in k-triples dim-mem opts]
+   (let [v (long vocab-size)
+         din (long dim-in)
+         k (long k-triples)
+         dm (long dim-mem)
+         dt (or (:dtype opts) :f32)
+         invars [[:W_embed [:tensor [v din] dt]]
+                 [:I_h [:tensor [k] :i32]]
+                 [:I_t [:tensor [k] :i32]]
+                 [:W_mem [:tensor [din dm] dt]]
+                 [:R [:tensor [dm dm] dt]]
+                 [:W_Q [:tensor [din dm] dt]]
+                 [:W_K [:tensor [din dm] dt]]
+                 [:Target [:tensor [k k] dt]]
+                 [:Mask_Scale [:tensor [k k] dt]]]
+         ast (in-vram-resolver-step-ast k din dm opts)
+         targets [:W_Q_new :W_K_new :P :Scores]]
+     (sym/compile-query ctx "in_vram_resolver_step" invars ast targets))))
 
 ;; ==============================================================================
 ;; 4. Impure Execution Wrappers (PJRT Dispatch)

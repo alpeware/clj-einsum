@@ -6,6 +6,7 @@
             [clj-xla.logic.expand :as expand]
             [clj-xla.logic.lower :as lower]
             [clj-xla.logic.models.gemma :as gemma]
+            [clj-xla.logic.memory.contrastive :as contrastive]
             [clj-xla.stablehlo :as shlo]
             [clojure.test :refer [deftest is]]
             [clojure.test.check.clojure-test :refer [defspec]]
@@ -944,3 +945,74 @@
     (let [ctx (xla/get-context)
           compiled (xla/compile-graph ctx graph)]
       (is (some? compiled)))))
+
+(defspec prop-gemma4-two-stage-resolver-ast-validity 20
+  (prop/for-all [dim (gen/elements [256 512 1536])
+                 dm (gen/elements [64 128 256])
+                 vocab-size (gen/elements [1000 5000 10000])
+                 k (gen/elements [8 16 32])]
+                (let [ast (gemma/gemma4-two-stage-resolver-ast dim dm vocab-size k)
+                      expanded (expand/expand-ast {} ast)]
+                  (and (vector? ast)
+                       (seq expanded)
+                       (every? ast/valid-node? expanded)))))
+
+(defspec prop-gemma4-two-stage-entity-resolver-ast-validity 20
+  (prop/for-all [dim (gen/elements [256 512 1536])
+                 dm (gen/elements [64 128 256])
+                 vocab-size (gen/elements [1000 5000 10000])
+                 k (gen/elements [8 16 32])]
+                (let [ast (gemma/gemma4-two-stage-entity-resolver-ast dim dm vocab-size k)
+                      expanded (expand/expand-ast {} ast)]
+                  (and (vector? ast)
+                       (seq expanded)
+                       (every? ast/valid-node? expanded)))))
+
+(deftest test-gemma4-two-stage-resolver-ast-compilation
+  (let [dim 1536
+        dm 128
+        vocab-size 2000
+        k 16
+        invars [[:h [:tensor [1 1 dim] :f32]]
+                [:u_norm [:tensor [1 1 dm] :f32]]
+                [:cand_ids [:tensor [k] :i32]]
+                [:W_embed [:tensor [vocab-size dim] :f32]]
+                [:W_Q [:tensor [dim dm] :f32]]
+                [:W_K [:tensor [dim dm] :f32]]]
+        ast (gemma/gemma4-two-stage-resolver-ast dim dm vocab-size k)
+        graph (lower/ast->graph "gemma_resolver_test" invars ast [:scores])]
+    (is (shlo/validate-graph graph))
+    (is (= [:scores] (:outvars graph)))
+    (let [ctx (xla/get-context)
+          compiled (xla/compile-graph ctx graph)]
+      (is (some? compiled)))))
+
+(deftest test-gemma4-two-stage-entity-resolver-ast-compilation
+  (let [dim 1536
+        dm 128
+        vocab-size 2000
+        k 16
+        invars [[:i_h [:tensor [1 1] :i32]]
+                [:u_norm [:tensor [1 1 dm] :f32]]
+                [:cand_ids [:tensor [k] :i32]]
+                [:W_embed [:tensor [vocab-size dim] :f32]]
+                [:W_Q [:tensor [dim dm] :f32]]
+                [:W_K [:tensor [dim dm] :f32]]]
+        ast (gemma/gemma4-two-stage-entity-resolver-ast dim dm vocab-size k)
+        graph (lower/ast->graph "gemma_entity_resolver_test" invars ast [:scores])]
+    (is (shlo/validate-graph graph))
+    (is (= [:scores] (:outvars graph)))
+    (let [ctx (xla/get-context)
+          compiled (xla/compile-graph ctx graph)]
+      (is (some? compiled)))))
+
+(deftest test-in-vram-resolver-step-compilation
+  (let [ctx (xla/get-context)
+        vocab-size 2000
+        dim-in 1536
+        k-triples 16
+        dim-mem 128
+        compiled (contrastive/compile-in-vram-resolver-step ctx vocab-size dim-in k-triples dim-mem {:dtype :f32})]
+    (is (some? compiled))))
+
+

@@ -562,6 +562,48 @@
       [:= [:scaled_delta :b :one :v] {:scale scale-factor} [:delta_logits :b :one :v]]
       [:+ [:logits_grounded :b :one :v] [:logits_base :b :one :v] [:scaled_delta :b :one :v]]])))
 
+(defn gemma4-two-stage-resolver-ast
+  "Constructs Tensor Logic AST for Stage 2 Non-Linear Entity Resolver:
+   Given candidate IDs and embeddings E_cand = gather(W_embed, cand_ids):
+   q_raw = h * W_Q                 [B, 1, din] x [din, dm] -> [B, 1, dm]
+   q_mod = q_raw * u_norm          [B, 1, dm] * [B, 1, dm] -> [B, 1, dm]
+   q_rel = rms_norm(q_mod)         [B, 1, dm] -> [B, 1, dm]
+   k_raw = E_cand * W_K            [K, din] x [din, dm] -> [K, dm]
+   k_cand = rms_norm(k_raw)        [K, dm] -> [K, dm]
+   scores = (q_rel * k_cand^T) / sqrt(dm)  [B, 1, dm] x [K, dm]^T -> [B, 1, K]"
+  [_dim dm _vocab-size _k-cands]
+  (let [inv-scale (/ 1.0 (Math/sqrt (double (or dm 128))))]
+    [:block {:name :gemma_two_stage_resolver}
+     [:gather [:E_cand :k :din] [:W_embed :v :din] [:cand_ids :k]]
+     [:= [:q_raw :b :one :dm] [:h :b :one :din] [:W_Q :din :dm]]
+     [:* [:q_mod :b :one :dm] [:q_raw :b :one :dm] [:u_norm :b :one :dm]]
+     [:rms-norm [:q_rel :b :one :dm] [:q_mod :b :one :dm]]
+     [:= [:k_raw :k :dm] [:E_cand :k :din] [:W_K :din :dm]]
+     [:rms-norm [:k_cand :k :dm] [:k_raw :k :dm]]
+     [:= [:scores :b :one :k] {:scale inv-scale} [:q_rel :b :one :dm] [:k_cand :k :dm]]]))
+
+(defn gemma4-two-stage-entity-resolver-ast
+  "Constructs Tensor Logic AST for Stage 2 Direct-Entity Non-Linear Resolver:
+   v_h = gather(W_embed, i_h)      [B, 1] x [v, din] -> [B, 1, din]
+   E_cand = gather(W_embed, cand_ids) [K] x [v, din] -> [K, din]
+   q_raw = v_h * W_Q               [B, 1, din] x [din, dm] -> [B, 1, dm]
+   q_mod = q_raw * u_norm          [B, 1, dm] * [B, 1, dm] -> [B, 1, dm]
+   q_rel = rms_norm(q_mod)         [B, 1, dm] -> [B, 1, dm]
+   k_raw = E_cand * W_K            [K, din] x [din, dm] -> [K, dm]
+   k_cand = rms_norm(k_raw)        [K, dm] -> [K, dm]
+   scores = (q_rel * k_cand^T) / sqrt(dm)  [B, 1, dm] x [K, dm]^T -> [B, 1, K]"
+  [_dim dm _vocab-size _k-cands]
+  (let [inv-scale (/ 1.0 (Math/sqrt (double (or dm 128))))]
+    [:block {:name :gemma_two_stage_entity_resolver}
+     [:gather [:v_h :b :one :din] [:W_embed :v :din] [:i_h :b :one]]
+     [:gather [:E_cand :k :din] [:W_embed :v :din] [:cand_ids :k]]
+     [:= [:q_raw :b :one :dm] [:v_h :b :one :din] [:W_Q :din :dm]]
+     [:* [:q_mod :b :one :dm] [:q_raw :b :one :dm] [:u_norm :b :one :dm]]
+     [:rms-norm [:q_rel :b :one :dm] [:q_mod :b :one :dm]]
+     [:= [:k_raw :k :dm] [:E_cand :k :din] [:W_K :din :dm]]
+     [:rms-norm [:k_cand :k :dm] [:k_raw :k :dm]]
+     [:= [:scores :b :one :k] {:scale inv-scale} [:q_rel :b :one :dm] [:k_cand :k :dm]]]))
+
 (defn gemma4-prefill-outvars
   "Constructs output variable list for Gemma 4 prefill: [:logits (k_ro_sl_i | k_ro_i) (v_heads_sl_i | v_heads_i) ...]."
   ([config] (gemma4-prefill-outvars config (:max-seq-len config)))

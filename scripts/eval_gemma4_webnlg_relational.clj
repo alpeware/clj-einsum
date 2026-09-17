@@ -1,8 +1,8 @@
 (ns scripts.eval-gemma4-webnlg-relational
   "Grafts relational memory unbinding onto frozen Gemma 4 E2B contextual representations
    and evaluates the Pointwise Fact Selectivity vs. Neighborhood Booster hypothesis on WebNLG.
-   Pre-trains W_mem and relation cores R_r 100% in-VRAM via OpenXLA PJRT, executes Gemma 4 forward
-   passes to extract contextual hidden states h_normed in VRAM, and evaluates causal logit shifts
+   Pre-trains W_mem, relation cores R_r, and Stage 2 Non-Linear Resolver (W_Q, W_K) 100% in-VRAM
+   via OpenXLA PJRT, executes Gemma 4 forward passes in VRAM, and evaluates causal logit shifts
    against distractors across frequency tiers (Head, Mid, Tail, Unseen)."
   (:require [clj-xla.core :as xla]
             [clj-xla.logic.memory.contrastive :as contrastive]
@@ -23,9 +23,12 @@
    :test-unseen ".dataset/webnlg/test_unseen.edn"
    :checkpoint-out ".dataset/webnlg/checkpoint_gemma4_relational.edn"
    :epochs 5
+   :epochs-resolver 5
    :lr 0.05
+   :lr-resolver 0.05
    :tau 0.1
    :lambda-mem 1.0
+   :lambda-resolve 1.0
    :dim-mem 128
    :k-triples 16
    :max-eval 40
@@ -53,9 +56,12 @@
           "--test-unseen" (recur (subvec remaining 2) (assoc opts :test-unseen v))
           "--checkpoint-out" (recur (subvec remaining 2) (assoc opts :checkpoint-out v))
           "--epochs" (recur (subvec remaining 2) (assoc opts :epochs (Long/parseLong v)))
+          "--epochs-resolver" (recur (subvec remaining 2) (assoc opts :epochs-resolver (Long/parseLong v)))
           "--lr" (recur (subvec remaining 2) (assoc opts :lr (Double/parseDouble v)))
+          "--lr-resolver" (recur (subvec remaining 2) (assoc opts :lr-resolver (Double/parseDouble v)))
           "--tau" (recur (subvec remaining 2) (assoc opts :tau (Double/parseDouble v)))
           "--lambda-mem" (recur (subvec remaining 2) (assoc opts :lambda-mem (Double/parseDouble v)))
+          "--lambda-resolve" (recur (subvec remaining 2) (assoc opts :lambda-resolve (Double/parseDouble v)))
           "--dim-mem" (recur (subvec remaining 2) (assoc opts :dim-mem (Long/parseLong v)))
           "--k-triples" (recur (subvec remaining 2) (assoc opts :k-triples (Long/parseLong v)))
           "--max-eval" (recur (subvec remaining 2) (assoc opts :max-eval (Long/parseLong v)))
@@ -109,7 +115,7 @@
 
 (defn train-gemma4-relational-cores!
   "Pre-trains W_mem and relation cores R_r on WebNLG triples using Gemma 4 resident embeddings."
-  [ctx w-embed-buf train-triples rel-counts opts]
+  [ctx w-embed-buf valid-train-triples rel-counts opts]
   (let [{:keys [epochs lr tau dim-mem k-triples]} opts
         v 262144
         din 1536
@@ -118,88 +124,76 @@
         rnd (java.util.Random. 42)
         _ (println (format "\nCompiling 100%% In-VRAM Contrastive Step Executable (V=%d, Din=%d, K=%d, Dm=%d)..."
                            v din k dm))
-        t-c0 (System/nanoTime)
-        step-exec (contrastive/compile-in-vram-contrastive-step ctx v din k dm {:dtype :bf16 :tau tau :lr lr :lambda-tl 0.3})
-        t-c1 (System/nanoTime)
-        _ (println (format "Compilation complete in %.2f ms." (/ (- t-c1 t-c0) 1e6)))
+        step-exec (contrastive/compile-in-vram-contrastive-step ctx v din k dm
+                                                                {:dtype :bf16
+                                                                 :lr lr
+                                                                 :tau tau
+                                                                 :lambda-tl 1.0})
 
-        ;; Initialize host parameter weights
-        initial-w-mem (sample-gaussian-floats rnd (* din dm) 0.02)
-        w-mem-shorts (g4/floats->bf16-shorts initial-w-mem)
+        ;; 1. Initialize W_mem resident in VRAM
+        w-mem-floats (sample-gaussian-floats rnd (* din dm) 0.02)
+        w-mem-shorts (g4/floats->bf16-shorts w-mem-floats)
         w-mem-buf-atom (atom (pjrt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [din dm] 13))
 
-        ;; Triples by relation
-        triples-by-rel (group-by :rel train-triples)
-        relations (vec (sort-by #(get rel-counts % 0) > (keys triples-by-rel)))
-        all-tails (vec (distinct (map :t-tok train-triples)))
-
-        ;; Initialize relation cores on device
+        ;; 2. Initialize per-relation cores resident in VRAM
         r-bufs-atom (atom {})
-        _ (doseq [r relations]
-            (let [r-arr (init-relation-core-floats rnd dm)
-                  r-shorts (g4/floats->bf16-shorts r-arr)
-                  r-b (pjrt/buffer-from-host-buffer ctx (:client ctx) r-shorts [dm dm] 13)]
-              (swap! r-bufs-atom assoc r r-b)))
+        _ (doseq [[r _] rel-counts]
+            (let [r-floats (init-relation-core-floats rnd dm)
+                  r-shorts (g4/floats->bf16-shorts r-floats)
+                  r-buf (pjrt/buffer-from-host-buffer ctx (:client ctx) r-shorts [dm dm] 13)]
+              (swap! r-bufs-atom assoc r r-buf)))
 
-        ;; Pre-allocate target identity and mask scale
-        target-eye (let [^floats fa (float-array (* k k) 0.0)]
-                     (dotimes [i k] (aset fa (+ (* i k) i) (float 1.0)))
-                     fa)
-        target-shorts (g4/floats->bf16-shorts target-eye)
-        target-b (pjrt/buffer-from-host-buffer ctx (:client ctx) target-shorts [k k] 13)
+        ;; 3. Target Identity Matrix and Mask Scale
+        target-mat (float-array (* k k) 0.0)
+        _ (dotimes [i k] (aset target-mat (+ (* i k) i) 1.0))
+        target-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts target-mat) [k k] 13)
 
-        mask-scale (let [fa (float-array (* k k) (float (/ 1.0 (* (double k) (double tau)))))]
-                     fa)
-        mask-shorts (g4/floats->bf16-shorts mask-scale)
-        mask-b (pjrt/buffer-from-host-buffer ctx (:client ctx) mask-shorts [k k] 13)]
+        mask-mat (float-array (* k k) (float (/ 1.0 (* (double k) (double tau)))))
+        mask-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts mask-mat) [k k] 13)
 
-    (println (format "Pre-training relational cores across %d relations for %d epochs in VRAM..."
-                     (count relations) epochs))
+        by-rel (group-by :rel valid-train-triples)]
+
+    (println (format "Training %d relation cores and W_mem (%d x %d) for %d epochs over %,d triples..."
+                     (count rel-counts) din dm epochs (count valid-train-triples)))
+
     (dotimes [epoch epochs]
       (let [t-e0 (System/nanoTime)
             loss-sum (atom 0.0)
             step-count (atom 0)]
-        (doseq [r relations]
-          (let [r-triples (get triples-by-rel r)
-                chunks (partition-all k r-triples)]
-            (doseq [chunk chunks]
-              (let [r-b (get @r-bufs-atom r)
-                    actual-k (count chunk)
-                    padded-chunk (if (< actual-k k)
-                                   (let [n-pad (- k actual-k)
-                                         pad-heads (take n-pad (cycle (map :h-tok chunk)))
-                                         pad-tails (take n-pad (shuffle all-tails))]
-                                     (into (vec chunk) (map (fn [h t] {:h-tok h :t-tok t}) pad-heads pad-tails)))
-                                   (vec chunk))
-                    ih-arr (int-array (map :h-tok padded-chunk))
-                    it-arr (int-array (map :t-tok padded-chunk))
-                    ih-b (pjrt/buffer-from-host-buffer ctx (:client ctx) ih-arr [k] 4)
-                    it-b (pjrt/buffer-from-host-buffer ctx (:client ctx) it-arr [k] 4)
-                    cur-w @w-mem-buf-atom
-                    input-bufs [w-embed-buf ih-b it-b cur-w r-b target-b mask-b]
-                    outs (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) input-bufs 4)
-                    _ (xla/destroy-buffer! ctx ih-b)
-                    _ (xla/destroy-buffer! ctx it-b)
-                    w-new (nth outs 0)
-                    r-new (nth outs 1)
-                    p-buf (nth outs 2)
-                    scores-buf (nth outs 3)
-                    _ (xla/destroy-buffer! ctx scores-buf)
-                    ;; Extract diagonal loss from P
-                    p-floats (pjrt/buffer-to-host-buffer ctx p-buf (* k k) :bf16)
-                    _ (xla/destroy-buffer! ctx p-buf)
-                    batch-loss (loop [i 0 s 0.0]
-                                 (if (>= i k)
-                                   (/ s (double k))
-                                   (let [prob (Math/max 1e-12 (double (aget p-floats (+ (* i k) i))))]
-                                     (recur (inc i) (+ s (- (Math/log prob)))))))]
-                ;; Update resident buffers
-                (xla/destroy-buffer! ctx cur-w)
-                (xla/destroy-buffer! ctx r-b)
-                (reset! w-mem-buf-atom w-new)
-                (swap! r-bufs-atom assoc r r-new)
-                (swap! loss-sum + batch-loss)
-                (swap! step-count inc)))))
+        (doseq [[r triples] by-rel]
+          (let [r-buf (get @r-bufs-atom r)
+                n (count triples)
+                triples-vec (vec triples)]
+            (when (and r-buf (>= n 2))
+              (let [ih-arr (int-array k 0)
+                    it-arr (int-array k 0)]
+                (dotimes [i k]
+                  (let [tr (nth triples-vec (mod i n))]
+                    (aset ih-arr i (int (:h-tok tr)))
+                    (aset it-arr i (int (:t-tok tr)))))
+                (let [ih-b (pjrt/buffer-from-host-buffer ctx (:client ctx) ih-arr [k] 4)
+                      it-b (pjrt/buffer-from-host-buffer ctx (:client ctx) it-arr [k] 4)
+                      inputs [w-embed-buf ih-b it-b @w-mem-buf-atom r-buf target-b mask-b]
+                      outs (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) inputs 4)
+                      w-new (nth outs 0)
+                      r-new (nth outs 1)
+                      p-buf (nth outs 2)
+                      sc-buf (nth outs 3)
+                      p-floats (pjrt/buffer-to-host-buffer ctx p-buf (* k k) :bf16)
+                      batch-loss (loop [i 0 l 0.0]
+                                   (if (>= i k)
+                                     (/ l (double k))
+                                     (recur (inc i) (- l (Math/log (Math/max 1e-6 (double (aget p-floats (+ (* i k) i)))))))))]
+                  (xla/destroy-buffer! ctx ih-b)
+                  (xla/destroy-buffer! ctx it-b)
+                  (xla/destroy-buffer! ctx p-buf)
+                  (xla/destroy-buffer! ctx sc-buf)
+                  (xla/destroy-buffer! ctx @w-mem-buf-atom)
+                  (xla/destroy-buffer! ctx r-buf)
+                  (reset! w-mem-buf-atom w-new)
+                  (swap! r-bufs-atom assoc r r-new)
+                  (swap! loss-sum + batch-loss)
+                  (swap! step-count inc))))))
         (let [t-e1 (System/nanoTime)
               avg-loss (/ @loss-sum (double (max 1 @step-count)))
               dur-ms (/ (- t-e1 t-e0) 1e6)]
@@ -209,7 +203,7 @@
     (xla/destroy-buffer! ctx target-b)
     (xla/destroy-buffer! ctx mask-b)
 
-    ;; Convert final resident buffers to host float arrays for inference session
+    ;; Convert final resident buffers to host float arrays
     (let [w-buf @w-mem-buf-atom
           w-floats (pjrt/buffer-to-host-buffer ctx w-buf (* din dm) :bf16)
           _ (xla/destroy-buffer! ctx w-buf)
@@ -221,15 +215,118 @@
       {:w-mem w-floats
        :r-maps r-maps})))
 
+(defn train-gemma4-resolver!
+  "Pre-trains Stage 2 Non-Linear Resolver weights (W_Q and W_K) in-VRAM via InfoNCE on WebNLG triples."
+  [ctx w-embed-buf w-mem-floats r-maps valid-train-triples opts]
+  (let [{:keys [epochs-resolver lr-resolver tau dim-mem k-triples]} opts
+        v 262144
+        din 1536
+        dm (long dim-mem)
+        k (long k-triples)
+        epochs (long (or epochs-resolver 5))
+        lr (double (or lr-resolver 0.05))
+        rnd (java.util.Random. 43)
+        _ (println (format "\nCompiling 100%% In-VRAM Stage 2 Resolver Step Executable (V=%d, Din=%d, K=%d, Dm=%d)..."
+                           v din k dm))
+        step-exec (contrastive/compile-in-vram-resolver-step ctx v din k dm
+                                                             {:dtype :bf16
+                                                              :lr lr
+                                                              :tau tau
+                                                              :lambda-tl 1.0})
+        w-mem-shorts (g4/floats->bf16-shorts ^floats w-mem-floats)
+        w-mem-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [din dm] 13)
+
+        wq-floats (sample-gaussian-floats rnd (* din dm) 0.02)
+        wk-floats (sample-gaussian-floats rnd (* din dm) 0.02)
+        wq-shorts (g4/floats->bf16-shorts wq-floats)
+        wk-shorts (g4/floats->bf16-shorts wk-floats)
+        wq-dev-atom (atom (pjrt/buffer-from-host-buffer ctx (:client ctx) wq-shorts [din dm] 13))
+        wk-dev-atom (atom (pjrt/buffer-from-host-buffer ctx (:client ctx) wk-shorts [din dm] 13))
+
+        target-mat (float-array (* k k) 0.0)
+        _ (dotimes [i k] (aset target-mat (+ (* i k) i) 1.0))
+        target-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts target-mat) [k k] 13)
+
+        mask-mat (float-array (* k k) (float (/ 1.0 (* (double k) (double tau)))))
+        mask-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts mask-mat) [k k] 13)
+
+        by-rel (group-by :rel valid-train-triples)
+        r-dev-map (into {} (keep (fn [[r fa]]
+                                   (when (seq fa)
+                                     [r (pjrt/buffer-from-host-buffer ctx (:client ctx)
+                                                                      (g4/floats->bf16-shorts fa)
+                                                                      [dm dm] 13)]))
+                                 r-maps))]
+
+    (println (format "Training Stage 2 Non-Linear Resolver (W_Q, W_K: %d x %d) for %d epochs over %,d triples..."
+                     din dm epochs (count valid-train-triples)))
+    (dotimes [epoch epochs]
+      (let [t-e0 (System/nanoTime)
+            loss-sum (atom 0.0)
+            step-count (atom 0)]
+        (doseq [[r triples] by-rel]
+          (let [r-buf (get r-dev-map r)
+                n (count triples)
+                triples-vec (vec triples)]
+            (when (and r-buf (>= n 2))
+              (let [ih-arr (int-array k 0)
+                    it-arr (int-array k 0)]
+                (dotimes [i k]
+                  (let [tr (nth triples-vec (mod i n))]
+                    (aset ih-arr i (int (:h-tok tr)))
+                    (aset it-arr i (int (:t-tok tr)))))
+                (let [ih-b (pjrt/buffer-from-host-buffer ctx (:client ctx) ih-arr [k] 4)
+                      it-b (pjrt/buffer-from-host-buffer ctx (:client ctx) it-arr [k] 4)
+                      inputs [w-embed-buf ih-b it-b w-mem-dev r-buf @wq-dev-atom @wk-dev-atom target-b mask-b]
+                      outs (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) inputs 4)
+                      wq-new (nth outs 0)
+                      wk-new (nth outs 1)
+                      p-buf (nth outs 2)
+                      sc-buf (nth outs 3)
+                      p-floats (pjrt/buffer-to-host-buffer ctx p-buf (* k k) :bf16)
+                      batch-loss (loop [i 0 l 0.0]
+                                   (if (>= i k)
+                                     (/ l (double k))
+                                     (recur (inc i) (- l (Math/log (Math/max 1e-6 (double (aget p-floats (+ (* i k) i)))))))))]
+                  (xla/destroy-buffer! ctx ih-b)
+                  (xla/destroy-buffer! ctx it-b)
+                  (xla/destroy-buffer! ctx p-buf)
+                  (xla/destroy-buffer! ctx sc-buf)
+                  (xla/destroy-buffer! ctx @wq-dev-atom)
+                  (xla/destroy-buffer! ctx @wk-dev-atom)
+                  (reset! wq-dev-atom wq-new)
+                  (reset! wk-dev-atom wk-new)
+                  (swap! loss-sum + batch-loss)
+                  (swap! step-count inc))))))
+        (let [t-e1 (System/nanoTime)
+              avg-loss (/ @loss-sum (double (max 1 @step-count)))
+              dur-ms (/ (- t-e1 t-e0) 1e6)]
+          (println (format "  [Resolver] Epoch %d/%d | Steps: %,d | Mean InfoNCE Loss: %.4f | Latency: %.2f ms (%.2f ms/step)"
+                           (inc epoch) epochs @step-count avg-loss dur-ms (/ dur-ms (double (max 1 @step-count))))))))
+
+    (xla/destroy-buffer! ctx target-b)
+    (xla/destroy-buffer! ctx mask-b)
+    (xla/destroy-buffer! ctx w-mem-dev)
+    (doseq [[_ b] r-dev-map] (xla/destroy-buffer! ctx b))
+
+    (let [wq-buf @wq-dev-atom
+          wk-buf @wk-dev-atom
+          wq-floats (pjrt/buffer-to-host-buffer ctx wq-buf (* din dm) :bf16)
+          wk-floats (pjrt/buffer-to-host-buffer ctx wk-buf (* din dm) :bf16)
+          _ (xla/destroy-buffer! ctx wq-buf)
+          _ (xla/destroy-buffer! ctx wk-buf)]
+      {:w-q wq-floats
+       :w-k wk-floats})))
+
 ;; ==============================================================================
 ;; Main Evaluation Runner
 ;; ==============================================================================
 
 (defn run-gemma4-relational-evaluation [opts]
   (let [{:keys [backend model-dir train-file test-seen test-unseen checkpoint-out
-                lambda-mem dim-mem max-eval skip-train]} opts
+                lambda-mem lambda-resolve dim-mem max-eval skip-train]} opts
         _ (println "\n================================================================================")
-        _ (println "🧪 EXPERIMENT E15: GRAFTING RELATIONAL MEMORY ONTO FROZEN GEMMA 4 E2B")
+        _ (println "🧪 EXPERIMENT E16: TWO-STAGE NON-LINEAR RELATIONAL RETRIEVAL ON GEMMA 4 E2B")
         _ (println "================================================================================")
 
         ;; 1. Initialize Gemma 4 Session & Weights
@@ -265,17 +362,46 @@
         _ (println (format "Processed %,d valid training triples across %d relations."
                            (count valid-train-triples) (count rel-counts)))
 
-        ;; 3. Train or Load Relational Cores
+        ;; 3. Train or Load Relational Cores & Stage 2 Resolver
         ckpt-f (io/file checkpoint-out)
+        serialize-weights (fn [w-map]
+                            (into {} (map (fn [[k v]]
+                                            (cond
+                                              (and (map? v) (= k :r-maps))
+                                              [k (into {} (map (fn [[rk rv]] [rk (vec rv)]) v))]
+                                              (instance? (Class/forName "[F") v)
+                                              [k (vec v)]
+                                              :else [k v]))
+                                          w-map)))
+        deserialize-weights (fn [w-map]
+                              (into {} (map (fn [[k v]]
+                                              (cond
+                                                (and (map? v) (= k :r-maps))
+                                                [k (into {} (map (fn [[rk rv]] [rk (float-array rv)]) v))]
+                                                (sequential? v)
+                                                [k (float-array v)]
+                                                :else [k v]))
+                                            w-map)))
+        existing-ckpt (when (.exists ckpt-f) (deserialize-weights (read-string (slurp ckpt-f))))
+
         {:keys [w-mem r-maps]}
-        (if (and skip-train (.exists ckpt-f))
+        (if (and skip-train (:w-mem existing-ckpt))
           (do (println (format "Loading cached relational weights from %s..." checkpoint-out))
-              (read-string (slurp ckpt-f)))
-          (let [trained (train-gemma4-relational-cores! ctx w-embed-buf valid-train-triples rel-counts opts)]
+              existing-ckpt)
+          (train-gemma4-relational-cores! ctx w-embed-buf valid-train-triples rel-counts opts))
+
+        {:keys [w-q w-k]}
+        (if (and skip-train (:w-q existing-ckpt) (:w-k existing-ckpt))
+          (do (println (format "Loading cached Stage 2 resolver weights from %s..." checkpoint-out))
+              existing-ckpt)
+          (let [res-weights (train-gemma4-resolver! ctx w-embed-buf w-mem r-maps valid-train-triples opts)]
             (when checkpoint-out
-              (println (format "Saving trained relational weights to %s..." checkpoint-out))
-              (spit ckpt-f (pr-str trained)))
-            trained))
+              (println (format "Saving complete relational and resolver checkpoint to %s..." checkpoint-out))
+              (spit ckpt-f (pr-str (serialize-weights {:w-mem w-mem
+                                                       :r-maps r-maps
+                                                       :w-q (:w-q res-weights)
+                                                       :w-k (:w-k res-weights)}))))
+            res-weights))
 
         ;; 4. Compile Gemma 4 Forward Executable (targets: [:logits :normed_last])
         _ (println "\nCompiling Gemma 4 Forward Executable with dual targets [:logits :normed_last]...")
@@ -283,7 +409,7 @@
                   (assoc session :opts {:targets [:logits :normed_last] :last-token-only? true}) 64)
 
         ;; 5. Compile Grounded Logit Unbinding Executables
-        _ (println "Compiling In-VRAM Relational Logit Grounding Executables...")
+        _ (println "Compiling In-VRAM Relational Logit Grounding Executables (Stage 1)...")
         unbinding-invars [[:h [:tensor [1 1 hidden-dim] :bf16]]
                           [:logits_base [:tensor [1 1 vocab-size] :bf16]]
                           [:W_mem [:tensor [hidden-dim dm] :bf16]]
@@ -291,7 +417,7 @@
                           [:W_embed [:tensor [vocab-size hidden-dim] :bf16]]]
         unbinding-ast (gemma/gemma4-unbinding-ast hidden-dim dm vocab-size lambda-mem)
         unbinding-exec (sym/compile-query ctx "gemma_unbinding_logits" unbinding-invars unbinding-ast
-                                          [:logits_grounded :delta_logits])
+                                          [:logits_grounded :delta_logits :u_norm])
 
         entity-invars [[:i_h [:tensor [1 1] :i32]]
                        [:logits_base [:tensor [1 1 vocab-size] :bf16]]
@@ -300,11 +426,7 @@
                        [:W_embed [:tensor [vocab-size hidden-dim] :bf16]]]
         entity-ast (gemma/gemma4-entity-unbinding-ast hidden-dim dm vocab-size lambda-mem)
         entity-exec (sym/compile-query ctx "gemma_entity_unbinding_logits" entity-invars entity-ast
-                                       [:logits_grounded :delta_logits])
-
-        ;; Allocate W_mem buffer on device
-        w-mem-shorts (g4/floats->bf16-shorts ^floats w-mem)
-        w-mem-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [hidden-dim dm] 13)
+                                       [:logits_grounded :delta_logits :u_norm])
 
         ;; 6. Build Candidate Target Entity Pool from Evaluation Sets
         load-eval-triples (fn [path]
@@ -321,7 +443,40 @@
                                                    (when (seq toks)
                                                      {:str t :tok (first toks)})))
                                                all-eval-targets)))
-        _ (println (format "Formed candidate target evaluation pool of %,d entities." (count candidate-targets)))
+        k-cands (count candidate-targets)
+        _ (println (format "Formed candidate target evaluation pool of %,d entities." k-cands))
+
+        ;; 7. Compile Stage 2 Non-Linear Resolver Executables
+        _ (println "Compiling In-VRAM Non-Linear Candidate Resolver Executables (Stage 2)...")
+        resolver-invars [[:h [:tensor [1 1 hidden-dim] :bf16]]
+                         [:u_norm [:tensor [1 1 dm] :bf16]]
+                         [:cand_ids [:tensor [k-cands] :i32]]
+                         [:W_embed [:tensor [vocab-size hidden-dim] :bf16]]
+                         [:W_Q [:tensor [hidden-dim dm] :bf16]]
+                         [:W_K [:tensor [hidden-dim dm] :bf16]]]
+        resolver-ast (gemma/gemma4-two-stage-resolver-ast hidden-dim dm vocab-size k-cands)
+        resolver-exec (sym/compile-query ctx "gemma_two_stage_resolver" resolver-invars resolver-ast [:scores])
+
+        ent-resolver-invars [[:i_h [:tensor [1 1] :i32]]
+                             [:u_norm [:tensor [1 1 dm] :bf16]]
+                             [:cand_ids [:tensor [k-cands] :i32]]
+                             [:W_embed [:tensor [vocab-size hidden-dim] :bf16]]
+                             [:W_Q [:tensor [hidden-dim dm] :bf16]]
+                             [:W_K [:tensor [hidden-dim dm] :bf16]]]
+        ent-resolver-ast (gemma/gemma4-two-stage-entity-resolver-ast hidden-dim dm vocab-size k-cands)
+        ent-resolver-exec (sym/compile-query ctx "gemma_two_stage_entity_resolver" ent-resolver-invars ent-resolver-ast [:scores])
+
+        ;; Allocate Resident Device Buffers
+        w-mem-shorts (g4/floats->bf16-shorts ^floats w-mem)
+        w-mem-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [hidden-dim dm] 13)
+
+        wq-shorts (g4/floats->bf16-shorts ^floats w-q)
+        wk-shorts (g4/floats->bf16-shorts ^floats w-k)
+        wq-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) wq-shorts [hidden-dim dm] 13)
+        wk-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) wk-shorts [hidden-dim dm] 13)
+
+        cand-ids-arr (int-array (map :tok candidate-targets))
+        cand-ids-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) cand-ids-arr [k-cands] 4)
 
         ;; Evaluation helper function for a split
         eval-split-fn
@@ -353,8 +508,8 @@
                 selected-evals (vec (take (long max-eval) (distinct cloze-prompts)))]
             (println (format "Formulated %,d valid cloze test prompts (evaluating top %d):\n"
                              (count cloze-prompts) (count selected-evals)))
-            (println "Prompt (truncated)             | Target          | Tier   | Base Top-1     | Active Top-1   | Δ_target | Mean Δ_dist | Max Δ_dist | Pointwise? | Neigh?")
-            (println "-------------------------------+-----------------+--------+----------------+----------------+----------+-------------+------------+------------+-------")
+            (println "Prompt (truncated)             | Target          | Tier   | Base Top-1 | S1 (Lin) | S2 (TwoStage) | S1 Point? | S2 Point? | S1 Neigh? | S2 Neigh?")
+            (println "-------------------------------+-----------------+--------+------------+----------+---------------+-----------+-----------+-----------+----------")
 
             (let [results
                   (mapv
@@ -383,166 +538,233 @@
                            base-top-cand (top-candidate base-logits-fa candidate-targets)
                            base-top-str (:str base-top-cand)
                            base-top-tok (:tok base-top-cand)
-                           base-cand-rank (compute-cand-rank base-logits-fa target-tok candidate-targets)
-                           base-vocab-rank (compute-rank base-logits-fa target-tok vocab-size)
+                           target-ci (first (keep-indexed (fn [idx c] (when (= (:tok c) target-tok) idx)) candidate-targets))
 
                            ;; 3. Prepare Relational Core R_rel
                            r-floats (get r-maps rel (float-array (* dm dm) 0.0))
                            r-shorts (g4/floats->bf16-shorts r-floats)
                            r-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) r-shorts [dm dm] 13)
 
-                           ;; 4. Run Contextual Unbinding Executable
+                           ;; 4. Run Stage 1 Contextual Unbinding Executable
                            ground-outs (pjrt/execute-executable ctx (or (:handle unbinding-exec) unbinding-exec)
-                                                                [normed-last-b base-logits-b w-mem-dev r-dev w-embed-buf] 2)
+                                                                [normed-last-b base-logits-b w-mem-dev r-dev w-embed-buf] 3)
                            logits-grounded-b (nth ground-outs 0)
                            delta-logits-b (nth ground-outs 1)
+                           u-norm-b (nth ground-outs 2)
 
                            grounded-fa (pjrt/buffer-to-host-buffer ctx logits-grounded-b vocab-size :bf16)
                            delta-fa (pjrt/buffer-to-host-buffer ctx delta-logits-b vocab-size :bf16)
 
-                           ;; 5. Run Direct Entity Unbinding Executable (for comparison)
+                           ;; 5. Run Stage 1 Direct Entity Unbinding Executable
                            ih-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (int-array [head-tok]) [1 1] 4)
                            entity-outs (pjrt/execute-executable ctx (or (:handle entity-exec) entity-exec)
-                                                                [ih-b base-logits-b w-mem-dev r-dev w-embed-buf] 2)
-                           _ (xla/destroy-buffer! ctx ih-b)
+                                                                [ih-b base-logits-b w-mem-dev r-dev w-embed-buf] 3)
                            _ (xla/destroy-buffer! ctx (nth entity-outs 0))
                            delta-ent-b (nth entity-outs 1)
+                           ent-u-norm-b (nth entity-outs 2)
                            delta-ent-fa (pjrt/buffer-to-host-buffer ctx delta-ent-b vocab-size :bf16)
                            _ (xla/destroy-buffer! ctx delta-ent-b)
 
+                            ;; 6. Run Stage 2 Non-Linear Resolver (Contextual)
+                           scores-b (pjrt/execute-executable ctx (or (:handle resolver-exec) resolver-exec)
+                                                             [normed-last-b u-norm-b cand-ids-dev w-embed-buf wq-dev wk-dev] 1)
+                           scores-fa (pjrt/buffer-to-host-buffer ctx scores-b k-cands :bf16)
+                           _ (xla/destroy-buffer! ctx scores-b)
+
+                            ;; 7. Run Stage 2 Non-Linear Resolver (Direct Entity)
+                           ent-scores-b (pjrt/execute-executable ctx (or (:handle ent-resolver-exec) ent-resolver-exec)
+                                                                 [ih-b ent-u-norm-b cand-ids-dev w-embed-buf wq-dev wk-dev] 1)
+                           ent-scores-fa (pjrt/buffer-to-host-buffer ctx ent-scores-b k-cands :bf16)
+                           _ (xla/destroy-buffer! ctx ent-scores-b)
+
+                           _ (xla/destroy-buffer! ctx ih-b)
+                           _ (xla/destroy-buffer! ctx u-norm-b)
+                           _ (xla/destroy-buffer! ctx ent-u-norm-b)
                            _ (xla/destroy-buffer! ctx base-logits-b)
                            _ (xla/destroy-buffer! ctx normed-last-b)
                            _ (xla/destroy-buffer! ctx r-dev)
                            _ (xla/destroy-buffer! ctx logits-grounded-b)
                            _ (xla/destroy-buffer! ctx delta-logits-b)
 
-                           ;; 6. Compute Active Ranks & Top Token
-                           active-top-cand (top-candidate grounded-fa candidate-targets)
-                           active-top-str (:str active-top-cand)
-                           active-top-tok (:tok active-top-cand)
-                           active-cand-rank (compute-cand-rank grounded-fa target-tok candidate-targets)
-                           active-vocab-rank (compute-rank grounded-fa target-tok vocab-size)
-
-                           ;; 7. Compute Distractor Metrics (Contextual)
-                           delta-target (double (aget delta-fa target-tok))
+                           ;; 8. Stage 1 Metrics (Linear alone)
+                           s1-top-cand (top-candidate grounded-fa candidate-targets)
+                           s1-top-str (:str s1-top-cand)
+                           s1-top-tok (:tok s1-top-cand)
+                           s1-delta-target (double (aget delta-fa target-tok))
                            distractor-cands (filterv #(not= (:tok %) target-tok) candidate-targets)
-                           distractor-deltas (mapv #(double (aget delta-fa (:tok %))) distractor-cands)
-                           mean-dist-delta (if (seq distractor-deltas)
-                                             (/ (reduce + distractor-deltas) (double (count distractor-deltas)))
-                                             0.0)
-                           max-dist-delta (if (seq distractor-deltas)
-                                            (apply max distractor-deltas)
-                                            0.0)
-                           top-base-cand-dist (apply max-key (fn [c] (aget base-logits-fa (:tok c))) distractor-cands)
-                           top-base-delta (double (aget delta-fa (:tok top-base-cand-dist)))
+                           s1-dist-deltas (mapv #(double (aget delta-fa (:tok %))) distractor-cands)
+                           s1-mean-dist (if (seq s1-dist-deltas) (/ (reduce + s1-dist-deltas) (double (count s1-dist-deltas))) 0.0)
+                           s1-max-dist (if (seq s1-dist-deltas) (apply max s1-dist-deltas) 0.0)
+                           s1-pointwise? (> s1-delta-target s1-max-dist)
+                           s1-neigh? (> s1-delta-target s1-mean-dist)
 
-                           pointwise? (> delta-target max-dist-delta)
-                           neigh? (> delta-target mean-dist-delta)
-                           causal-conversion? (and (not= base-top-tok target-tok) (= active-top-tok target-tok))
+                           ;; Direct Entity Stage 1 Metrics
+                           ent-s1-delta-target (double (aget delta-ent-fa target-tok))
+                           ent-s1-dist-deltas (mapv #(double (aget delta-ent-fa (:tok %))) distractor-cands)
+                           ent-s1-max-dist (if (seq ent-s1-dist-deltas) (apply max ent-s1-dist-deltas) 0.0)
+                           ent-s1-mean-dist (if (seq ent-s1-dist-deltas) (/ (reduce + ent-s1-dist-deltas) (double (count ent-s1-dist-deltas))) 0.0)
+                           ent-s1-pointwise? (> ent-s1-delta-target ent-s1-max-dist)
+                           ent-s1-neigh? (> ent-s1-delta-target ent-s1-mean-dist)
 
-                           ;; Direct entity unbinding metrics
-                           delta-ent-target (double (aget delta-ent-fa target-tok))
-                           distractor-ent-deltas (mapv #(double (aget delta-ent-fa (:tok %))) distractor-cands)
-                           max-dist-ent-delta (if (seq distractor-ent-deltas) (apply max distractor-ent-deltas) 0.0)
-                           mean-dist-ent-delta (if (seq distractor-ent-deltas) (/ (reduce + distractor-ent-deltas) (double (count distractor-ent-deltas))) 0.0)
-                           ent-pointwise? (> delta-ent-target max-dist-ent-delta)
-                           ent-neigh? (> delta-ent-target mean-dist-ent-delta)
+                           ;; 9. Stage 2 Metrics (Two-Stage Non-Linear Resolver)
+                           s2-target-score (if target-ci (double (aget scores-fa target-ci)) 0.0)
+                           s2-delta-target (+ s1-delta-target (* (double lambda-resolve) s2-target-score))
+                           s2-dist-deltas (keep-indexed (fn [i c]
+                                                          (when (not= i target-ci)
+                                                            (+ (double (aget delta-fa (:tok c)))
+                                                               (* (double lambda-resolve) (double (aget scores-fa i))))))
+                                                        candidate-targets)
+                           s2-max-dist (if (seq s2-dist-deltas) (apply max s2-dist-deltas) 0.0)
+                           s2-mean-dist (if (seq s2-dist-deltas) (/ (reduce + s2-dist-deltas) (double (count s2-dist-deltas))) 0.0)
+                           s2-pointwise? (> s2-delta-target s2-max-dist)
+                           s2-neigh? (> s2-delta-target s2-mean-dist)
+
+                           s2-best-idx (apply max-key (fn [i]
+                                                        (let [c (nth candidate-targets i)]
+                                                          (+ (double (aget base-logits-fa (:tok c)))
+                                                             (double (aget delta-fa (:tok c)))
+                                                             (* (double lambda-resolve) (double (aget scores-fa i))))))
+                                              (range k-cands))
+                           s2-top-cand (nth candidate-targets s2-best-idx)
+                           s2-top-str (:str s2-top-cand)
+                           s2-top-tok (:tok s2-top-cand)
+
+                           ;; Direct Entity Stage 2 Metrics
+                           ent-s2-target-score (if target-ci (double (aget ent-scores-fa target-ci)) 0.0)
+                           ent-s2-delta-target (+ ent-s1-delta-target (* (double lambda-resolve) ent-s2-target-score))
+                           ent-s2-dist-deltas (keep-indexed (fn [i c]
+                                                              (when (not= i target-ci)
+                                                                (+ (double (aget delta-ent-fa (:tok c)))
+                                                                   (* (double lambda-resolve) (double (aget ent-scores-fa i))))))
+                                                            candidate-targets)
+                           ent-s2-max-dist (if (seq ent-s2-dist-deltas) (apply max ent-s2-dist-deltas) 0.0)
+                           ent-s2-mean-dist (if (seq ent-s2-dist-deltas) (/ (reduce + ent-s2-dist-deltas) (double (count ent-s2-dist-deltas))) 0.0)
+                           ent-s2-pointwise? (> ent-s2-delta-target ent-s2-max-dist)
+                           ent-s2-neigh? (> ent-s2-delta-target ent-s2-mean-dist)
 
                            p-disp (if (> (count prompt) 30) (str (subs prompt 0 27) "...") prompt)
                            t-disp (if (> (count target) 15) (str (subs target 0 12) "...") target)
                            tier-str (case tier :head "HEAD" :mid "MID " :tail "TAIL" :unseen "UNSEEN")]
 
-                       (println (format "%-30s | %-15s | %-6s | %-14s | %-14s | %+8.4f | %+11.4f | %+10.4f | %-10s | %-5s"
+                       (println (format "%-30s | %-15s | %-6s | %-10s | %-8s | %-13s | %-9s | %-9s | %-9s | %-9s"
                                         p-disp t-disp tier-str
                                         (if (= base-top-tok target-tok) (str base-top-str " ✓") base-top-str)
-                                        (if (= active-top-tok target-tok) (str active-top-str " ✓") active-top-str)
-                                        delta-target mean-dist-delta max-dist-delta
-                                        (if pointwise? "YES (Fact)" "NO (Noise)")
-                                        (if neigh? "YES" "NO")))
+                                        (if (= s1-top-tok target-tok) (str s1-top-str " ✓") s1-top-str)
+                                        (if (= s2-top-tok target-tok) (str s2-top-str " ✓") s2-top-str)
+                                        (if s1-pointwise? "YES" "NO")
+                                        (if s2-pointwise? "YES (Fact)" "NO")
+                                        (if s1-neigh? "YES" "NO")
+                                        (if s2-neigh? "YES" "NO")))
 
                        {:prompt prompt
                         :target target
                         :rel rel
                         :tier tier
                         :base-match? (= base-top-tok target-tok)
-                        :active-match? (= active-top-tok target-tok)
-                        :causal-conversion? causal-conversion?
-                        :base-cand-rank base-cand-rank
-                        :active-cand-rank active-cand-rank
-                        :base-vocab-rank base-vocab-rank
-                        :active-vocab-rank active-vocab-rank
-                        :delta-target delta-target
-                        :mean-dist-delta mean-dist-delta
-                        :max-dist-delta max-dist-delta
-                        :top-base-delta top-base-delta
-                        :pointwise? pointwise?
-                        :neigh? neigh?
-                        :ent-delta-target delta-ent-target
-                        :ent-mean-dist mean-dist-ent-delta
-                        :ent-max-dist max-dist-ent-delta
-                        :ent-pointwise? ent-pointwise?
-                        :ent-neigh? ent-neigh?}))
+                        :s1-match? (= s1-top-tok target-tok)
+                        :s2-match? (= s2-top-tok target-tok)
+                        :s1-delta-target s1-delta-target
+                        :s1-mean-dist s1-mean-dist
+                        :s1-max-dist s1-max-dist
+                        :s1-pointwise? s1-pointwise?
+                        :s1-neigh? s1-neigh?
+                        :s2-delta-target s2-delta-target
+                        :s2-mean-dist s2-mean-dist
+                        :s2-max-dist s2-max-dist
+                        :s2-pointwise? s2-pointwise?
+                        :s2-neigh? s2-neigh?
+                        :ent-s1-pointwise? ent-s1-pointwise?
+                        :ent-s1-neigh? ent-s1-neigh?
+                        :ent-s2-pointwise? ent-s2-pointwise?
+                        :ent-s2-neigh? ent-s2-neigh?
+                        :ent-s1-delta-target ent-s1-delta-target
+                        :ent-s2-delta-target ent-s2-delta-target}))
                    selected-evals)
 
                   total-n (count results)
-                  n-pointwise (count (filter :pointwise? results))
-                  n-neigh (count (filter :neigh? results))
-                  n-ent-pointwise (count (filter :ent-pointwise? results))
-                  n-ent-neigh (count (filter :ent-neigh? results))
                   base-acc (* 100.0 (/ (double (count (filter :base-match? results))) (double total-n)))
-                  active-acc (* 100.0 (/ (double (count (filter :active-match? results))) (double total-n)))
-                  mean-tgt (if (pos? total-n) (/ (reduce + (map :delta-target results)) (double total-n)) 0.0)
-                  mean-dist (if (pos? total-n) (/ (reduce + (map :mean-dist-delta results)) (double total-n)) 0.0)
-                  mean-max-dist (if (pos? total-n) (/ (reduce + (map :max-dist-delta results)) (double total-n)) 0.0)
-                  mean-top-base (if (pos? total-n) (/ (reduce + (map :top-base-delta results)) (double total-n)) 0.0)
-                  mean-ent-tgt (if (pos? total-n) (/ (reduce + (map :ent-delta-target results)) (double total-n)) 0.0)
-                  mean-ent-dist (if (pos? total-n) (/ (reduce + (map :ent-mean-dist results)) (double total-n)) 0.0)
-                  mean-ent-max (if (pos? total-n) (/ (reduce + (map :ent-max-dist results)) (double total-n)) 0.0)]
+                  s1-acc (* 100.0 (/ (double (count (filter :s1-match? results))) (double total-n)))
+                  s2-acc (* 100.0 (/ (double (count (filter :s2-match? results))) (double total-n)))
+
+                  s1-pointwise (count (filter :s1-pointwise? results))
+                  s2-pointwise (count (filter :s2-pointwise? results))
+                  s1-neigh (count (filter :s1-neigh? results))
+                  s2-neigh (count (filter :s2-neigh? results))
+
+                  ent-s1-pointwise (count (filter :ent-s1-pointwise? results))
+                  ent-s2-pointwise (count (filter :ent-s2-pointwise? results))
+                  ent-s1-neigh (count (filter :ent-s1-neigh? results))
+                  ent-s2-neigh (count (filter :ent-s2-neigh? results))
+
+                  mean-s1-tgt (/ (reduce + (map :s1-delta-target results)) (double (max 1 total-n)))
+                  mean-s1-dist (/ (reduce + (map :s1-mean-dist results)) (double (max 1 total-n)))
+                  mean-s1-max (/ (reduce + (map :s1-max-dist results)) (double (max 1 total-n)))
+
+                  mean-s2-tgt (/ (reduce + (map :s2-delta-target results)) (double (max 1 total-n)))
+                  mean-s2-dist (/ (reduce + (map :s2-mean-dist results)) (double (max 1 total-n)))
+                  mean-s2-max (/ (reduce + (map :s2-max-dist results)) (double (max 1 total-n)))]
 
               (println "\n================================================================================")
-              (println (format "🎯 GEMMA 4 DISTRACTOR SELECTIVITY DIAGNOSTIC: %s (N=%d)" split-name total-n))
+              (println (format "🎯 GEMMA 4 TWO-STAGE RETRIEVAL DIAGNOSTIC: %s (N=%d)" split-name total-n))
               (println "================================================================================")
-              (println (format "Top-1 Accuracy Baseline (Zero R_mem)  : %.1f%% (%d/%d)"
+              (println (format "Top-1 Accuracy Baseline (Zero R_mem)       : %5.1f%% (%d/%d)"
                                base-acc (count (filter :base-match? results)) total-n))
-              (println (format "Top-1 Accuracy Grounded (Active R_mem): %.1f%% (%d/%d) [Causal Lift: %+d]"
-                               active-acc (count (filter :active-match? results)) total-n
-                               (- (count (filter :active-match? results)) (count (filter :base-match? results)))))
-              (println (format "Contextual Pointwise Selectivity (Δ_tgt > max Δ_dist): %d/%d (%.1f%%)"
-                               n-pointwise total-n (* 100.0 (/ (double n-pointwise) (double total-n)))))
-              (println (format "Contextual Neighborhood Selectivity (Δ_tgt > mean Δ): %d/%d (%.1f%%)"
-                               n-neigh total-n (* 100.0 (/ (double n-neigh) (double total-n)))))
-              (println (format "Direct Entity Pointwise Selectivity (Δ_tgt > max Δ_dist): %d/%d (%.1f%%)"
-                               n-ent-pointwise total-n (* 100.0 (/ (double n-ent-pointwise) (double total-n)))))
-              (println (format "Direct Entity Neighborhood Selectivity (Δ_tgt > mean Δ): %d/%d (%.1f%%)"
-                               n-ent-neigh total-n (* 100.0 (/ (double n-ent-neigh) (double total-n)))))
-              (println (format "Contextual Shifts : Target Δ: %+6.4f | Mean Dist Δ: %+6.4f | Max Dist Δ: %+6.4f | Top-Base Δ: %+6.4f"
-                               mean-tgt mean-dist mean-max-dist mean-top-base))
-              (println (format "Direct Entity     : Target Δ: %+6.4f | Mean Dist Δ: %+6.4f | Max Dist Δ: %+6.4f"
-                               mean-ent-tgt mean-ent-dist mean-ent-max))
+              (println (format "Top-1 Accuracy Stage 1 (Linear Unbinding)  : %5.1f%% (%d/%d) [Lift: %+d]"
+                               s1-acc (count (filter :s1-match? results)) total-n
+                               (- (count (filter :s1-match? results)) (count (filter :base-match? results)))))
+              (println (format "Top-1 Accuracy Stage 2 (NonLinear Resolver): %5.1f%% (%d/%d) [Lift: %+d]"
+                               s2-acc (count (filter :s2-match? results)) total-n
+                               (- (count (filter :s2-match? results)) (count (filter :base-match? results)))))
               (println "--------------------------------------------------------------------------------")
-              (println "Frequency Tier     | Eval | Base Acc | Act Acc | Δ_target | Mean Δ_dist | Max Δ_dist | Target > Mean? | Target > Max? (Pointwise)")
-              (println "-------------------+------+----------+---------+----------+-------------+------------+----------------+--------------------------")
+              (println (format "Stage 1 Contextual Pointwise Selectivity (Δ > max Δ): %d/%d (%.1f%%)"
+                               s1-pointwise total-n (* 100.0 (/ (double s1-pointwise) (double total-n)))))
+              (println (format "Stage 2 Contextual Pointwise Selectivity (Δ > max Δ): %d/%d (%.1f%%)  <-- [THE HYPOTHESIS TEST]"
+                               s2-pointwise total-n (* 100.0 (/ (double s2-pointwise) (double total-n)))))
+              (println (format "Stage 1 Neighborhood Selectivity (Δ > mean Δ)       : %d/%d (%.1f%%)"
+                               s1-neigh total-n (* 100.0 (/ (double s1-neigh) (double total-n)))))
+              (println (format "Stage 2 Neighborhood Selectivity (Δ > mean Δ)       : %d/%d (%.1f%%)"
+                               s2-neigh total-n (* 100.0 (/ (double s2-neigh) (double total-n)))))
+              (println "--------------------------------------------------------------------------------")
+              (println (format "Stage 1 Direct-Entity Pointwise Selectivity         : %d/%d (%.1f%%)"
+                               ent-s1-pointwise total-n (* 100.0 (/ (double ent-s1-pointwise) (double total-n)))))
+              (println (format "Stage 2 Direct-Entity Pointwise Selectivity         : %d/%d (%.1f%%)  <-- [ENTITY HYPOTHESIS TEST]"
+                               ent-s2-pointwise total-n (* 100.0 (/ (double ent-s2-pointwise) (double total-n)))))
+              (println (format "Stage 1 Direct-Entity Neighborhood Selectivity      : %d/%d (%.1f%%)"
+                               ent-s1-neigh total-n (* 100.0 (/ (double ent-s1-neigh) (double total-n)))))
+              (println (format "Stage 2 Direct-Entity Neighborhood Selectivity      : %d/%d (%.1f%%)"
+                               ent-s2-neigh total-n (* 100.0 (/ (double ent-s2-neigh) (double total-n)))))
+              (println "--------------------------------------------------------------------------------")
+              (println (format "Stage 1 Shifts : Target Δ: %+6.4f | Mean Dist Δ: %+6.4f | Max Dist Δ: %+6.4f"
+                               mean-s1-tgt mean-s1-dist mean-s1-max))
+              (println (format "Stage 2 Shifts : Target Δ: %+6.4f | Mean Dist Δ: %+6.4f | Max Dist Δ: %+6.4f"
+                               mean-s2-tgt mean-s2-dist mean-s2-max))
+              (println "--------------------------------------------------------------------------------")
+              (println "Frequency Tier     | Eval | Base | S1 Acc | S2 Acc | S1 Point? | S2 Point? | S1 Neigh? | S2 Neigh?")
+              (println "-------------------+------+------+--------+--------+-----------+-----------+-----------+----------")
               (doseq [t [:head :mid :tail :unseen]]
                 (let [t-res (filter #(= (:tier %) t) results)
                       tn (count t-res)]
                   (when (pos? tn)
                     (let [t-base (* 100.0 (/ (double (count (filter :base-match? t-res))) (double tn)))
-                          t-act (* 100.0 (/ (double (count (filter :active-match? t-res))) (double tn)))
-                          t-tgt (/ (reduce + (map :delta-target t-res)) (double tn))
-                          t-mdist (/ (reduce + (map :mean-dist-delta t-res)) (double tn))
-                          t-maxdist (/ (reduce + (map :max-dist-delta t-res)) (double tn))
-                          t-neigh (* 100.0 (/ (double (count (filter :neigh? t-res))) (double tn)))
-                          t-point (* 100.0 (/ (double (count (filter :pointwise? t-res))) (double tn)))
+                          t-s1 (* 100.0 (/ (double (count (filter :s1-match? t-res))) (double tn)))
+                          t-s2 (* 100.0 (/ (double (count (filter :s2-match? t-res))) (double tn)))
+                          t-s1-p (* 100.0 (/ (double (count (filter :s1-pointwise? t-res))) (double tn)))
+                          t-s2-p (* 100.0 (/ (double (count (filter :s2-pointwise? t-res))) (double tn)))
+                          t-s1-n (* 100.0 (/ (double (count (filter :s1-neigh? t-res))) (double tn)))
+                          t-s2-n (* 100.0 (/ (double (count (filter :s2-neigh? t-res))) (double tn)))
                           label (case t :head "Head (>= 50)      " :mid "Mid (10 - 49)     " :tail "Tail (< 10)       " :unseen "Unseen (0 Core)   ")]
-                      (println (format "%s | %-4d | %5.1f%%   | %5.1f%%  | %+8.4f | %+11.4f | %+10.4f |     %5.1f%%    |          %5.1f%%"
-                                       label tn t-base t-act t-tgt t-mdist t-maxdist t-neigh t-point))))))
+                      (println (format "%s | %-4d | %4.1f%%| %5.1f%% | %5.1f%% |   %5.1f%%  |   %5.1f%%  |   %5.1f%%  |   %5.1f%%"
+                                       label tn t-base t-s1 t-s2 t-s1-p t-s2-p t-s1-n t-s2-n))))))
               (println "================================================================================\n")
               results)))
 
         ;; Run evaluation on test_seen.edn and test_unseen.edn
         seen-res (eval-split-fn "TEST_SEEN (Held-out triples from trained relations)" test-seen)
         unseen-res (eval-split-fn "TEST_UNSEEN (Triples from zero-shot unseen relations)" test-unseen)
-        _ (xla/destroy-buffer! ctx w-mem-dev)]
+        _ (xla/destroy-buffer! ctx w-mem-dev)
+        _ (xla/destroy-buffer! ctx wq-dev)
+        _ (xla/destroy-buffer! ctx wk-dev)
+        _ (xla/destroy-buffer! ctx cand-ids-dev)]
     {:seen seen-res
      :unseen unseen-res}))
 
