@@ -78,7 +78,7 @@ clj -M:repl
 
 ### 1. Declarative Tensor Logic (Hiccup AST)
 
-Express neural network operations, matrix contractions, and activations in pure declarative Clojure data structures:
+Express neural network operations, matrix contractions, and activations in pure declarative Clojure data structures. There is no `:matmul` operator: a shared index contracted on both sides of `:=` *is* the matmul, and activations are attributes on the equation, not separate ops:
 
 ```clojure
 (ns example.logic
@@ -93,11 +93,12 @@ Express neural network operations, matrix contractions, and activations in pure 
              [:w [:tensor [768 768] :f32]]
              [:gamma [:tensor [768] :f32]]])
 
-;; Declare computation using Tensor Logic AST
+;; Declare computation using Tensor Logic AST: rms-norm, then a dense
+;; projection with fused GeLU -- one construct, `:=`, all the way down.
+;; The shared :din index contracted on both sides is the matrix multiply.
 (def ast
   [[:rms-norm [:h_norm :b :p :d] [:x :b :p :d] [:gamma :d] {:eps 1e-6}]
-   [:matmul [:out :b :p :d] [:h_norm :b :p :din] [:w :din :d]]
-   [:gelu [:y :b :p :d] [:out :b :p :d]]])
+   [:= [:y :b :p :d] {:act :gelu} [:h_norm :b :p :din] [:w :din :d]]])
 
 ;; Lower AST to StableHLO SSA graph and compile
 (def graph (lower/ast->graph "dense_block" invars ast #{:y}))
