@@ -142,9 +142,69 @@ come from the equation→compile→measure loop, one equation at a time. Paper 2
 architecture — reflex contractions, device-resident deliberation, host-side
 synthesis — where the agent's *own* reasoning substrate is tensor equations it
 can read, verify, and rewrite, and where every state mutation passes through a
-verified discrete commit. `AGENT-LOOP.md` holds the design. The endgame:
-agents that do AI research in the same write→compile→verify loop we used to
-build this.
+verified discrete commit. `AGENT-LOOP.md` holds the design. The endgame is the
+recursive research loop described below: papers in, measured results out,
+catalog committed, components remixed.
+
+## The recursive research loop
+
+E24 changed what this repo is. A paper (Fu et al.'s Cache-to-Cache) went in;
+a spec, an implementation, property tests, a 30-problem benchmark, measured
+results on the RX 7900 XTX, peer review, corrected claims, and a rerun came
+out — in one session, from a coding agent. That is not a faster way to run an
+experiment. It is a different thing: **AI research translated into tensor
+logic and cataloged in action.**
+
+The loop, stated plainly:
+
+- **Papers are proposals.** The literature is a probabilistic proposal
+  distribution over architectures — most entries wrong, overstated, or
+  hardware-mismatched. The agent samples from it.
+- **Tensor logic is the reification.** The proposal is rewritten into the shared
+  representation: checkable, shape-verified, compilable. This is what makes
+  components from different papers interoperable — E22's dispatch, E23's
+  reduce, and E24's handover compose into a multi-instance verified loop
+  *because they are all equations in one language*. Without the lingua franca,
+  "mix and match" is gluing Python scripts with incompatible assumptions.
+  Composability is a property of the representation, not the pipeline.
+- **Hardware is the verifier.** Results are specific to the hardware, and that
+  specificity is the point: the device is the oracle that cannot be gamed with
+  clever prose. A claim is not done until it runs on PJRT.
+- **The catalog is the verified snapshot.** `docs/tensor_logic/empirical_journey.md`
+  is the accumulate-only record — including the negative and null results
+  (E14–E20's gradient failures, E24's +0.0% matched deliberation gain). The
+  catalog is what the next iteration reads.
+- **Peer review is the gate.** E24's first writeup overclaimed — speedup-ratio
+  framing, confounded baselines, a case study contradicted by its own data.
+  Review caught it; claims were corrected; the benchmark reran fairly and
+  reported an honest null. The generator now outruns the human reviewer, so
+  the adversarial analysis step must become part of the loop itself, automated
+  and as strong as the proposer. A self-recursive loop without a verifier is a
+  paper mill.
+
+This is the agent loop one level up: propose → dispose → commit → recurse,
+with convergence defined the same way — the catalog stops changing on the
+questions that matter, or a paper-grade result commits.
+
+**Two strengths of "self-recursive," honestly separated:**
+
+- *Weak (demonstrated):* the loop accelerates implementation and the catalog
+  compounds knowledge. E24 is the existence proof.
+- *Strong (the goal):* the loop learns to do research better from the catalog —
+  which experimental designs were confounded, which implementation strategies
+  survived contact with hardware, which combinations deserve GPU time.
+  Meta-learning over the journey corpus. The combinatorial space of "mix and
+  match" is exponential, so the meta-loop needs its own beam search: generate
+  candidate combinations cheaply in the readable representation (most die
+  statically — shape mismatches, violated invariants), prune with a critic,
+  run the survivors on hardware.
+
+**The hard unsolved piece:** composable evaluation. Code composes in tensor
+logic; benchmarks do not automatically follow. Every new combination needs
+pre-registered criteria and fair baselines, or the catalog fills with
+confounded wins. Until evaluation composes the way the equations do, the human
+stays in the loop at the design-review step — which is exactly where the
+operating principles below already put us.
 
 ## Operating principles
 
@@ -187,6 +247,10 @@ build this.
 - A coding agent, given a research idea expressible as tensor equations, produces
   a compiled, device-verified, trained result in the same session — the E1→E12
   loop, fully agent-driven.
+- The research loop runs increasingly closed: a paper goes in, a fair
+  implementation with measured, peer-reviewed results comes out, and the catalog
+  entry it commits becomes a component the next iteration remixes with others —
+  with the adversarial review step automated rather than borrowed from a human.
 - Trainable Tensor Logic retrieves reliably: relational memory that *selects* the
   right fact, not just steers toward it; per-rule temperatures that are actually
   learned rather than configured; predicate invention demonstrated on a real
