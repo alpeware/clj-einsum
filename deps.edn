@@ -1,4 +1,4 @@
-{:paths ["src" "."]
+{:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         org.clojure/data.json {:mvn/version "2.5.0"}
         metosin/malli {:mvn/version "0.16.4"}
@@ -6,63 +6,82 @@
  :aliases
  {:run
   {:jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx4g"]}
+  :tools
+  {:extra-paths ["."]}
+  :experiments
+  {:extra-paths ["." "catalog" "proposals"]}
   :gpt2
-  {:main-opts ["-m" "scripts.gpt2-inference"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.gpt2-inference"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx4g"]}
   :smollm
-  {:main-opts ["-m" "scripts.smollm-inference"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.smollm-inference"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx4g"]}
   :gemma
-  {:main-opts ["-m" "scripts.gemma2-inference"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.gemma2-inference"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :gemma2
-  {:main-opts ["-m" "scripts.gemma2-inference"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.gemma2-inference"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :gemma3
-  {:main-opts ["-m" "scripts.gemma3-inference"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.gemma3-inference"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :gemma4
-  {:main-opts ["-m" "scripts.gemma4-inference"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.gemma4-inference"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :gemma4-agent
-  {:main-opts ["-m" "scripts.gemma4-agent"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.gemma4-agent"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :gemma4-relational
-  {:main-opts ["-m" "scripts.eval-gemma4-webnlg-relational"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.eval-gemma4-webnlg-relational"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx16g"]}
   :e22
-  {:main-opts ["-m" "scripts.e22-kb-dispatch"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.e22-kb-dispatch"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :e23
-  {:main-opts ["-m" "scripts.e23-reduce"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.e23-reduce"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :e24
-  {:main-opts ["-m" "scripts.e24-vram-c2c"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.e24-vram-c2c"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :benchmark
-  {:main-opts ["-m" "scripts.benchmark"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.benchmark"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx8g"]}
   :download-hf
-  {:main-opts ["-m" "scripts.download-hf"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.download-hf"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx4g"]}
   :fetch-pjrt
-  {:main-opts ["-m" "scripts.fetch-pjrt-binaries"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.fetch-pjrt"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx4g"]}
   :quantize
-  {:main-opts ["-m" "scripts.quantize"]
+  {:extra-paths ["."]
+   :main-opts ["-m" "tools.quantize"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :repl
   {:jvm-opts ["-Dclojure.server.repl={:port 5555 :accept clojure.core.server/repl}"
               "--enable-native-access=ALL-UNNAMED" "-Xmx4g"]}
   :test
-  {:extra-paths ["test"]
+  {:extra-paths ["test" "."]
    :extra-deps {org.clojure/test.check {:mvn/version "1.1.1"}}
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx4g"]}
   :lint
   {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2026.01.19"}
                   org.clojure/data.json {:mvn/version "2.5.0"}
                   org.clojure/test.check {:mvn/version "1.1.1"}}
-   :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test" "scripts"]}
+   :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test" "models" "tools"]}
   :format
   {:replace-deps {dev.weavejester/cljfmt {:mvn/version "0.16.1"}}
-   :main-opts ["-m" "cljfmt.main" "fix" "src" "test" "scripts"]}}}
+   :main-opts ["-m" "cljfmt.main" "fix" "src" "test" "models" "tools"]}}}

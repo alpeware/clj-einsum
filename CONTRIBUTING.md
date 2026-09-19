@@ -27,41 +27,58 @@ someone else's failed experiment:
    resolver) and E19–E20 (gradient predicate invention) are closed: gradients
    learn rankings, not discrete truth. Do not re-litigate them without a new
    mechanism and a written reason the old verdict doesn't apply.
-4. **[AGENT-LOOP.md](AGENT-LOOP.md)** — if your change touches the agent loop,
+4. **[docs/architecture/agent_loop.md](docs/architecture/agent_loop.md)** — if your change touches the agent loop,
    the KB write path, or the reduce.
 
-## The contribution shape
+## The 3-Stage Research Protocol (IETF RFC Model)
 
-Every contribution follows the same loop — it is the project's research loop
-at contribution scale:
+To scale decentralized research across coding agents and human contributors without claim collisions or abandoned gaps, contributions follow the 3-stage lifecycle:
 
-**spec → implement → test → measure → catalog**
+```
+[Stage 1: Proposal PR]  ──>  [Stage 2: Implementation PR]  ──>  [Stage 3: Verification PR]
+ (proposals/<arc>/<slug>/)        (Scaffold & results.edn)           (Independent Replication)
+          │                                  │                                   │
+   Approved Spec                      Merged as UNVERIFIED               eNN Minted -> catalog/
+```
 
-- **Spec.** For experiments: write the spec first, with pre-registered,
-  falsifiable criteria and fair baselines. E24's lesson is now policy: a
-  baseline that differs in prompt, token budget, or compute from the treatment
-  is not a baseline. If you can't state what would falsify your claim, you
-  don't have a claim yet.
-- **Implement.** Narrowly scoped diffs. Stage only the files your change
-  intends; never sweep up unrelated in-flight work. Follow AGENTS.md Rules
-  1–4: generative tests before core logic, pure functions with side effects
-  at the boundary shell, no host-side matrix-math escape hatches.
-- **Test.** `clojure -M:format`, `clojure -M:lint`, and
-  `clojure -M:test -m clj-xla.test-runner` must all pass. Do not ignore
-  linter warnings. New behavior needs tests; new invariants need generative
-  (`test.check`) tests.
-- **Measure.** Ground every number. Label reference-interpreter results,
-  simulations, and compiled on-device measurements as what they are. Report
-  modest numbers as modest. No SOTA claims without evidence. Results are
-  specific to the hardware — say which hardware.
-- **Catalog.** Empirical results get a journey entry in
-  `docs/tensor_logic/empirical_journey.md`. The journey is the changelog that
-  matters here: it is what the next contributor — agent or human — reads
-  before spending compute. **Negative and null results are contributions.**
-  E14–E20's failures shaped this project more than most of its successes. A
-  well-measured dead end, written up honestly, is worth more than an
-  overclaimed win. (E24's first writeup overclaimed; peer review caught it;
-  the correction is in the catalog. That is the system working.)
+### Stage 1: Proposal PR (Descriptive Slugs, No Numbers)
+- Propose new experiments under `proposals/<arc>/<slug>/spec.md` (e.g. `proposals/logic-substrate/takemura-min1/spec.md`).
+- **No `eNN` numbers are assigned at proposal time.** Two agents proposing ideas concurrently cannot collide on a number. Slug collisions surface loudly as git merge conflicts.
+- **RFC Metadata Headers Required**:
+  - `Experiment: <slug>`
+  - `Arc: <arc-name>` (must match an active arc in `catalog/registry.edn`)
+  - `Literature: [<formal paper citations in the DAG>]`
+  - `Hardware-Target: {Reference: "...", Claim-Shape: "..."}`
+  - `Extends:`, `Refutes:`, `Supersedes:`, `Reopens:`
+- **The Split Novelty Gate on Closed Arcs**:
+  - *Mechanical CI Gate*: If targeting an arc marked `CLOSED` in `catalog/registry.edn`, CI automatically fails if the `Reopens:` header is missing.
+  - *Human Maintainer Gate*: The reviewer evaluates whether the rationale presents a genuinely novel mathematical mechanism (rather than re-tuning hyperparameters on a closed line).
+
+### Stage 2: Implementation & Claim PR
+- Contributor merges scaffolding code, tests, and raw output metrics (`results.edn`) into `proposals/<arc>/<slug>/`.
+- **Status in Catalog**: Marked **`ACTIVE (UNVERIFIED)`**.
+- **Taint Propagation**: Any downstream experiment declaring this unverified pod as a dependency inherits the `UNVERIFIED` status until the parent is verified.
+- **Draft Expiry**: Proposals inactive for 90 days are marked `STALE` and archived without consuming an `eNN` number.
+
+### Stage 3: Independent Verification PR (Minting the `eNN` ID)
+- An independent contributor (human or peer agent) replicates the claim on independent silicon.
+- **Hardware-Relative Claim-Shape**: Verification tests do not need identical milliseconds on different GPUs. They verify **claim shape**: e.g., was prefill eliminated ($\ge 50\text{ ms}$ saved)? Was handover negligible ($< 2\text{ ms}$)? Did semantic parity hold ($\ge 90\%$)?
+- **Number Minting**: **Only upon merging Stage 3 does the repository merger permanently mint the next sequential `eNN` ID.** The pod moves to `catalog/<arc>/eNN-<slug>/` and is recorded in `catalog/registry.edn`.
+- *Verification is an independent, credited contribution.* Both the proposer and the verifier receive provenance in the catalog.
+
+## Promotion to the Core Library (`src/`)
+
+Code in experiment pods remains isolated. It is promoted into the core library only under **Mechanical-Sympathy Placement**:
+- **Dense Contractions & Autoregressive Decoding**: Placed 100% in OpenXLA StableHLO MLIR on accelerator device memory (GPU VRAM). Zero host round-trips.
+- **Discrete Index Lookups, Tries & Schema Validation**: Placed on CPU host memory in pure Clojure persistent data structures. The canonical justification is E22: host discrete lookups achieved $42.20\ \mu\text{s}$ vs $691.94\ \mu\text{s}$ on device ($16.4\times$ host advantage).
+- **Core Stays Lean**: The canonical Vaswani (2017) transformer baseline lives in `src/`. Large vehicle architectures (Gemma 4, SmolLM, GPT-2) reside in top-level `models/` on the `:experiments` classpath.
+
+## Testing & CI Invariants
+
+- `clojure -M:format`, `clojure -M:lint`, and `clojure -M:test -m clj-xla.test-runner` must all pass with zero warnings or errors.
+- New behaviors require generative property tests (`clojure.test.check`).
+- Staged diffs must be narrow and single-purpose.
+- All numbers in reports must be grounded to physical hardware. Modest numbers reported as modest. No ungrounded claims.
 
 ## Ground rules
 

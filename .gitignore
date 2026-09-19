@@ -33,6 +33,8 @@ third_party/
 snapshot*.edn
 *.pid
 *.log
+hs_err_*
+paper-experiments/**/dumps/
 
 # Verification dumps
 verification/torch_detailed/
