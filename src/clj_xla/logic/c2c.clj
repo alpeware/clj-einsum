@@ -256,12 +256,13 @@
        "<|turn>model\n"))
 
 (defn format-baseline-b0-prompt
-  "Formats prompt for Cell B0 (Single-Instance Baseline)."
+  "Formats prompt for Cell B0 (Single-Instance Baseline).
+   Uses the same concise problem-solving prompt as the proposer to ensure matched conditions."
   [problem-text]
   (str "<bos><|turn>user\n"
-       SINGLE-SYSTEM-PROMPT "\n\n"
+       PROPOSER-SYSTEM-PROMPT "\n\n"
        "Problem:\n" (str/trim problem-text) "\n\n"
-       "Solve the problem step-by-step and conclude with 'Final Answer: <val>'.<turn|>\n"
+       "Formulate your complete step-by-step reasoning and conclude with 'Final Answer: <val>'.<turn|>\n"
        "<|turn>model\n"))
 
 (defn format-baseline-b1-prompt
@@ -475,12 +476,16 @@
         verifier-ids (extract-instance-tokens final-tokens p2 p-final true)
         verifier-text (str/trim (tok/decode tokenizer verifier-ids))
         combined-text (str draft-text "\n" verifier-text)
-        correct? (or (evaluate-trace verifier-text expected-answer)
-                     (evaluate-trace combined-text expected-answer)
-                     (evaluate-trace draft-text expected-answer))
-        extracted-ans (or (extract-answer verifier-text expected-answer)
+        draft-correct? (evaluate-trace draft-text expected-answer)
+        verifier-correct? (evaluate-trace verifier-text expected-answer)
+        combined-correct? (evaluate-trace combined-text expected-answer)
+        correct? (or verifier-correct? combined-correct? draft-correct?)
+        corrected? (boolean (and (not draft-correct?) (or verifier-correct? combined-correct?)))
+        draft-ans (or (extract-answer draft-text expected-answer) "")
+        verifier-ans (or (extract-answer verifier-text expected-answer) "")
+        extracted-ans (or (when-not (str/blank? verifier-ans) verifier-ans)
                           (extract-answer combined-text expected-answer)
-                          (extract-answer draft-text expected-answer)
+                          draft-ans
                           "")
         total-ms (/ (- t-turn1-end t-turn0-start) 1e6)]
     {:cell :cell-h
@@ -488,6 +493,11 @@
      :expected expected-answer
      :extracted extracted-ans
      :correct? correct?
+     :draft-correct? draft-correct?
+     :verifier-correct? verifier-correct?
+     :corrected? corrected?
+     :draft-ans draft-ans
+     :verifier-ans verifier-ans
      :draft-text draft-text
      :verifier-text verifier-text
      :turn0-ms turn0-ms
@@ -601,12 +611,16 @@
         verifier-ids (extract-instance-tokens b1-final-tokens b1-p-count b1-final-step true)
         verifier-text (str/trim (tok/decode tokenizer verifier-ids))
         combined-text (str draft-text "\n" verifier-text)
-        correct? (or (evaluate-trace verifier-text expected-answer)
-                     (evaluate-trace combined-text expected-answer)
-                     (evaluate-trace draft-text expected-answer))
-        extracted-ans (or (extract-answer verifier-text expected-answer)
+        draft-correct? (evaluate-trace draft-text expected-answer)
+        verifier-correct? (evaluate-trace verifier-text expected-answer)
+        combined-correct? (evaluate-trace combined-text expected-answer)
+        correct? (or verifier-correct? combined-correct? draft-correct?)
+        corrected? (boolean (and (not draft-correct?) (or verifier-correct? combined-correct?)))
+        draft-ans (or (extract-answer draft-text expected-answer) "")
+        verifier-ans (or (extract-answer verifier-text expected-answer) "")
+        extracted-ans (or (when-not (str/blank? verifier-ans) verifier-ans)
                           (extract-answer combined-text expected-answer)
-                          (extract-answer draft-text expected-answer)
+                          draft-ans
                           "")
         total-ms (/ (- t-turn1-end t-turn0-start) 1e6)]
     {:cell :cell-b1
@@ -614,6 +628,11 @@
      :expected expected-answer
      :extracted extracted-ans
      :correct? correct?
+     :draft-correct? draft-correct?
+     :verifier-correct? verifier-correct?
+     :corrected? corrected?
+     :draft-ans draft-ans
+     :verifier-ans verifier-ans
      :draft-text draft-text
      :verifier-text verifier-text
      :turn0-ms turn0-ms
@@ -658,7 +677,7 @@
         prefill-kv (vec (subvec prefill-outs-vec 1))
         _ (xla/destroy-buffer! ctx prefill-logits)
 
-        max-new (long (or max-tokens 200))
+        max-new (long (or max-tokens 520))
         target-max (long (min (- seq-len 1) (+ p-count max-new)))
         loop-res (run-turn-vram-loop! session prefill-kv in-arr p-count target-max seq-len)
         final-step (:final-step loop-res)

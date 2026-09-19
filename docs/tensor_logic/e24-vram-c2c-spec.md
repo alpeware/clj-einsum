@@ -1,4 +1,4 @@
-# E24 — In-VRAM Multi-Instance Handover: Cache-to-Cache (C2C) Semantic Communication Between Gemma 4 Instances
+# E24 — In-VRAM Prefix-Cache Handover: KV-Aligned Homogeneous Instance Handover Between Gemma 4 Instances
 
 Date: 2026-09-18  
 Status: SPEC  
@@ -23,27 +23,25 @@ This text-mediated handover suffers from three major flaws:
 - **Information Bottleneck**: Transforming rich continuous internal representations (KV-cache and hidden activations) into discrete vocabulary tokens destroys soft probability distributions, nuance, and uncertainty margins.
 - **Host Context Churn**: The host CPU is burdened with string concatenation, memory allocations, and parsing at every turn.
 
-Fu et al. (2025) proposed **Cache-to-Cache (C2C)** for heterogeneous models, using a neural projection network to transfer KV-caches directly.
-On Hacker News (#49758615), commentators noted a profound corollary:
+Fu et al. (2025) proposed **Cache-to-Cache (C2C)** for heterogeneous models, using a neural projection network to transfer KV-caches between different architectures.
+On Hacker News (#49758615), commentators noted a profound corollary for homogeneous models:
 > *"What stops us then from producing a model family where all models are 'KV aligned', and each model can utilize the KV cache of other models directly? An 'expensive' reasoning model can use its full faculties to plan, but 'delegate' simple subgoals to a smaller model... with no prefill recompute and no associated 'handover' latency."*
 
-When multiple instances belong to the **same model architecture** (such as $n$ instances of **Gemma 4 E2B**), the opportunity is even cleaner:
+When multiple instances belong to the **same model architecture** (here, $n=2$ instances of **Gemma 4 E2B**), we have the **homogeneous special case**:
 **Their KV-caches and internal representations are 100% natively aligned without needing any learned projection network.**
-
-Because all $n$ instances share the same weights, head dimensions ($d_{\text{head}} = 256/512$), RoPE frequencies, and layer count ($35$ layers), Instance 2 can **directly inherit the VRAM-resident KV-cache and token state of Instance 1**.
+This represents **In-VRAM Prefix-Cache Handover**: Instance 2 directly inherits the VRAM-resident KV-cache buffers and token buffer of Instance 1 by pointer reference, deleting the entire prefix re-prefill step.
 
 ---
 
 ## 2. Experimental Goal
 
-Demonstrate **In-VRAM Multi-Instance Handover** with $n=2$ instances of Gemma 4 E2B executing $m=1$ conversational exchange entirely in GPU VRAM:
+Demonstrate **In-VRAM Prefix-Cache Handover** with $n=2$ instances of Gemma 4 E2B executing $m=1$ conversational exchange entirely in GPU VRAM:
 1. **Single-Prompt Ingress**: The host submits the user prompt to device VRAM once.
 2. **Instance 1 (The Proposer / Drafter)**: Executes autoregressive generation in VRAM via the OpenXLA While-Loop, populating its KV-cache and token buffer.
 3. **In-VRAM Handover ($m=1$)**: Instance 2 (The Critic / Refiner) inherits Instance 1's output state **directly within device memory**:
    - Zero token decode to host text.
    - Zero token re-encode from host text.
-   - Zero re-prefill of Instance 1's generated prefix.
-   - Handover latency $\le 2.0\text{ ms}$ (vs $>80\text{ ms}$ for host-mediated re-prefill).
+   - Zero re-prefill of Instance 1's generated prefix (re-prefill deleted; replacement handover latency $\le 2.0\text{ ms}$ vs $>70\text{ ms}$ for host-mediated re-prefill).
 4. **Instance 2 Execution**: Refines, verifies, and finalizes the solution in VRAM.
 5. **Single-Response Egress**: Only the final verified response is transferred to host memory and returned to the user.
 
@@ -112,9 +110,9 @@ To isolate the causal benefits of in-VRAM communication and multi-instance delib
 
 | Cell | Architecture | Communication Medium | Prefill Behavior | Handover Latency |
 |:---|:---|:---|:---|:---:|
-| **Cell H** | **In-VRAM C2C ($n=2, m=1$)** | **VRAM Only** (Device PjRtBuffers) | Instance 1 prefills $P$; Instance 2 prefills **only delta transition** ($\sim 8$ tokens) | **$\le 2.0\text{ ms}$** |
-| **Cell B1** | **Host-Mediated Text ($n=2, m=1$)** | **Host Text** (D2H $\to$ string $\to$ H2D) | Instance 1 prefills $P$; Instance 2 **re-prefills entire $[P + D]$** from scratch | **$80 - 150\text{ ms}$** |
-| **Cell B0** | **Single-Instance Baseline ($n=1, m=0$)** | **None** (Direct Generation) | Single model pass without verification/deliberation | **N/A** |
+| **Cell H** | **In-VRAM Prefix-Cache ($n=2, m=1$)** | **VRAM Only** (Device PjRtBuffers) | Instance 1 prefills $P$; Instance 2 reuses KV cache directly, prefills **only delta transition** ($\sim 1-6$ tokens) | **$\le 2.0\text{ ms}$** |
+| **Cell B1** | **Host-Mediated Text ($n=2, m=1$)** | **Host Text** (D2H $\to$ string $\to$ H2D) | Instance 1 prefills $P$; Instance 2 **re-prefills entire $[P + D]$** from scratch | **$70 - 150\text{ ms}$** |
+| **Cell B0** | **Single-Instance Baseline ($n=1, m=0$)** | **None** (Direct Generation) | Single model pass without verification/deliberation (matched prompt and token allowance) | **N/A** |
 
 ---
 
@@ -129,11 +127,13 @@ To rigorously evaluate both latency and collaborative accuracy gain, the benchma
 3. **Factual & Relational Verification (10 problems)**:
    Entity attribution and role verification queries evaluated against ground truth.
 
-### Instance Roles:
+### Instance Roles & Prompting:
 - **Instance 1 (Proposer / Drafter)**:
-  `"You are a rigorous problem solver. Formulate a complete step-by-step reasoning draft to solve the problem."`
+  Concise problem solving prompt: `"Solve the following problem step-by-step. Conclude with 'Final Answer: <val>'."`
 - **Instance 2 (Verifier / Refiner)**:
-  `"You are an expert verifier. Inspect the proposed draft, verify each calculation and constraint step, correct any errors, and state the final answer clearly as 'Final Answer: <val>'."`
+  Verification prompt (spliced via transition token or prompt template): Inspect draft, verify calculation, correct errors, and finalize answer.
+- **Cell B0 (Single-Instance Baseline)**:
+  Evaluated under identical concise system prompt and token budget allowance (520 tokens) to eliminate prompt verbosity and budget confounders.
 
 ---
 
@@ -142,11 +142,11 @@ To rigorously evaluate both latency and collaborative accuracy gain, the benchma
 | Criterion | Metric | Target Threshold | Rationale |
 |:---|:---|:---|:---|
 | **1. In-VRAM Handover Latency** | Handover time between Instance 1 and Instance 2 | **$\le 2.0\text{ ms}$** | Proves handover occurs in VRAM without host string serialization or full re-prefill. |
-| **2. Handover Speedup Ratio** | Latency ratio: $\text{Handover}(B1) / \text{Handover}(H)$ | **$\ge 25\times$ Speedup** | Quantifies elimination of host roundtrip and prefill recomputation. |
-| **3. End-to-End Latency Speedup** | Total turn latency: $\text{Latency}(B1) - \text{Latency}(H)$ | **$\ge 50\text{ ms}$ savings** per query turn | Demonstrates user-perceptible latency reduction. |
-| **4. Deliberation Accuracy Gain** | Task accuracy: $\text{Acc}(H) \text{ vs } \text{Acc}(B0)$ | **$\text{Acc}(H) - \text{Acc}(B0) \ge +15.0\%$** | Proves that 2 communicating instances outperform single-instance generation. |
-| **5. C2C Parity** | Output semantic equivalence between Cell H and Cell B1 | **$\ge 90.0\%$ answer agreement** | Validates that VRAM KV-cache transfer preserves full conversational semantics. |
-| **6. VRAM Footprint Invariance** | Weight memory allocated in device VRAM | **$= 4.6\text{ GB}$ (Single Model Footprint)** | Proves $n$ instances share device weights in PJRT memory. |
+| **2. Re-Prefill Elimination Savings** | Latency eliminated: $\text{Handover}(B1) - \text{Handover}(H)$ | **$\ge 50.0\text{ ms}$ eliminated** | Quantifies host re-prefill deletion by reusing resident KV-cache. |
+| **3. End-to-End Latency Speedup** | Total query latency: $\text{Latency}(B1) - \text{Latency}(H)$ | **$\ge 50\text{ ms}$ savings** per query turn | Demonstrates user-perceptible latency reduction from deleted prefill. |
+| **4. Deliberation Accuracy Gain** | Task accuracy: $\text{Acc}(H) \text{ vs } \text{Acc}(B0)$ | **$\text{Acc}(H) - \text{Acc}(B0) \ge +15.0\%$** | Tests whether communicating instances outperform matched single-instance generation. Evaluated alongside decomposed draft-only vs verifier-lift metrics. |
+| **5. C2C Semantic Parity** | Output semantic equivalence between Cell H and Cell B1 | **$\ge 90.0\%$ answer agreement** | Validates that VRAM KV-cache transfer preserves full conversational semantics. |
+| **6. Weight VRAM Invariance** | Weight memory allocated in device VRAM | **$= 4.60\text{ GB}$ (Single Model Footprint)** | Proves $n$ instances share the exact 493 PJRT device weight buffers (0 duplicate weights allocated). |
 
 ---
 
