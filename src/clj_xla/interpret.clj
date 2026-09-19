@@ -637,7 +637,7 @@
 
 (defn- get-at-coords
   "Reads a single float value from tensor at coordinates (without materializing full tensor)."
-  [{:keys [dtype shape data]} coords strides]
+  [{:keys [dtype _shape data]} coords strides]
   (let [flat (coords->flat (long-array coords) strides)]
     (if (instance? MemorySegment data)
       (case dtype

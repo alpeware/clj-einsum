@@ -30,6 +30,9 @@ elif [ "$1" = "e22" ] || [ "$1" = "--e22" ]; then
 elif [ "$1" = "e23" ] || [ "$1" = "--e23" ]; then
   MODE="e23"
   shift
+elif [ "$1" = "e24" ] || [ "$1" = "--e24" ]; then
+  MODE="e24"
+  shift
 fi
 
 if [ "$MODE" = "agent" ]; then
@@ -40,6 +43,8 @@ elif [ "$MODE" = "e22" ]; then
   exec clojure -M:e22 "$@"
 elif [ "$MODE" = "e23" ]; then
   exec clojure -M:e23 "$@"
+elif [ "$MODE" = "e24" ]; then
+  exec clojure -M:e24 "$@"
 else
   exec clojure -M:gemma4 "$@"
 fi

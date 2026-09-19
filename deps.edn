@@ -36,6 +36,9 @@
   :e23
   {:main-opts ["-m" "scripts.e23-reduce"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
+  :e24
+  {:main-opts ["-m" "scripts.e24-vram-c2c"]
+   :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :benchmark
   {:main-opts ["-m" "scripts.benchmark"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx8g"]}

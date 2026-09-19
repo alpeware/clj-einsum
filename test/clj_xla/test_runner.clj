@@ -46,6 +46,7 @@
             [clj-xla.logic.constrained-search-test]
             [clj-xla.logic.kb-test]
             [clj-xla.logic.kb-device-test]
+            [clj-xla.logic.c2c-test]
             [clj-xla.logic.rbac-test]
             [clj-xla.logic.agent.state-tracker-test]
             [clj-xla.logic.agent.swe-benchmark-test]
@@ -137,6 +138,7 @@
                            'clj-xla.logic.constrained-search-test
                            'clj-xla.logic.kb-test
                            'clj-xla.logic.kb-device-test
+                           'clj-xla.logic.c2c-test
                            'clj-xla.logic.rbac-test
                            'clj-xla.logic.agent.state-tracker-test
                            'clj-xla.logic.agent.swe-benchmark-test

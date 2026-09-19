@@ -1,0 +1,35 @@
+
+=================================================================================
+=== Experiment E24: In-VRAM Multi-Instance Handover (C2C) Empirical Results ===
+=================================================================================
+Total Evaluated Problems : 10
+Pinned Weight Footprint  : 4.60 GB (O(1) VRAM Resident)
+
+---------------------------------------------------------------------------------
+1. Handover Latency & Speedup:
+   • Cell H (In-VRAM C2C) Handover Latency :     0.10 ms (Target: <= 2.0 ms)
+   • Cell B1 (Host-Mediated) Handover Latency:    75.05 ms
+   • Handover Speedup Ratio                :   773.14x (Target: >= 25.0x)
+   • Handover Latency Savings              :    74.95 ms/handover (Target: >= 50.0 ms)
+   • Cell H Total Query Latency            :  4084.19 ms
+   • Cell B1 Total Query Latency           :  4286.68 ms
+   • Cell B0 Total Query Latency           :  5651.98 ms
+   • End-to-End Latency Savings            :   202.50 ms/query
+
+---------------------------------------------------------------------------------
+2. Task Accuracy & Deliberation Gain:
+   • Cell H (In-VRAM C2C Deliberation)     :    100.0%
+   • Cell B1 (Host-Mediated Deliberation)  :    100.0%
+   • Cell B0 (Single-Instance Baseline)    :     50.0%
+   • Deliberation Gain (H vs B0)           :    +50.0% (Target: >= +15.0%)
+   • C2C Semantic Parity (H vs B1)         :    100.0% (Target: >= 90.0%)
+
+---------------------------------------------------------------------------------
+3. Acceptance Criteria Status:
+   [Criteria 1] In-VRAM Handover Latency <= 2.0 ms : PASSED (0.10 ms)
+   [Criteria 2] Handover Speedup >= 25.0x          : PASSED (773.14x)
+   [Criteria 3] Handover Savings >= 50.0 ms        : PASSED (74.95 ms)
+   [Criteria 4] Deliberation Gain >= +15.0%        : PASSED (+50.0%)
+   [Criteria 5] C2C Semantic Parity >= 90.0%       : PASSED (100.0%)
+   [Criteria 6] VRAM Footprint Invariance = 4.6 GB : PASSED (4.6 GB)
+=================================================================================

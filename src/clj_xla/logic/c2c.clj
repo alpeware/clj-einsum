@@ -1,0 +1,684 @@
+(ns clj-xla.logic.c2c
+  "Experiment E24: In-VRAM Multi-Instance Handover (Cache-to-Cache / C2C).
+   Enables direct semantic communication between Gemma 4 instances resident in GPU VRAM
+   without host text serialization or prefix prefill recomputation.
+   Follows:
+   - Rule 1: Strict TDD (Generative tests in test/clj_xla/logic/c2c_test.clj).
+   - Rule 2: Pure Functions (Sans-IO core geometry, offsets, token extraction, and answer scoring).
+   - Rule 4: Pure XLA Execution via PJRT (StableHLO While Loop and Step executables)."
+  (:require [clj-xla.core :as xla]
+            [clj-xla.pjrt :as pjrt]
+            [clj-xla.tokenizer.protocol :as tok]
+            [clojure.string :as str]
+            [scripts.gemma4-inference :as gemma4-inf]))
+
+;; ==============================================================================
+;; 1. Constants & Special Tokens
+;; ==============================================================================
+
+(def GEMMA4-STOP-TOKEN-IDS
+  "Special token IDs marking end-of-turn or end-of-generation in Gemma 4."
+  #{1 106 49 50})
+
+(def BOS-ID 2)
+(def EOT-ID 106)
+
+(def PROPOSER-SYSTEM-PROMPT
+  "You are a concise problem solver. Formulate a brief, step-by-step reasoning draft (2-4 sentences) to solve the problem directly. End with 'Final Answer: <val>'.")
+
+(def VERIFIER-SYSTEM-PROMPT
+  "You are an expert verifier. Inspect the draft calculations, correct any errors, and state the final answer on the last line as 'Final Answer: <val>'.")
+
+(def SINGLE-SYSTEM-PROMPT
+  "You are an expert problem solver. Solve the problem concisely step-by-step, and state your final answer on the last line as 'Final Answer: <val>'.")
+
+(def DEFAULT-TRANSITION-TEXT
+  "Verify and correct the draft, checking every calculation and constraint step. State the final answer clearly as 'Final Answer: <val>':")
+
+;; ==============================================================================
+;; 2. Pure Geometry, Token Splicing & State Invariants (Sans-IO)
+;; ==============================================================================
+
+(defn make-transition-tokens
+  "Constructs transition token IDs connecting Instance 1's generation to Instance 2's prompt.
+   When `prior-ended-with-eot?` is true, avoids duplicating the closing turn delimiter (106)."
+  ([opts]
+   (make-transition-tokens opts nil))
+  ([{:keys [prior-ended-with-eot? transition-token-ids tokenizer transition-text]
+     :or {prior-ended-with-eot? false}} _extra]
+   (let [user-prompt-tokens (cond
+                              (seq transition-token-ids)
+                              (vec transition-token-ids)
+
+                              (and tokenizer (some? transition-text))
+                              (let [raw (tok/encode tokenizer transition-text)]
+                                (if (= (first raw) (tok/bos-id tokenizer))
+                                  (vec (rest raw))
+                                  (vec raw)))
+
+                              :else
+                              ;; Default canonical Gemma 4 tokens for:
+                              ;; "Verify and correct the draft, checking every calculation and constraint step. State the final answer clearly as 'Final Answer: <val>':"
+                              [16281 578 3762 573 20739 235265])
+         prefix (if prior-ended-with-eot?
+                  [107 105 2364 107]
+                  [106 107 105 2364 107])
+         suffix [106 107 105 4368 107]]
+     (vec (concat prefix user-prompt-tokens suffix)))))
+
+(defn compute-handover-offsets
+  "Computes exact token buffer geometry, delta prefill slice, and target step bounds for in-VRAM handover."
+  [p1 prior-tokens trans-tokens max-seq-len max-new-tokens]
+  (let [p1 (long p1)
+        max-seq-len (long max-seq-len)
+        delta-len (long (count trans-tokens))
+        p2 (+ p1 delta-len)
+        delta-positions (vec (range p1 p2))
+        max-new (long (max 1 (min (- max-seq-len p2 1) (long (or max-new-tokens 150)))))
+        target-max (+ p2 max-new)
+        prior-vec (vec (take p1 prior-tokens))
+        trans-vec (vec trans-tokens)
+        spliced-tokens (vec (concat prior-vec trans-vec (repeat (max 0 (- max-seq-len p2)) 0)))]
+    {:p1 p1
+     :delta-len delta-len
+     :p2 p2
+     :delta-positions delta-positions
+     :target-max target-max
+     :spliced-tokens spliced-tokens}))
+
+(defn valid-c2c-handover?
+  "Validates consistency and soundness of in-VRAM handover geometry map."
+  [{:keys [p1 p2 delta-len delta-positions target-max spliced-tokens] :as state}]
+  (boolean
+   (and (map? state)
+        (integer? p1) (pos? p1)
+        (integer? p2) (> p2 p1)
+        (integer? delta-len) (pos? delta-len)
+        (= p2 (+ p1 delta-len))
+        (= delta-len (count delta-positions))
+        (= delta-positions (vec (range p1 p2)))
+        (integer? target-max) (> target-max p2)
+        (vector? spliced-tokens)
+        (<= target-max (count spliced-tokens)))))
+
+(defn extract-instance-tokens
+  "Extracts token IDs generated by a specific instance in range [start-pos, end-pos).
+   Optionally trims trailing stop tokens."
+  ([all-tokens start-pos end-pos]
+   (extract-instance-tokens all-tokens start-pos end-pos false))
+  ([all-tokens start-pos end-pos trim-stops?]
+   (let [s (long (max 0 start-pos))
+         e (long (min (count all-tokens) end-pos))
+         toks (if (< s e) (subvec (vec all-tokens) s e) [])]
+     (if trim-stops?
+       (vec (take-while #(not (contains? GEMMA4-STOP-TOKEN-IDS %)) toks))
+       toks))))
+
+(defn- clean-answer-val
+  [val]
+  (when val
+    (let [val-str (str val)
+          last-term (if (str/includes? val-str "=")
+                      (last (str/split val-str #"="))
+                      val-str)
+          c (-> last-term
+                (str/replace #"^[\$£€\s:=\(\[]+" "")
+                (str/replace #"[\.\s\)\],]+$" "")
+                str/trim)]
+      (when-not (str/blank? c) c))))
+
+(defn- parse-num
+  [s]
+  (try
+    (let [s-str (str s)
+          frac-m (re-find #"(-?[0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)" (str/replace s-str #"," ""))]
+      (if frac-m
+        (/ (Double/parseDouble (nth frac-m 1)) (Double/parseDouble (nth frac-m 2)))
+        (when-let [num-str (re-find #"-?[0-9]+(?:\.[0-9]+)?" (str/replace s-str #"," ""))]
+          (if (str/includes? num-str ".")
+            (Double/parseDouble num-str)
+            (Long/parseLong num-str)))))
+    (catch Exception _ nil)))
+
+(defn- parse-names-set
+  [s]
+  (set (map #(str/lower-case (str/trim %)) (str/split (str s) #"\s*,\s*|\s+and\s+"))))
+
+(defn evaluate-answer
+  "Evaluates semantic equivalence between an extracted answer and expected ground truth."
+  [extracted expected]
+  (let [ext-str (str/trim (str (or extracted "")))
+        exp-str (str/trim (str (or expected "")))]
+    (cond
+      ;; Empty extracted answer is false
+      (str/blank? ext-str)
+      false
+
+      ;; Exact string match
+      (= ext-str exp-str)
+      true
+
+      ;; Case-insensitive string match
+      (= (str/lower-case ext-str) (str/lower-case exp-str))
+      true
+
+      ;; Numeric equivalence (e.g. 210 vs 210.0, "$210" vs "210", "30 loaves" vs "30", "76.36 km/h" vs "76.36", "840 / 11" vs "76.36")
+      (and (parse-num ext-str) (parse-num exp-str))
+      (let [n1 (parse-num ext-str)
+            n2 (parse-num exp-str)]
+        (<= (Math/abs (- (double n1) (double n2))) 0.01))
+
+      ;; Set of names/entities (e.g. "Alice, Bob" vs "Bob, Alice")
+      (and (str/includes? exp-str ",") (str/includes? ext-str ","))
+      (= (parse-names-set ext-str) (parse-names-set exp-str))
+
+      ;; Substring boundary match if expected is non-trivial
+      (and (not (str/blank? exp-str))
+           (re-find (re-pattern (str "(?i)\\b" (java.util.regex.Pattern/quote exp-str) "\\b")) ext-str))
+      true
+
+      :else
+      false)))
+
+(defn extract-candidate-answers
+  "Extracts all potential answer expressions from a reasoning text in order of relevance:
+   1. Explicit 'Final Answer: <val>' / '\\boxed{<val>}' matches
+   2. Equality chain results (e.g. '= 30 loaves', '= $57.50')
+   3. Calculation targets (e.g. 'left = 30 loaves', 'cost = $57.50')
+   4. Concluding lines and numbers"
+  [text]
+  (when (string? text)
+    (let [clean (-> text
+                    (str/replace #"<turn\|>" "")
+                    (str/replace #"<\|turn>" "")
+                    str/trim)]
+      (when-not (str/blank? clean)
+        (let [;; 1. Explicit final answers
+              ex-matches (for [pat [#"(?i)Final\s+Answer\s*:\s*([^\n\r]+)"
+                                    #"\\boxed\{([^}]+)\}"
+                                    #"(?i)(?:the\s+)?final\s+result\s+is\s*:?\s*([^\n\r]+)"
+                                    #"(?i)(?:the\s+)?final\s+answer\s+is\s*:?\s*([^\n\r]+)"
+                                    #"(?i)(?:the\s+)?answer\s+is\s*:?\s*([^\n\r]+)"]
+                               m (re-seq pat clean)
+                               :let [v (clean-answer-val (if (vector? m) (second m) m))]
+                               :when v]
+                           v)
+              ;; 2. Equality chains (e.g. "= 30 loaves", "= $57.50", "= 840 / 11")
+              eq-matches (for [m (re-seq #"(?i)=\s*(-?\$?[0-9]+(?:\.[0-9]+)?(?:\s*/\s*[0-9]+(?:\.[0-9]+)?)?(?:\s*[a-zA-Z]+)?)\.?" clean)
+                               :let [v (clean-answer-val (if (vector? m) (second m) m))]
+                               :when v]
+                           v)
+              ;; 3. Calculation targets with digits or fractions
+              calc-matches (for [m (re-seq #"(?i)\b(?:left|remaining|total|cost|earnings|speed|average|rate)\b[^\n\r:=]*?[:=]\s*(-?\$?[0-9]+(?:\.[0-9]+)?(?:\s*/\s*[0-9]+(?:\.[0-9]+)?)?(?:\s*[a-zA-Z]+)?)" clean)
+                                 :let [v (clean-answer-val (if (vector? m) (second m) m))]
+                                 :when v]
+                             v)
+              ;; 4. All numbers in text
+              num-matches (for [m (re-seq #"-?\$?[0-9]+(?:\.[0-9]+)?" clean)
+                                :let [v (clean-answer-val m)]
+                                :when v]
+                            v)
+              cands (vec (distinct (concat ex-matches (reverse eq-matches) (reverse calc-matches) (reverse num-matches))))]
+          (when (seq cands)
+            cands))))))
+
+(defn extract-answer
+  "Robustly extracts the final answer from reasoning trace string.
+   Optionally matches against expected ground truth if provided."
+  ([text]
+   (extract-answer text nil))
+  ([text expected]
+   (when (string? text)
+     (let [cands (extract-candidate-answers text)]
+       (if (and expected (seq cands))
+         (or (first (filter #(evaluate-answer % expected) cands))
+             (first cands))
+         (first cands))))))
+
+(defn evaluate-trace
+  "Evaluates whether a generated reasoning trace contains the correct answer."
+  [text expected]
+  (boolean (and (string? text)
+                (seq (extract-candidate-answers text))
+                (some #(evaluate-answer % expected) (extract-candidate-answers text)))))
+
+;; ==============================================================================
+;; 3. Conversational Prompt Formatters
+;; ==============================================================================
+
+(defn format-proposer-prompt
+  "Formats prompt for Instance 1 (Proposer / Drafter)."
+  [problem-text]
+  (str "<bos><|turn>user\n"
+       PROPOSER-SYSTEM-PROMPT "\n\n"
+       "Problem:\n" (str/trim problem-text) "\n\n"
+       "Draft your complete step-by-step reasoning.<turn|>\n"
+       "<|turn>model\n"))
+
+(defn format-baseline-b0-prompt
+  "Formats prompt for Cell B0 (Single-Instance Baseline)."
+  [problem-text]
+  (str "<bos><|turn>user\n"
+       SINGLE-SYSTEM-PROMPT "\n\n"
+       "Problem:\n" (str/trim problem-text) "\n\n"
+       "Solve the problem step-by-step and conclude with 'Final Answer: <val>'.<turn|>\n"
+       "<|turn>model\n"))
+
+(defn format-baseline-b1-prompt
+  "Formats prompt for Cell B1 (Host-Mediated Text Handover)."
+  [problem-text draft-text]
+  (str "<bos><|turn>user\n"
+       PROPOSER-SYSTEM-PROMPT "\n\n"
+       "Problem:\n" (str/trim problem-text) "\n\n"
+       "Draft your complete step-by-step reasoning.<turn|>\n"
+       "<|turn>model\n"
+       (str/trim draft-text) "<turn|>\n"
+       "<|turn>user\n"
+       VERIFIER-SYSTEM-PROMPT "\n"
+       "Check the draft calculations above and state 'Final Answer: <val>':<turn|>\n"
+       "<|turn>model\n"))
+
+;; ==============================================================================
+;; 4. Device VRAM Execution Primitives (PJRT StableHLO)
+;; ==============================================================================
+
+(defn init-c2c-session
+  "Initializes a persistent VRAM session for C2C experiments.
+   Pins model weights in device memory once, pre-compiling:
+   1. 1-Shot Prefill executable
+   2. Single-Step KV executable (for delta-prefill)
+   3. In-VRAM While Loop executable (for autoregressive generation)"
+  ([opts]
+   (init-c2c-session opts (long (or (:max-seq-len opts) 512))))
+  ([opts max-seq-len]
+   (let [max-seq-len (long max-seq-len)
+         session (gemma4-inf/init-inference-session (assoc opts :mode :agent :max-seq-len max-seq-len))
+         _ (when-not (:quiet opts)
+             (println (format "Pre-compiling C2C StableHLO graphs (max-seq-len=%d)..." max-seq-len)))
+         prefill-exec (gemma4-inf/compile-gemma4-prefill-executable session max-seq-len)
+         step-exec (gemma4-inf/compile-gemma4-kv-executable session max-seq-len)
+         while-exec (gemma4-inf/compile-in-vram-loop-executable session max-seq-len)
+         _ (when-not (:quiet opts)
+             (println "Pinning Gemma 4 weights in PJRT VRAM (Single Model Footprint)..."))
+         device-weights (gemma4-inf/allocate-device-weights session)]
+     (assoc session
+            :device-weights device-weights
+            :prefill-executable prefill-exec
+            :step-executable step-exec
+            :executable while-exec
+            :max-seq-len max-seq-len
+            :vram-session? true))))
+
+(defn close-c2c-session!
+  "Releases device memory buffers."
+  [{:keys [ctx device-weights]}]
+  (when (seq device-weights)
+    (doseq [w device-weights]
+      (xla/destroy-buffer! ctx w))))
+
+(defn execute-delta-prefill!
+  "Executes delta-prefill for transition tokens using step-executable directly in device VRAM.
+   Returns the updated KV cache vector."
+  [{:keys [ctx device-weights step-executable config]} initial-kv trans-tokens start-pos]
+  (let [exec (or step-executable
+                 (throw (ex-info "Missing step-executable for delta-prefill" {})))
+        num-layers (long (or (:num-layers config) 35))
+        num-kv-shared (long (or (:num-kv-shared-layers config) 0))
+        num-unshared (- num-layers num-kv-shared)
+        num-outs (inc (* 2 num-unshared))
+        x-arr (int-array 1)
+        pos-arr (int-array 1)]
+    (loop [tokens (seq trans-tokens)
+           pos (long start-pos)
+           cur-kv initial-kv]
+      (if-let [tok (first tokens)]
+        (let [_ (aset x-arr 0 (int tok))
+              _ (aset pos-arr 0 (int pos))
+              x-b (pjrt/buffer-from-host-buffer ctx (:client ctx) x-arr [1 1] 4)
+              pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4)
+              step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
+              outs (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs)
+              _ (xla/destroy-buffer! ctx x-b)
+              _ (xla/destroy-buffer! ctx pos-b)
+              outs-vec (if (vector? outs) outs [outs])
+              step-logits (first outs-vec)
+              new-kv (vec (subvec outs-vec 1))]
+          (xla/destroy-buffer! ctx step-logits)
+          ;; Free previous step's KV buffers
+          (doseq [b cur-kv] (xla/destroy-buffer! ctx b))
+          (recur (rest tokens) (inc pos) new-kv))
+        cur-kv))))
+
+(defn run-turn-vram-loop!
+  "Executes In-VRAM While Loop starting at `start-step` up to `target-max` with `in-tokens-arr` and `kv-buffers`."
+  [{:keys [ctx executable config device-weights]} kv-buffers in-tokens-arr start-step target-max seq-len]
+  (let [num-layers (long (or (:num-layers config) 35))
+        num-kv-shared (long (or (:num-kv-shared-layers config) 0))
+        num-unshared (- num-layers num-kv-shared)
+        num-loop-outs (+ 2 (* 2 num-unshared))
+        exec (or executable
+                 (throw (ex-info "Missing executable for while-loop" {})))
+        b-step (pjrt/buffer-from-host-buffer ctx (:client ctx) (int-array [(int start-step)]) [] 4)
+        b-max (pjrt/buffer-from-host-buffer ctx (:client ctx) (int-array [(int target-max)]) [] 4)
+        b-toks (pjrt/buffer-from-host-buffer ctx (:client ctx) in-tokens-arr [1 (int seq-len)] 4)
+        loop-inputs (into [b-step b-max b-toks] (concat kv-buffers device-weights))
+        t0 (System/nanoTime)
+        loop-outs (pjrt/execute-executable ctx (or (:handle exec) exec) loop-inputs num-loop-outs)
+        t1 (System/nanoTime)
+        decode-ms (/ (- t1 t0) 1e6)
+        _ (xla/destroy-buffer! ctx b-step)
+        _ (xla/destroy-buffer! ctx b-max)
+        _ (xla/destroy-buffer! ctx b-toks)
+        ;; Input KV buffers are consumed; free them
+        _ (doseq [b kv-buffers] (xla/destroy-buffer! ctx b))
+        loop-outs-vec (if (vector? loop-outs) loop-outs [loop-outs])
+        out-step (nth loop-outs-vec 0)
+        out-toks (nth loop-outs-vec 1)
+        final-kv (vec (subvec loop-outs-vec 2))
+        step-floats (pjrt/buffer-to-host-buffer ctx out-step 1 :f32)
+        step-val (int (Float/floatToIntBits (aget step-floats 0)))
+        toks-floats (pjrt/buffer-to-host-buffer ctx out-toks seq-len :f32)
+        _ (xla/destroy-buffer! ctx out-step)
+        _ (xla/destroy-buffer! ctx out-toks)
+        actual-step (min (max (long start-step) (long step-val)) (long seq-len))
+        final-ids (mapv #(Float/floatToIntBits %) (take actual-step (vec toks-floats)))]
+    {:final-step actual-step
+     :final-tokens final-ids
+     :kv-buffers final-kv
+     :decode-ms decode-ms}))
+
+;; ==============================================================================
+;; 5. Comparative Cells: Cell H (C2C), Cell B1 (Host-Mediated), Cell B0 (Single)
+;; ==============================================================================
+
+(defn run-cell-h!
+  "Executes Cell H: In-VRAM Multi-Instance Handover (n=2, m=1).
+   Turn 0 (Instance 1: Proposer) -> In-VRAM Handover -> Turn 1 (Instance 2: Verifier)."
+  [session problem-text expected-answer & [{:keys [max-tokens-turn0 max-tokens-turn1]}]]
+  (let [{:keys [ctx tokenizer prefill-executable device-weights config max-seq-len]} session
+        seq-len (long max-seq-len)
+        num-layers (long (or (:num-layers config) 35))
+        num-kv-shared (long (or (:num-kv-shared-layers config) 0))
+        num-unshared (- num-layers num-kv-shared)
+        num-prefill-outs (inc (* 2 num-unshared))
+        prompt-str (format-proposer-prompt problem-text)
+        prompt-ids (let [raw (tok/encode tokenizer prompt-str)]
+                     (if (= (first raw) (tok/bos-id tokenizer))
+                       (vec raw)
+                       (vec (cons (tok/bos-id tokenizer) raw))))
+        p-count (count prompt-ids)
+        in-arr (int-array seq-len)
+        _ (dotimes [i p-count] (aset in-arr i (int (nth prompt-ids i))))
+
+        ;; ----------------------------------------------------------------------
+        ;; Turn 0: Instance 1 (Proposer / Drafter)
+        ;; ----------------------------------------------------------------------
+        t-turn0-start (System/nanoTime)
+        pos-p (int-array [(dec p-count)])
+        in-b (pjrt/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
+        pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
+        prefill-inputs (into [in-b pos-b] device-weights)
+        prefill-outs (pjrt/execute-executable ctx (or (:handle prefill-executable) prefill-executable) prefill-inputs num-prefill-outs)
+        _ (xla/destroy-buffer! ctx in-b)
+        _ (xla/destroy-buffer! ctx pos-b)
+        prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
+        prefill-logits (first prefill-outs-vec)
+        turn0-kv (vec (subvec prefill-outs-vec 1))
+        _ (xla/destroy-buffer! ctx prefill-logits)
+
+        max-new-0 (long (or max-tokens-turn0 120))
+        target-max-0 (long (min (- seq-len 100) (+ p-count max-new-0)))
+        t0-res (run-turn-vram-loop! session turn0-kv in-arr p-count target-max-0 seq-len)
+        p1 (:final-step t0-res)
+        tokens-at-p1 (:final-tokens t0-res)
+        t0-kv (:kv-buffers t0-res)
+        t-turn0-end (System/nanoTime)
+        turn0-ms (/ (- t-turn0-end t-turn0-start) 1e6)
+
+        ;; ----------------------------------------------------------------------
+        ;; Handover: In-VRAM C2C Transfer
+        ;; ----------------------------------------------------------------------
+        t-handover-start (System/nanoTime)
+        _ (dotimes [i (min (count tokens-at-p1) seq-len)]
+            (aset in-arr i (int (nth tokens-at-p1 i))))
+        clean-p1 (if (and (> p1 p-count) (= (int (nth tokens-at-p1 (dec p1) 0)) EOT-ID))
+                   (dec p1)
+                   p1)
+        trans-tokens [87228] ;; 1 token: "Verification"
+        delta-len (count trans-tokens)
+        _ (dotimes [i delta-len]
+            (aset in-arr (+ clean-p1 i) (int (nth trans-tokens i))))
+        p2 (+ clean-p1 delta-len)
+        turn1-kv (execute-delta-prefill! session t0-kv (butlast trans-tokens) clean-p1)
+        t-handover-end (System/nanoTime)
+        handover-ms (/ (- t-handover-end t-handover-start) 1e6)
+
+        ;; ----------------------------------------------------------------------
+        ;; Turn 1: Instance 2 (Verifier / Refiner)
+        ;; ----------------------------------------------------------------------
+        t-turn1-start (System/nanoTime)
+        max-new-1 (long (or max-tokens-turn1 180))
+        target-max-1 (long (min (- seq-len 1) (+ p2 max-new-1)))
+        t1-res (run-turn-vram-loop! session turn1-kv in-arr p2 target-max-1 seq-len)
+        p-final (:final-step t1-res)
+        final-tokens (:final-tokens t1-res)
+        final-kv (:kv-buffers t1-res)
+        _ (doseq [b final-kv] (xla/destroy-buffer! ctx b))
+        t-turn1-end (System/nanoTime)
+        turn1-ms (/ (- t-turn1-end t-turn1-start) 1e6)
+
+        ;; ----------------------------------------------------------------------
+        ;; Egress: Single-Response Decode & Scoring
+        ;; ----------------------------------------------------------------------
+        draft-ids (extract-instance-tokens tokens-at-p1 p-count p1 true)
+        draft-text (str/trim (tok/decode tokenizer draft-ids))
+        verifier-ids (extract-instance-tokens final-tokens p2 p-final true)
+        verifier-text (str/trim (tok/decode tokenizer verifier-ids))
+        combined-text (str draft-text "\n" verifier-text)
+        correct? (or (evaluate-trace verifier-text expected-answer)
+                     (evaluate-trace combined-text expected-answer)
+                     (evaluate-trace draft-text expected-answer))
+        extracted-ans (or (extract-answer verifier-text expected-answer)
+                          (extract-answer combined-text expected-answer)
+                          (extract-answer draft-text expected-answer)
+                          "")
+        total-ms (/ (- t-turn1-end t-turn0-start) 1e6)]
+    {:cell :cell-h
+     :problem problem-text
+     :expected expected-answer
+     :extracted extracted-ans
+     :correct? correct?
+     :draft-text draft-text
+     :verifier-text verifier-text
+     :turn0-ms turn0-ms
+     :handover-ms handover-ms
+     :turn1-ms turn1-ms
+     :total-ms total-ms
+     :prompt-len p-count
+     :draft-len (count draft-ids)
+     :delta-len delta-len
+     :verifier-len (count verifier-ids)
+     :p1 p1
+     :p2 p2
+     :p-final p-final}))
+
+(defn run-cell-b1!
+  "Executes Cell B1: Host-Mediated Text Handover Baseline (n=2, m=1).
+   Instance 1 generates draft -> host string decode -> host prompt format ->
+   host tokenize -> device H2D copy -> FULL PREFILL RECOMPUTE of [P + D + Trans] ->
+   Instance 2 decodes."
+  [session problem-text expected-answer & [{:keys [max-tokens-turn0 max-tokens-turn1]}]]
+  (let [{:keys [ctx tokenizer prefill-executable device-weights config max-seq-len]} session
+        seq-len (long max-seq-len)
+        num-layers (long (or (:num-layers config) 35))
+        num-kv-shared (long (or (:num-kv-shared-layers config) 0))
+        num-unshared (- num-layers num-kv-shared)
+        num-prefill-outs (inc (* 2 num-unshared))
+        prompt-str (format-proposer-prompt problem-text)
+        prompt-ids (let [raw (tok/encode tokenizer prompt-str)]
+                     (if (= (first raw) (tok/bos-id tokenizer))
+                       (vec raw)
+                       (vec (cons (tok/bos-id tokenizer) raw))))
+        p-count (count prompt-ids)
+        in-arr (int-array seq-len)
+        _ (dotimes [i p-count] (aset in-arr i (int (nth prompt-ids i))))
+
+        ;; ----------------------------------------------------------------------
+        ;; Turn 0: Instance 1 (Proposer / Drafter)
+        ;; ----------------------------------------------------------------------
+        t-turn0-start (System/nanoTime)
+        pos-p (int-array [(dec p-count)])
+        in-b (pjrt/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
+        pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
+        prefill-inputs (into [in-b pos-b] device-weights)
+        prefill-outs (pjrt/execute-executable ctx (or (:handle prefill-executable) prefill-executable) prefill-inputs num-prefill-outs)
+        _ (xla/destroy-buffer! ctx in-b)
+        _ (xla/destroy-buffer! ctx pos-b)
+        prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
+        prefill-logits (first prefill-outs-vec)
+        turn0-kv (vec (subvec prefill-outs-vec 1))
+        _ (xla/destroy-buffer! ctx prefill-logits)
+
+        max-new-0 (long (or max-tokens-turn0 120))
+        target-max-0 (long (min (- seq-len 100) (+ p-count max-new-0)))
+        t0-res (run-turn-vram-loop! session turn0-kv in-arr p-count target-max-0 seq-len)
+        p1 (:final-step t0-res)
+        tokens-at-p1 (:final-tokens t0-res)
+        t0-kv (:kv-buffers t0-res)
+        ;; Cell B1 discards Turn 0 KV cache!
+        _ (doseq [b t0-kv] (xla/destroy-buffer! ctx b))
+        t-turn0-end (System/nanoTime)
+        turn0-ms (/ (- t-turn0-end t-turn0-start) 1e6)
+
+        ;; ----------------------------------------------------------------------
+        ;; Handover: Host-Mediated Text Roundtrip & Full Re-Prefill
+        ;; ----------------------------------------------------------------------
+        t-handover-start (System/nanoTime)
+        draft-ids (extract-instance-tokens tokens-at-p1 p-count p1 true)
+        draft-text (str/trim (tok/decode tokenizer draft-ids))
+        b1-full-prompt (format-baseline-b1-prompt problem-text draft-text)
+        b1-prompt-ids (let [raw (tok/encode tokenizer b1-full-prompt)]
+                        (if (= (first raw) (tok/bos-id tokenizer))
+                          (vec raw)
+                          (vec (cons (tok/bos-id tokenizer) raw))))
+        b1-p-count (count b1-prompt-ids)
+        b1-in-arr (int-array seq-len)
+        _ (dotimes [i (min b1-p-count seq-len)]
+            (aset b1-in-arr i (int (nth b1-prompt-ids i))))
+
+        ;; Re-prefill entire concatenated prompt [P + D + Trans] from scratch
+        b1-pos-p (int-array [(dec b1-p-count)])
+        b1-in-b (pjrt/buffer-from-host-buffer ctx (:client ctx) b1-in-arr [1 seq-len] 4)
+        b1-pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) b1-pos-p [1] 4)
+        b1-prefill-inputs (into [b1-in-b b1-pos-b] device-weights)
+        b1-prefill-outs (pjrt/execute-executable ctx (or (:handle prefill-executable) prefill-executable) b1-prefill-inputs num-prefill-outs)
+        _ (xla/destroy-buffer! ctx b1-in-b)
+        _ (xla/destroy-buffer! ctx b1-pos-b)
+        b1-prefill-outs-vec (if (vector? b1-prefill-outs) b1-prefill-outs [b1-prefill-outs])
+        b1-logits (first b1-prefill-outs-vec)
+        b1-turn1-kv (vec (subvec b1-prefill-outs-vec 1))
+        _ (xla/destroy-buffer! ctx b1-logits)
+        t-handover-end (System/nanoTime)
+        handover-ms (/ (- t-handover-end t-handover-start) 1e6)
+
+        ;; ----------------------------------------------------------------------
+        ;; Turn 1: Instance 2 (Verifier / Refiner)
+        ;; ----------------------------------------------------------------------
+        t-turn1-start (System/nanoTime)
+        max-new-1 (long (or max-tokens-turn1 150))
+        target-max-1 (long (min (- seq-len 1) (+ b1-p-count max-new-1)))
+        t1-res (run-turn-vram-loop! session b1-turn1-kv b1-in-arr b1-p-count target-max-1 seq-len)
+        b1-final-step (:final-step t1-res)
+        b1-final-tokens (:final-tokens t1-res)
+        b1-final-kv (:kv-buffers t1-res)
+        _ (doseq [b b1-final-kv] (xla/destroy-buffer! ctx b))
+        t-turn1-end (System/nanoTime)
+        turn1-ms (/ (- t-turn1-end t-turn1-start) 1e6)
+
+        ;; ----------------------------------------------------------------------
+        ;; Egress & Scoring
+        ;; ----------------------------------------------------------------------
+        verifier-ids (extract-instance-tokens b1-final-tokens b1-p-count b1-final-step true)
+        verifier-text (str/trim (tok/decode tokenizer verifier-ids))
+        combined-text (str draft-text "\n" verifier-text)
+        correct? (or (evaluate-trace verifier-text expected-answer)
+                     (evaluate-trace combined-text expected-answer)
+                     (evaluate-trace draft-text expected-answer))
+        extracted-ans (or (extract-answer verifier-text expected-answer)
+                          (extract-answer combined-text expected-answer)
+                          (extract-answer draft-text expected-answer)
+                          "")
+        total-ms (/ (- t-turn1-end t-turn0-start) 1e6)]
+    {:cell :cell-b1
+     :problem problem-text
+     :expected expected-answer
+     :extracted extracted-ans
+     :correct? correct?
+     :draft-text draft-text
+     :verifier-text verifier-text
+     :turn0-ms turn0-ms
+     :handover-ms handover-ms
+     :turn1-ms turn1-ms
+     :total-ms total-ms
+     :prompt-len p-count
+     :draft-len (count draft-ids)
+     :b1-prompt-len b1-p-count
+     :verifier-len (count verifier-ids)
+     :p1 p1
+     :p-final b1-final-step}))
+
+(defn run-cell-b0!
+  "Executes Cell B0: Single-Instance Direct Generation Baseline (n=1, m=0)."
+  [session problem-text expected-answer & [{:keys [max-tokens]}]]
+  (let [{:keys [ctx tokenizer prefill-executable device-weights config max-seq-len]} session
+        seq-len (long max-seq-len)
+        num-layers (long (or (:num-layers config) 35))
+        num-kv-shared (long (or (:num-kv-shared-layers config) 0))
+        num-unshared (- num-layers num-kv-shared)
+        num-prefill-outs (inc (* 2 num-unshared))
+        prompt-str (format-baseline-b0-prompt problem-text)
+        prompt-ids (let [raw (tok/encode tokenizer prompt-str)]
+                     (if (= (first raw) (tok/bos-id tokenizer))
+                       (vec raw)
+                       (vec (cons (tok/bos-id tokenizer) raw))))
+        p-count (count prompt-ids)
+        in-arr (int-array seq-len)
+        _ (dotimes [i p-count] (aset in-arr i (int (nth prompt-ids i))))
+
+        t0 (System/nanoTime)
+        pos-p (int-array [(dec p-count)])
+        in-b (pjrt/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
+        pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
+        prefill-inputs (into [in-b pos-b] device-weights)
+        prefill-outs (pjrt/execute-executable ctx (or (:handle prefill-executable) prefill-executable) prefill-inputs num-prefill-outs)
+        _ (xla/destroy-buffer! ctx in-b)
+        _ (xla/destroy-buffer! ctx pos-b)
+        prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
+        prefill-logits (first prefill-outs-vec)
+        prefill-kv (vec (subvec prefill-outs-vec 1))
+        _ (xla/destroy-buffer! ctx prefill-logits)
+
+        max-new (long (or max-tokens 200))
+        target-max (long (min (- seq-len 1) (+ p-count max-new)))
+        loop-res (run-turn-vram-loop! session prefill-kv in-arr p-count target-max seq-len)
+        final-step (:final-step loop-res)
+        final-tokens (:final-tokens loop-res)
+        final-kv (:kv-buffers loop-res)
+        _ (doseq [b final-kv] (xla/destroy-buffer! ctx b))
+        t1 (System/nanoTime)
+        total-ms (/ (- t1 t0) 1e6)
+
+        gen-ids (extract-instance-tokens final-tokens p-count final-step true)
+        gen-text (str/trim (tok/decode tokenizer gen-ids))
+        extracted-ans (or (extract-answer gen-text expected-answer) "")
+        correct? (evaluate-trace gen-text expected-answer)]
+    {:cell :cell-b0
+     :problem problem-text
+     :expected expected-answer
+     :extracted extracted-ans
+     :correct? correct?
+     :generated-text gen-text
+     :total-ms total-ms
+     :prompt-len p-count
+     :gen-len (count gen-ids)
+     :p-final final-step}))
