@@ -137,7 +137,7 @@ score(L̂) = F1(Bool(L̂ ∘ L̂), G_train) + F1(Bool(L̂ᵀ ∘ L̂), S_train) 
 
 ## 5. Deliverables
 
-- `scripts/e19_hybrid_crystallization.clj` — proposer retrain + P0 gates +
+- `tools/e19_hybrid_crystallization.clj` — proposer retrain + P0 gates +
   Phase-1 search (Sans-IO core: boolean matmul, greedy search as pure fns).
 - `paper-experiments/e19-hybrid/2026-09-17/` — `phase0.edn`,
   `results.edn`, `summary.csv` (per-seed: recall@256, H/B0/B1 F1,

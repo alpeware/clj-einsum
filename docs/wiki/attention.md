@@ -25,7 +25,7 @@ GQA (8:1 Query-to-KV ratio):
   └──┴──┴──┼──┴──┴──┴──┘
            K0 (Shared Key/Value Head)
 ```
-* **Clojure Reference**: `[:gqa-attention ...]` in [`clj-xla.logic.nn`](../../src/clj_xla/logic/nn.clj).
+* **Clojure Reference**: `[:gqa-attention ...]` in [`einsum.logic.nn`](../../src/einsum/logic/nn.clj).
 
 ---
 
@@ -36,7 +36,7 @@ Gemma 4 combines local sliding-window attention with global full-attention layer
 2. **Global Layers**: Every $N$-th layer maintains full context attention across all tokens.
 3. **Per-Layer Shared KV Cache**: Adjacent layers share Key and Value projections, reducing KV cache bytes by $2\times$.
 
-* **Clojure Reference**: [`gemma4-layer-ast`](../../src/clj_xla/logic/models/gemma.clj) in [`clj-xla.logic.models.gemma`](../../src/clj_xla/logic/models/gemma.clj).
+* **Clojure Reference**: [`gemma4-layer-ast`](../../models/gemma.clj) in [`models.gemma`](../../models/gemma.clj).
 
 ---
 

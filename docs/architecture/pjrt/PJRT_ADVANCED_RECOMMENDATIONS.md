@@ -1,11 +1,11 @@
-# Advanced Architectural Recommendations for `clj-xla`
+# Advanced Architectural Recommendations for `clj-einsum`
 *Derived from OpenXLA C API (`openxla/xla`), JAX, GoMLX, ZML, and Reactant.jl*
 
 ## Executive Summary
 
 Having established our **Phase 1-3 testing and versioning harness** (version compatibility negotiation, generative property testing via `clojure.test.check`, process-isolated worker execution, and CPU-vs-GPU numerical parity), we investigated the official OpenXLA C API codebase ([`openxla/xla/xla/pjrt/c`](https://github.com/openxla/xla/tree/main/xla/pjrt/c)) and leading peer frameworks (JAX, GoMLX, ZML, Reactant.jl).
 
-This document outlines **5 advanced architectural recommendations** to elevate `clj-xla` beyond peer frameworks, taking full advantage of Clojure's homoiconic EDN data representation and Java 25 Project Panama FFM (`java.lang.foreign`).
+This document outlines **5 advanced architectural recommendations** to elevate `clj-einsum` beyond peer frameworks, taking full advantage of Clojure's homoiconic EDN data representation and Java 25 Project Panama FFM (`java.lang.foreign`).
 
 ---
 
@@ -21,12 +21,12 @@ struct PJRT_Extension_Base {
 };
 ```
 
-### Recommendation for `clj-xla`:
-Implement an extension registry in `clj-xla.pjrt.extensions` that inspects `extension_start` off-heap structs returned by `GetPjrtApi()` and vendor shared objects (`libpjrt_rocm.so`, `libpjrt_cuda.so`).
+### Recommendation for `clj-einsum`:
+Implement an extension registry in `einsum.compiler.pjrt.extensions` that inspects `extension_start` off-heap structs returned by `GetPjrtApi()` and vendor shared objects (`libpjrt_rocm.so`, `libpjrt_cuda.so`).
 
 ```clojure
-(ns clj-xla.pjrt.extensions
-  (:require [clj-xla.pjrt :as pjrt])
+(ns einsum.compiler.pjrt.extensions
+  (:require [einsum.compiler.pjrt :as pjrt])
   (:import [java.lang.foreign MemorySegment ValueLayout]))
 
 (def EXTENSION_TYPE_FFI 1)
@@ -48,16 +48,16 @@ Implement an extension registry in `clj-xla.pjrt.extensions` that inspects `exte
 
 ---
 
-## 2. Java 25 Panama Upcall Handles & FFI Custom Calls (`clj-xla.ffi`)
+## 2. Java 25 Panama Upcall Handles & FFI Custom Calls (`einsum.ffi`)
 
 ### OpenXLA Capability:
 OpenXLA supports the `PJRT_Extension_FFI` (`pjrt_c_api_ffi_extension.h`). This allows host applications to register C/C++ function pointers as custom MLIR operators (`@custom_call`) that XLA compiles directly into hardware executables.
 
 ### Clojure / Java 25 Panama Integration:
-Using Java 25's `Linker.nativeLinker().upcallStub`, `clj-xla` can create JVM native upcall function handles from pure Clojure functions and register them as `@custom_call` targets:
+Using Java 25's `Linker.nativeLinker().upcallStub`, `clj-einsum` can create JVM native upcall function handles from pure Clojure functions and register them as `@custom_call` targets:
 
 ```clojure
-(ns clj-xla.ffi
+(ns clj-einsum.ffi
   (:import [java.lang.foreign Arena FunctionDescriptor Linker MemorySegment ValueLayout]
            [java.lang.invoke MethodHandle MethodHandles MethodType]))
 
@@ -72,19 +72,19 @@ Using Java 25's `Linker.nativeLinker().upcallStub`, `clj-xla` can create JVM nat
     (.upcallStub linker mh fd arena)))
 ```
 
-#### Use Cases for `clj-xla`:
+#### Use Cases for `clj-einsum`:
 - **FlashAttention / Triton Kernels:** Register precompiled native HIP/CUDA kernels (e.g. rocWMMA / FlashAttention-2) without needing C++ wrapper libraries or JNI.
 - **Dynamic Host Callbacks:** Allow XLA executables to emit telemetry or stream tokens directly into Clojure channels during GPU graph execution.
 
 ---
 
-## 3. Data-Driven SPMD Mesh Sharding (`clj-xla.sharding`)
+## 3. Data-Driven SPMD Mesh Sharding (`einsum.sharding`)
 
 ### Framework Insights (JAX & Reactant.jl):
 Both JAX (`jax.sharding.Mesh`, `NamedSharding`) and Reactant.jl handle multi-GPU parallel training (Data Parallelism, Tensor Parallelism, Pipeline Parallelism) by annotating tensor shapes with SPMD mesh specifications.
 
 ### Clojure Data-First Sharding DSL:
-Because `clj-xla` represents graphs as pure EDN data maps (`{:invars [...], :eqns [...]}`), tensor sharding can be expressed naturally as metadata annotations:
+Because `clj-einsum` represents graphs as pure EDN data maps (`{:invars [...], :eqns [...]}`), tensor sharding can be expressed naturally as metadata annotations:
 
 ```clojure
 (def mesh
@@ -102,22 +102,22 @@ Because `clj-xla` represents graphs as pure EDN data maps (`{:invars [...], :eqn
     [:* x-sharded w-sharded]))
 ```
 
-When generating StableHLO MLIR, `clj-xla.stablehlo` automatically lowers sharding metadata into `squad` partitioning MLIR attributes or `stablehlo.custom_call @Sharding`.
+When generating StableHLO MLIR, `einsum.compiler.stablehlo` automatically lowers sharding metadata into `squad` partitioning MLIR attributes or `stablehlo.custom_call @Sharding`.
 
 ---
 
-## 4. Off-Heap Arena Tracking & BFC Allocator Telemetry (`clj-xla.pjrt.memory`)
+## 4. Off-Heap Arena Tracking & BFC Allocator Telemetry (`einsum.compiler.pjrt.memory`)
 
 ### Problem & Hardware Reality:
 OpenXLA GPU/ROCm backends use the BFC (Best-Fit with Coalescing) allocator, allocating up to 90% of available VRAM (e.g., 18 GiB out of 24 GiB on AMD Radeon RX 7900 XTX) upon client initialization.
 If Clojure applications create thousands of un-destroyed `PjRtBuffer` handles or transient off-heap `MemorySegment` instances during training/inference loops, VRAM fragmentation or OOM errors occur.
 
-### Recommendation for `clj-xla.pjrt.memory`:
+### Recommendation for `einsum.compiler.pjrt.memory`:
 Build an automatic off-heap reference tracking registry that monitors `PjRtBuffer` lifetimes:
 
 ```clojure
-(ns clj-xla.pjrt.memory
-  (:require [clj-xla.pjrt :as pjrt]))
+(ns einsum.compiler.pjrt.memory
+  (:require [einsum.compiler.pjrt :as pjrt]))
 
 (defonce ^:private active-buffers (atom #{}))
 
@@ -143,15 +143,15 @@ Build an automatic off-heap reference tracking registry that monitors `PjRtBuffe
 
 ---
 
-## 5. StableHLO Dialect Versioning & Conformance Verification (`clj-xla.conformance`)
+## 5. StableHLO Dialect Versioning & Conformance Verification (`einsum.conformance`)
 
 ### OpenXLA Evolution:
 The `stablehlo` dialect evolves continuously with backward/forward compatibility windows (documented in `openxla/stablehlo/docs/compatibility.md`). PJRT plugins compiled against older/newer OpenXLA commits expect specific StableHLO versions (e.g. `1.0.0`, `0.19.0`).
 
-### Recommendation for `clj-xla`:
-Add a StableHLO bytecode/version target configuration in `clj-xla.stablehlo`:
+### Recommendation for `clj-einsum`:
+Add a StableHLO bytecode/version target configuration in `einsum.compiler.stablehlo`:
 
-1. **Version Lowering Pass (`clj-xla.stablehlo.versioning`):** Allows formatting MLIR output targeted to older OpenXLA plugin releases (e.g., converting newer StableHLO ops into compatible primitive op combinations).
+1. **Version Lowering Pass (`einsum.compiler.stablehlo.versioning`):** Allows formatting MLIR output targeted to older OpenXLA plugin releases (e.g., converting newer StableHLO ops into compatible primitive op combinations).
 2. **Interpreter Conformance Test Suite:** Run generative EDN graph test suites against OpenXLA's `stablehlo-opt` / `stablehlo-translate` tools to guarantee 100% dialect conformance before sending MLIR text to `PJRT_Client_Compile`.
 
 ---
@@ -160,8 +160,8 @@ Add a StableHLO bytecode/version target configuration in `clj-xla.stablehlo`:
 
 | Capability | Peer Framework Alignment | Clojure / JVM Panama Advantage | Target Component |
 | :--- | :--- | :--- | :--- |
-| **PJRT Extension Chain** | OpenXLA C API `pjrt_c_api.h` | Direct Panama struct offset traversal | `clj-xla.pjrt.extensions` |
-| **Panama Native FFI Upcalls** | JAX `jax.ffi` / C++ custom calls | Pure Clojure `upcallStub` without C++ JNI | `clj-xla.ffi` |
-| **SPMD Mesh Sharding** | JAX `NamedSharding` / Reactant | Data-first EDN graph metadata | `clj-xla.sharding` |
-| **BFC Memory Telemetry** | GoMLX `arena.go` / ZML | Panama `Arena` tracking + automatic cleanup | `clj-xla.pjrt.memory` |
-| **StableHLO Versioning** | OpenXLA `stablehlo-opt` | EDN graph transformations across dialect versions | `clj-xla.stablehlo.versioning` |
+| **PJRT Extension Chain** | OpenXLA C API `pjrt_c_api.h` | Direct Panama struct offset traversal | `einsum.compiler.pjrt.extensions` |
+| **Panama Native FFI Upcalls** | JAX `jax.ffi` / C++ custom calls | Pure Clojure `upcallStub` without C++ JNI | `einsum.ffi` |
+| **SPMD Mesh Sharding** | JAX `NamedSharding` / Reactant | Data-first EDN graph metadata | `einsum.sharding` |
+| **BFC Memory Telemetry** | GoMLX `arena.go` / ZML | Panama `Arena` tracking + automatic cleanup | `einsum.compiler.pjrt.memory` |
+| **StableHLO Versioning** | OpenXLA `stablehlo-opt` | EDN graph transformations across dialect versions | `einsum.compiler.stablehlo.versioning` |

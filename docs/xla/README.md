@@ -2,13 +2,13 @@
 
 Welcome to the **OpenXLA & PJRT Architectural Knowledge Base**. 
 
-This documentation hub details the empirical limitations, compiler lowerings, hardware alignment requirements, and state-of-the-art (SOTA) memory algorithms for executing long-running autonomous AI agent loops inside GPU VRAM via **OpenXLA** and **Clojure `clj-xla`**.
+This documentation hub details the empirical limitations, compiler lowerings, hardware alignment requirements, and state-of-the-art (SOTA) memory algorithms for executing long-running autonomous AI agent loops inside GPU VRAM via **OpenXLA** and **Clojure `clj-einsum`**.
 
 ---
 
 ## 💡 Architecture & Design Goals for Autonomous Agents
 
-Autonomous software agents require fast, low-latency, and continuous autoregressive token generation across extended context windows ($10\text{K}$ to $256\text{K}$ tokens). To maximize throughput and eliminate host-side CPU bottlenecks, `clj-xla` focuses on:
+Autonomous software agents require fast, low-latency, and continuous autoregressive token generation across extended context windows ($10\text{K}$ to $256\text{K}$ tokens). To maximize throughput and eliminate host-side CPU bottlenecks, `clj-einsum` focuses on:
 
 1. **Zero Host-GPU Roundtripping**: Keeping model weights, KV-caches, and token state strictly in GPU VRAM across decode iterations.
 2. **Pure OpenXLA Execution**: Fusing prefill and decode graph executions via StableHLO MLIR without custom host-side Java primitive loops.

@@ -12,7 +12,7 @@
 When launching inference or agent sessions, follow these operational patterns:
 
 ### 1. Launch via Wrapper Scripts (`libjsig.so` Chaining)
-Always run inference and agent sessions through [`tools/gemma4.sh`](file:///home/simonpure/src/alpeware/clj-xla/tools/gemma4.sh) or [`tools/gemma4_agent.sh`](file:///home/simonpure/src/alpeware/clj-xla/tools/gemma4_agent.sh):
+Always run inference and agent sessions through [`tools/gemma4.sh`](tools/gemma4.sh) or [`tools/gemma4_agent.sh`](tools/gemma4_agent.sh):
 ```bash
 # Optimal Gemma 4 Text Generation
 ./tools/gemma4.sh --backend rocm --model .models/gemma-4-E2B-it --prompt "Explain monads in Clojure"

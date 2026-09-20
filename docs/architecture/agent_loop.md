@@ -13,10 +13,10 @@ caveat (margins measured on the symbolic construction, not on LLM-generated
 candidates) and the `{:act :step}` staleness note.
 
 - *Implementation status (2026-09-15).* The gate exists in code:
-  `clj-xla.logic.memory.relation/relational-grounding-ast` (commits 26982ae,
+  `einsum.logic.memory.relation/relational-grounding-ast` (commits 26982ae,
   fc10dfd) implements probe → project → contract-against-relation-core →
   T=0 compare → mask → vocab-bias-fused-into-logits, and
-  `scripts/poc_fact_grounding.clj` wires it into a full 35-layer Gemma 4 E2B
+  `tools/poc_fact_grounding.clj` wires it into a full 35-layer Gemma 4 E2B
   forward pass on ROCm and CPU. Two distinctions from the design above:
   (1) it is implemented as logit *biasing* (influence), not post-LLM action
   *masking* (enforcement) — the safety guarantee is weaker than §9's design,
@@ -25,14 +25,14 @@ candidates) and the `{:act :step}` staleness note.
   for testing gate *effects*, not gate *presence*. Open: projection
   provenance (`w_mem_proj`, `w_entity_to_vocab`), margin measurement through
   the full grounding chain, per-token host-side buffer rebuild cost.
-**Companion:** `SYMBOLIC.md` (the `clj-xla.logic.symbolic` design this builds on).
-**Audience:** whoever implements the mealy × clj-xla integration — the "tensor-logic
+**Companion:** `SYMBOLIC.md` (the `einsum.logic.symbolic` design this builds on).
+**Audience:** whoever implements the mealy × clj-einsum integration — the "tensor-logic
 reflex vs LLM path" demo from the stack thesis.
 
 ## 1. Goal
 
 Compile a mealy cell's event loop into a single tensor-logic contraction graph that
-executes on the accelerator (StableHLO → PJRT via clj-xla), with the host doing
+executes on the accelerator (StableHLO → PJRT via clj-einsum), with the host doing
 nothing per step but feeding in event indices and reading out action indices.
 
 Non-goals:
@@ -79,7 +79,7 @@ designs for this architecture, not a textbook Mealy machine.
 4. **Act** — argmax / tempered sample; emit action indices.
 
 Every stage is a contraction over near-orthonormal random embeddings — the exact
-machinery `clj-xla.logic.symbolic` already proves sound (fact margin 0.88, rule
+machinery `einsum.logic.symbolic` already proves sound (fact margin 0.88, rule
 margin 0.89 at D=512, PJRT CPU). The whole step lowers to **one StableHLO graph**
 per cell type. Populations of cells become a **batch dimension**: advancing 1024
 agents is one batched execution, not 1024 loop iterations.
@@ -92,7 +92,7 @@ not location.
 
 ## 4. The Cell IR
 
-New namespace `clj-xla.agent.ir`. The IR is EDN, serializable, and deliberately
+New namespace `einsum.agent.ir`. The IR is EDN, serializable, and deliberately
 boring — it describes *which* contractions run, not how.
 
 ```clojure
@@ -139,7 +139,7 @@ Semantics:
   This is strictly stronger than today's multimethod guard.
 
 The Clojure DSL for defining cells keeps mealy's surface semantics (a cell author
-writes handlers); a new `clj-xla.agent.frontend` macro lowers handler definitions
+writes handlers); a new `einsum.agent.frontend` macro lowers handler definitions
 to this IR. Authors don't write contractions by hand.
 
 ## 5. Compilation pipeline
@@ -147,7 +147,7 @@ to this IR. Authors don't write contractions by hand.
 ```
 cell-def (Clojure DSL)
   → Cell IR (EDN, §4)
-  → tensor-logic AST  (clj-xla.logic.symbolic programs; reuse [: = ] equations,
+  → tensor-logic AST  (einsum.logic.symbolic programs; reuse [: = ] equations,
                        superposition-relation-matrix, correlate-embeddings)
   → EDN SSA IR → StableHLO → PJRT executable (existing pipeline, untouched)
 ```
@@ -295,7 +295,7 @@ Consequences, stated once so the tiers below don't re-litigate them:
 
 The original draft of this section put the whole LLM host-side. That conflated
 two claims: "LLM outputs are slow and unverified" (true) with "the LLM must
-live off-device" (false in this stack — clj-xla compiles full LLM forward
+live off-device" (false in this stack — clj-einsum compiles full LLM forward
 passes to StableHLO/PJRT, with weights pinned in VRAM and static-shape graphs).
 The honest axis is latency tier plus verifiability, not location. Intelligence
 sits in the middle tier of the execution architecture.
@@ -355,7 +355,7 @@ sharing device memory with the reflex graph:
   essay writing.
 - *In-graph lexical interrupt (the concrete Stage B mechanism).* Instead of
   generating text and regex-extracting code blocks host-side (the current
-  `scripts/gemma4_agent.clj` pattern), the while condition carries a stop
+  `tools/gemma4_agent.clj` pattern), the while condition carries a stop
   flag flipped by in-graph token-ID comparisons:
   `Cond(step, tok, stopped) = (step < max-steps) ∧ ¬stopped`, with
   `stopped ← (tok = tool-call-token-id) ∨ (tok = turn-end-token-id)`.
@@ -438,7 +438,7 @@ mealy oracle, which is host-side — that part of the boundary is load-bearing.
 
 **Reuse — proven, measured, do not rebuild:**
 
-- clj-xla pipeline: tensor-logic AST → EDN SSA → StableHLO → PJRT (untouched).
+- clj-einsum pipeline: tensor-logic AST → EDN SSA → StableHLO → PJRT (untouched).
 - Embedding construction + margin guarantees (D=512: 0.88 fact / 0.89 rule).
 - Rule-as-contraction lowering, `forward-chain`, sparse-coordinate accumulation.
 - Property-test harness: compiled-vs-oracle parity, seeded.

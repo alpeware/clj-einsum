@@ -1,6 +1,6 @@
 # Related Work & Comparative Analysis
 
-This document situates the **Declarative Tensor Logic & In-Tensor Relational Memory** engine of `clj-xla` within the broader landscape of neuro-symbolic AI, tensor-based reasoning, associative memory architectures, and compiled domain-specific languages.
+This document situates the **Declarative Tensor Logic & In-Tensor Relational Memory** engine of `clj-einsum` within the broader landscape of neuro-symbolic AI, tensor-based reasoning, associative memory architectures, and compiled domain-specific languages.
 
 ---
 
@@ -114,8 +114,8 @@ Pedro N. Rodriguez H. (`pedronahum`) has developed several projects bridging dom
 - **`MetalHLO`**: An engine providing C, Swift, and **PJRT APIs** to execute StableHLO programs natively on Apple Silicon (GPU and Neural Engine).
 - **`tl-pjrt`**: Exploratory domain-specific language emitting StableHLO bytecode and dispatching to hardware runtimes via the standard **OpenXLA PJRT C API**.
 
-### Relation to `clj-xla`
-`clj-xla` shares the core architectural commitment to **PJRT C ABI compilation**, but realizes it in pure Clojure on the JVM using **Project Panama FFM (Foreign Function & Memory)**:
+### Relation to `clj-einsum`
+`clj-einsum` shares the core architectural commitment to **PJRT C ABI compilation**, but realizes it in pure Clojure on the JVM using **Project Panama FFM (Foreign Function & Memory)**:
 - Compiles Pedro Domingos' Declarative Tensor Logic AST directly into **StableHLO MLIR text**.
 - Compiles the entire pipeline (Gemma 4 transformer layers + KV cache + relational memory unbinding + deductive gating) into a **single static executable graph**.
 - Avoids Python runtimes, C++ glue layers, and JVM escape loops (Rule 4).
@@ -139,7 +139,7 @@ In-tensor relational memory draws deep theoretical connections to associative me
 │ Ba, Hinton et al. 2016)        │ W_t = λ W_{t-1} + η (k_t ⊗ v_t)            │
 ├────────────────────────────────┼────────────────────────────────────────────┤
 │ In-Tensor Relational Memory    │ Multi-relation superposition core          │
-│ (clj-xla / Domingos TL)        │ R_r = ∑ (e_h ⊗ e_t), unbind via contraction│
+│ (clj-einsum / Domingos TL)        │ R_r = ∑ (e_h ⊗ e_t), unbind via contraction│
 │                                │ with crisp deductive gating (semirings)    │
 └────────────────────────────────┴────────────────────────────────────────────┘
 ```
@@ -159,7 +159,7 @@ Fast weights introduce two timescales of synaptic plasticity:
 - **Fast Weights**: Dynamic weight matrices updated in real time via outer-product Hebbian association:
   $$A_{t+1} = \lambda A_t + \eta \left(x_t \otimes y_t\right)$$
 
-In `clj-xla`, our **relational superposition core** $R_r = \sum e_h \otimes e_t$ is a direct implementation of relational fast weights inside OpenXLA VRAM:
+In `clj-einsum`, our **relational superposition core** $R_r = \sum e_h \otimes e_t$ is a direct implementation of relational fast weights inside OpenXLA VRAM:
 - Adding a fact requires **zero backpropagation** and zero GPU-host round trips.
 - Memory unbinding is an in-graph matrix contraction: $v_{\text{retrieved}} = h_{\text{probe}} \cdot R_r$.
 
@@ -169,7 +169,7 @@ In `clj-xla`, our **relational superposition core** $R_r = \sum e_h \otimes e_t$
 
 Retrieval-Augmented Generation (RAG) is the industry standard for augmenting LLMs with external knowledge. However, RAG suffers from severe architectural liabilities in autonomous agentic loops:
 
-| Architectural Dimension | Retrieval-Augmented Generation (RAG) | In-Tensor Relational Memory (`clj-xla`) |
+| Architectural Dimension | Retrieval-Augmented Generation (RAG) | In-Tensor Relational Memory (`clj-einsum`) |
 | :--- | :--- | :--- |
 | **Storage Mechanism** | External Vector Database (Pinecone, Milvus, Chroma) | Resident VRAM Tensor Core ($R_r \in \mathbb{R}^{D \times D}$) |
 | **Retrieval Cost** | Host RPC + Vector distance search + Prompt serialization | Single in-VRAM matrix-vector contraction ($O(D^2)$) |
@@ -183,7 +183,7 @@ Retrieval-Augmented Generation (RAG) is the industry standard for augmenting LLM
 
 ## 6. 📊 Comprehensive Multi-Dimensional Comparison Matrix
 
-| Dimension | `clj-xla` (This Repo) | `waylandzhang/tensorlogic` | `pedronahum/tl-pjrt` / MetalHLO | Modern Hopfield Networks | RAG Pipelines |
+| Dimension | `clj-einsum` (This Repo) | `waylandzhang/tensorlogic` | `pedronahum/tl-pjrt` / MetalHLO | Modern Hopfield Networks | RAG Pipelines |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Implementation Language** | Pure Clojure (JVM) | Python | Swift / C++ | PyTorch / Python | Python / Go / Rust |
 | **Execution Engine** | OpenXLA PJRT via Project Panama FFM | PyTorch Autograd | PJRT / Metal | PyTorch / Custom CUDA | Vector DB + LLM API |
@@ -202,6 +202,6 @@ Retrieval-Augmented Generation (RAG) is the industry standard for augmenting LLM
 1. **Validation of Relational Transformers**:
    `waylandzhang/tensorlogic` confirms that attention patterns and relational structures are intrinsically coupled. Constraining attention matrices via knowledge graphs is an effective inductive bias.
 2. **The Missing Bridge in Current Work**:
-   Existing implementations either build standalone small-scale reasoning toys (Zhang) or low-level compiler bindings without LLM integration (Nahum). `clj-xla` is unique in compiling **full production open weights (Gemma 4)** and **relational tensor logic** into a single, fused, zero-overhead OpenXLA executable.
+   Existing implementations either build standalone small-scale reasoning toys (Zhang) or low-level compiler bindings without LLM integration (Nahum). `clj-einsum` is unique in compiling **full production open weights (Gemma 4)** and **relational tensor logic** into a single, fused, zero-overhead OpenXLA executable.
 3. **Addressing the Empirical Bottleneck**:
    Our empirical findings (Task A–D) prove that static zero-shot projection fails due to prompt-template dominance. Connecting Zhang's relational attention insights with Domingos' superposition fast weights provides the exact blueprint for our next-generation consumer hardware experiments.

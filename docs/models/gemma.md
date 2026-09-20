@@ -1,9 +1,9 @@
 # Gemma Model Architecture Specification & Verification
 
 - **Status**: **Fully Supported** (Gemma 2B, Gemma 3 1B/4B/12B/27B, Gemma 4 E2B/E4B/12B/26B-A4B/31B)
-- **Clojure Source**: [`src/clj_xla/logic/models/gemma.clj`](../../src/clj_xla/logic/models/gemma.clj)
-- **CLI Runner**: [`scripts/gemma4_inference.clj`](../../scripts/gemma4_inference.clj)
-- **Test Suite**: [`test/clj_xla/logic/gemma_test.clj`](../../test/clj_xla/logic/gemma_test.clj)
+- **Clojure Source**: [`models/gemma.clj`](../../models/gemma.clj)
+- **CLI Runner**: [`tools/gemma4_inference.clj`](../../tools/gemma4_inference.clj)
+- **Test Suite**: [`test/models/gemma_test.clj`](../../test/models/gemma_test.clj)
 
 ---
 
@@ -31,9 +31,9 @@
 
 * **Interactive CLI Hardware Execution (SYCL / CPU)**:
   ```bash
-  clojure -M scripts/gemma4_inference.clj --model Gemma-4-E2B-it --backend sycl --precision int8
+  clojure -M tools/gemma4_inference.clj --model Gemma-4-E2B-it --backend sycl --precision int8
   ```
 * **Generative Unit & Property Tests**:
   ```bash
-  clojure -M:test -e "(require '[clj-xla.logic.gemma-test]) (clojure.test/run-tests 'clj-xla.logic.gemma-test)"
+  clojure -M:test -e "(require '[models.gemma-test]) (clojure.test/run-tests 'models.gemma-test)"
   ```

@@ -1,6 +1,6 @@
 # XLA.md: Vendor Artifacts & Runtime Dependency Specification
 
-This document details the **Lean Vendoring & Binary Management Strategy** for `clj-xla`. It describes how the library interfaces with OpenXLA's PJRT C API, manages native precompiled binaries (`libpjrt_cpu.so`, `pjrt_cuda_plugin.so`), and provides a clean environment for both human developers and AI coding agents targeting **Java 25**.
+This document details the **Lean Vendoring & Binary Management Strategy** for `clj-einsum`. It describes how the library interfaces with OpenXLA's PJRT C API, manages native precompiled binaries (`libpjrt_cpu.so`, `pjrt_cuda_plugin.so`), and provides a clean environment for both human developers and AI coding agents targeting **Java 25**.
 
 ---
 
@@ -17,13 +17,13 @@ The official `openxla/xla` repository is a massive C++ monorepo. Submoduling it 
 PJRT provides a standardized C API (`pjrt_c_api.h`) designed for long-term ABI stability. We vendor **only** the standard C header and an EDN specification of StableHLO operations. All hardware runtimes are loaded dynamically as precompiled shared libraries (`.so` / `.dylib` / `.dll`) via **Java 25 Project Panama** (`java.lang.foreign`).
 
 ```
-clj-xla/
+clj-einsum/
 ├── vendor/
 │   ├── include/
 │   │   └── pjrt_c_api.h             ;; Official C API header for Panama bindings
 │   └── specs/
 │       └── stablehlo_ops.edn        ;; Machine-readable spec of StableHLO operations
-├── scripts/
+├── tools/
 │   └── fetch_pjrt_binaries.clj      ;; Automated fetcher for precompiled PJRT plugins
 └── bin/                            ;; Local git-ignored store for native shared libs
     ├── libpjrt_cpu.so
@@ -44,7 +44,7 @@ This header defines the C function pointers, structs, and enums exposed by OpenX
 * `PJRT_Buffer_FromHostBuffer`: Performs memory allocation into off-heap device memory.
 * `PJRT_Executable_Compile`: Compiles a StableHLO MLIR module string into an executable handle.
 
-> **Agent Directive:** When writing Panama bindings in `clj-xla.pjrt`, refer exclusively to `vendor/include/pjrt_c_api.h`. Do not introduce non-standard header declarations.
+> **Agent Directive:** When writing Panama bindings in `einsum.compiler.pjrt`, refer exclusively to `vendor/include/pjrt_c_api.h`. Do not introduce non-standard header declarations.
 
 ---
 
@@ -101,13 +101,13 @@ Precompiled PJRT native binaries are distributed via official PyPI packages (suc
 
 ---
 
-## 4. Binary Fetcher Script (`scripts/fetch_pjrt_binaries.clj`)
+## 4. Binary Fetcher Script (`tools/fetch_pjrt.clj`)
 
 Execute this Clojure CLI script to fetch and extract precompiled PJRT libraries directly into your local `bin/` directory:
 
 ```clojure
 ;; Script to download and unpack official PJRT shared binaries from jaxlib/pypi wheels
-(ns scripts.fetch-pjrt-binaries
+(ns tools.fetch-pjrt
   (:require [clojure.java.io :as io]
             [clojure.string :as str])
   (:import [java.util.zip ZipInputStream]))
@@ -150,17 +150,17 @@ Execute this Clojure CLI script to fetch and extract precompiled PJRT libraries 
 
 ```bash
 # Fetch CPU runtime
-clj scripts/fetch_pjrt_binaries.clj cpu
+clj tools/fetch_pjrt.clj cpu
 
 # Fetch CUDA 12 GPU runtime
-clj scripts/fetch_pjrt_binaries.clj cuda12
+clj tools/fetch_pjrt.clj cuda12
 ```
 
 ---
 
 ## 5. Panama Native Interop Strategy (`java.lang.foreign`)
 
-`clj-xla` uses Java 25 Project Panama (`java.lang.foreign`) to bind to PJRT. This completely eliminates C++ compilation steps and custom JNI native libraries.
+`clj-einsum` uses Java 25 Project Panama (`java.lang.foreign`) to bind to PJRT. This completely eliminates C++ compilation steps and custom JNI native libraries.
 
 ### Binding Sequence
 
@@ -169,7 +169,7 @@ clj scripts/fetch_pjrt_binaries.clj cuda12
 3. **MethodHandle Downcall Creation:** `Linker.nativeLinker().downcallHandle(...)` wraps function pointers inside `MethodHandle` instances for sub-microsecond native invocation overhead.
 
 ```clojure
-(ns clj-xla.pjrt.bindings
+(ns einsum.compiler.pjrt.bindings
   (:import [java.lang.foreign Arena ForeignLinker SymbolLookup MemorySegment FunctionDescriptor ValueLayout]))
 
 (defn load-pjrt-api
@@ -188,8 +188,8 @@ clj scripts/fetch_pjrt_binaries.clj cuda12
 
 ## 6. Guidelines for AI Coding Agents
 
-When generating code or refactoring within `clj-xla`:
+When generating code or refactoring within `clj-einsum`:
 
 1. **Never generate C/C++ source code.** All interop must occur via Panama `MemorySegment` and `MethodHandle` bindings in Clojure/Java targeting Java 25.
-2. **Strict Spec Compliance:** Validate all generated or transformed EDN graphs against `vendor/specs/stablehlo_ops.edn` and `clj-xla.stablehlo.schema` prior to serializing MLIR.
+2. **Strict Spec Compliance:** Validate all generated or transformed EDN graphs against `vendor/specs/stablehlo_ops.edn` and `einsum.compiler.stablehlo.schema` prior to serializing MLIR.
 3. **Off-Heap Safety:** Always bind off-heap memory allocations to explicit Project Panama `Arena` blocks (`Arena/ofConfined` or `Arena/ofShared`) to guarantee deterministic cleanup without waiting for JVM Garbage Collection.

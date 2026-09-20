@@ -1,14 +1,14 @@
 # Gemma 2 Model Architecture Specification & StableHLO Graph
 
 - **Status**: **Fully Supported** (Gemma 2B, Gemma 2 9B, Gemma 2 27B)
-- **Clojure Source**: [`src/clj_xla/logic/models/gemma.clj`](../../src/clj_xla/logic/models/gemma.clj)
-- **Test Suite**: [`test/clj_xla/logic/gemma_test.clj`](../../test/clj_xla/logic/gemma_test.clj)
+- **Clojure Source**: [`models/gemma.clj`](../../models/gemma.clj)
+- **Test Suite**: [`test/models/gemma_test.clj`](../../test/models/gemma_test.clj)
 
 ---
 
 ## 1. Visual Execution Graph (Pure Clojure $\to$ StableHLO MLIR)
 
-The following Mermaid diagram represents the exact StableHLO execution graph formed by [`gemma2-layer-ast`](../../src/clj_xla/logic/models/gemma.clj) in `clj-xla`:
+The following Mermaid diagram represents the exact StableHLO execution graph formed by [`gemma2-layer-ast`](../../models/gemma.clj) in `clj-einsum`:
 
 ```mermaid
 flowchart TD
@@ -87,5 +87,5 @@ flowchart TD
 ## 3. Verification Protocol
 
 ```bash
-clojure -M:test -e "(require '[clj-xla.logic.gemma-test]) (clojure.test/run-tests 'clj-xla.logic.gemma-test)"
+clojure -M:test -e "(require '[models.gemma-test]) (clojure.test/run-tests 'models.gemma-test)"
 ```

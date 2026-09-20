@@ -12,7 +12,7 @@
    - The plugin entry point `GetPjrtApi` is resolved to obtain the static `PJRT_Api` struct containing function pointers.
 3. **ABI Versioning & Compatibility**:
    - Plugin ABI major and minor versions are checked on initialization (`PJRT_Api_Major` and `PJRT_Api_Minor`).
-   - Detailed ABI notes are preserved in [docs/architecture/pjrt/](pjrt/).
+   - Detailed ABI notes are preserved in [docs/architecture/pjrt/](pjrt).
 4. **Memory Management**:
    - Java 25 `Arena/ofConfined` and `Arena/ofShared` manage off-heap native memory segments.
    - Pinned device buffers (`PJRT_Buffer`) reside in accelerator VRAM and can be transferred without intermediate host array copying.

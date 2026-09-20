@@ -1,7 +1,7 @@
 # Gemma 4 26B-A4B Mixture-of-Experts (MoE) Architecture Specification
 
 - **Status**: **Planned / Backlog**
-- **Target Namespace**: `clj-xla.logic.models.gemma4-moe`
+- **Target Namespace**: `models.gemma4-moe`
 - **Target Hardware**: Laptops / Workstations (Intel Arc / Apple M4 36GB+ RAM)
 
 ---

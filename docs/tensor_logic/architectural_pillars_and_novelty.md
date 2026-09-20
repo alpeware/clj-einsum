@@ -1,6 +1,6 @@
 # The Two Pillars of Neuro-Symbolic Transformers: Architectural Paradigms, Enterprise Applications, and Novelty Assessment
 
-**Author**: Alpeware Research (`clj-xla`)  
+**Author**: Alpeware Research (`clj-einsum`)  
 **Date**: September 2026  
 **Theoretical Foundation**: Pedro Domingos, *Declarative Tensor Logic: The Language of AI* (arXiv:2510.12269)  
 **Execution Runtime**: OpenXLA PJRT (AMD ROCm RDNA3, Intel SYCL, NVIDIA CUDA, Host CPU) with **Zero Java / Python Escape Hatches**
@@ -18,7 +18,7 @@ To solve this triad, we have established **two complementary architectural pilla
 
 ```mermaid
 flowchart TD
-    subgraph Core ["Declarative Tensor Logic Compiler & Runtime (clj-xla)"]
+    subgraph Core ["Declarative Tensor Logic Compiler & Runtime (clj-einsum)"]
         AST["Declarative Tensor Logic AST<br/><i>(Einstein Summation & Semirings)</i>"]
         SHLO["StableHLO MLIR Lowering Engine<br/><i>(Bare-Metal OpenXLA PJRT Compilation)</i>"]
         AST --> SHLO
@@ -252,7 +252,7 @@ graph TD
         L4["Mixture of Experts (MoE: Mixtral, DeepSeek)<br/>Sparse routing reduces FLOPs, but total parameters<br/>balloon to 100B+, preventing consumer pre-training."]
     end
 
-    subgraph Inventions ["Our Proven Inventions in clj-xla (September 2026)"]
+    subgraph Inventions ["Our Proven Inventions in clj-einsum (September 2026)"]
         I1["1. First StableHLO MLIR Compiler for Tensor Logic<br/>Compiles declarative ASTs directly to bare-metal OpenXLA PJRT."]
         I2["2. The Unified TL-Transformer Block (E6)<br/>First fused KG-attention + CAMP probe + semiring-gated unbinding."]
         I3["3. Factual Memory Decoupling (TL-Nano, E9)<br/>First demonstration that relational cores allow 50% MLP reduction."]
@@ -266,9 +266,9 @@ graph TD
 ### 5.1 Five Genuinely Novel Contributions
 
 1. **First Native StableHLO MLIR Compiler for Declarative Tensor Logic**:
-   While Pedro Domingos (2025) proposed the mathematical formalism of Tensor Logic, he did not build a production compiler. We designed and implemented the first compiler pipeline ([`src/clj_xla/logic/lower.clj`](file:///home/simonpure/src/alpeware/clj-xla/src/clj_xla/logic/lower.clj)) that lowers Declarative Tensor Logic ASTs into StableHLO MLIR, compiling into native OpenXLA executables via PJRT with zero Java or Python bypasses.
+   While Pedro Domingos (2025) proposed the mathematical formalism of Tensor Logic, he did not build a production compiler. We designed and implemented the first compiler pipeline ([`src/einsum/logic/lower.clj`](../../src/einsum/logic/lower.clj)) that lowers Declarative Tensor Logic ASTs into StableHLO MLIR, compiling into native OpenXLA executables via PJRT with zero Java or Python bypasses.
 2. **The Unified TL-Transformer Block**:
-   We invented the first fused neural layer ([`src/clj_xla/logic/models/tl_block.clj`](file:///home/simonpure/src/alpeware/clj-xla/src/clj_xla/logic/models/tl_block.clj)) combining:
+   We invented the first fused neural layer ([`models/tl_block.clj`](../../models/tl_block.clj)) combining:
    - Causal self-attention with Knowledge-Graph adjacency biasing ($TR_{\text{adj}}T^T$, suppressing distractors by $8.7\times$).
    - Cross-Attention Memory Probing (CAMP, solving probe-side distribution shift).
    - Continuous semiring-gated relational fast-weight unbinding.

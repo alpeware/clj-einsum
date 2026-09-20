@@ -1,12 +1,12 @@
-# Debugging, Profiling, and Tracing in `clj-xla`
+# Debugging, Profiling, and Tracing in `clj-einsum`
 
-This guide outlines the debugging, profiling, and telemetry tracing tools built into **`clj-xla`** (inspired by **JAX** debugging affordances). These tools enable autonomous AI agents and software engineers to introspect execution graphs, diagnose numerical instability, profile execution latencies, and export performance spans for automated optimization feedback.
+This guide outlines the debugging, profiling, and telemetry tracing tools built into **`clj-einsum`** (inspired by **JAX** debugging affordances). These tools enable autonomous AI agents and software engineers to introspect execution graphs, diagnose numerical instability, profile execution latencies, and export performance spans for automated optimization feedback.
 
 ---
 
 ## 1. 🔍 Graph Introspection & Metadata Annotations
 
-In `clj-xla`, StableHLO equations support attached metadata and source locations directly in equation `:attrs` or via Tensor Logic AST annotations:
+In `clj-einsum`, StableHLO equations support attached metadata and source locations directly in equation `:attrs` or via Tensor Logic AST annotations:
 
 ### A. Location Metadata
 In large multi-layer architectures like Gemma 4 ($35$ layers), locating which specific layer or matrix multiplication triggered an issue can be difficult in raw MLIR text. Attaching location labels (`loc("gemma/layer_12/attn_matmul")`) to equations or AST nodes carries through into StableHLO MLIR:
@@ -19,30 +19,30 @@ In large multi-layer architectures like Gemma 4 ($35$ layers), locating which sp
  :attrs {:loc "gemma/layer_12/attn"}}
 ```
 
-When serialized via `clj-xla.stablehlo/graph->mlir-text`, instructions inherit exact source labels:
+When serialized via `einsum.compiler.stablehlo/graph->mlir-text`, instructions inherit exact source labels:
 ```mlir
 %t_dot_12 = "stablehlo.dot_general"(%x, %qkv_w) { ... } : (tensor<1x1x768xf32>, tensor<768x2304xf32>) -> tensor<1x1x2304xf32> loc("gemma/layer_12/attn")
 ```
 
 ### B. Graph Validation
-To catch ill-formed graphs, shape mismatches, or malformed ASTs before passing to the native compiler, Malli schema validation is run ahead-of-time via `clj-xla.stablehlo`:
+To catch ill-formed graphs, shape mismatches, or malformed ASTs before passing to the native compiler, Malli schema validation is run ahead-of-time via `einsum.compiler.stablehlo`:
 
 ```clojure
 (require '[malli.core :as m]
-         '[clj-xla.stablehlo :as shlo])
+         '[einsum.compiler.stablehlo :as shlo])
 
 (m/validate shlo/GraphSchema graph)
 ```
 
 ---
 
-## 2. ⏱️ High-Precision Telemetry Profiling (`clj-xla.profile`)
+## 2. ⏱️ High-Precision Telemetry Profiling (`einsum.runtime.profile`)
 
-`clj-xla.profile` provides microsecond-resolution span profiling for tracing, compilation, memory allocation, prefill, and decode step latencies.
+`einsum.runtime.profile` provides microsecond-resolution span profiling for tracing, compilation, memory allocation, prefill, and decode step latencies.
 
 ### A. Micro-second Profile Spans (`with-profile`)
 ```clojure
-(require '[clj-xla.profile :as profile])
+(require '[einsum.runtime.profile :as profile])
 
 (let [metrics (atom {})]
   (profile/with-profile metrics "graph_compilation"

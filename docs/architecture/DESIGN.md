@@ -1,8 +1,8 @@
-# DESIGN.md: Architectural Specification for `clj-xla`
+# DESIGN.md: Architectural Specification for `clj-einsum`
 
 ## 1. Executive Overview & Philosophy
 
-**`clj-xla`** is a high-performance, open-source Machine Learning compiler framework and runtime for Clojure targeting **Java 25**. It provides a pure functional DSL for defining neural network ops, compiling them to **StableHLO MLIR**, and executing them directly on accelerator hardware (CUDA GPUs, AMD ROCm, Google TPUs, and AVX/NEON CPUs) via OpenXLA's **PJRT C API** using modern **Java 25 Project Panama Foreign Function & Memory (FFM) API** (`java.lang.foreign`).
+**`clj-einsum`** is a high-performance, open-source Machine Learning compiler framework and runtime for Clojure targeting **Java 25**. It provides a pure functional DSL for defining neural network ops, compiling them to **StableHLO MLIR**, and executing them directly on accelerator hardware (CUDA GPUs, AMD ROCm, Google TPUs, and AVX/NEON CPUs) via OpenXLA's **PJRT C API** using modern **Java 25 Project Panama Foreign Function & Memory (FFM) API** (`java.lang.foreign`).
 
 ### Core Guiding Principles
 
@@ -25,10 +25,10 @@
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │       Layer 3: Pedro Domingos' Declarative Tensor Logic     │
-│  - Hiccup-style Relational AST DSL (clj-xla.logic.ast)      │
-│  - Index & Shape Unification (clj-xla.logic.index/shape)    │
-│  - Neural Primitives & Layers (clj-xla.logic.nn)            │
-│  - AST Lowering directly to SSA Graph (clj-xla.logic.lower) │
+│  - Hiccup-style Relational AST DSL (einsum.logic.ast)      │
+│  - Index & Shape Unification (einsum.logic.index/shape)    │
+│  - Neural Primitives & Layers (einsum.logic.nn)            │
+│  - AST Lowering directly to SSA Graph (einsum.logic.lower) │
 └──────────────────────────────┬──────────────────────────────┘
                                │ Emits Pure EDN SSA Graph
                                ▼
@@ -59,13 +59,13 @@
 
 ## 3. Detailed Layer Specifications
 
-### Layer 1: Native Runtime & Memory (`clj-xla.pjrt`)
+### Layer 1: Native Runtime & Memory (`einsum.compiler.pjrt`)
 
 Layer 1 handles foreign function invocation and off-heap memory management without C++ JNI boilerplate using Java 25's finalized `java.lang.foreign` API.
 
 #### PJRT C API Interface & Dynamic Binding
 * **Plugin Entrypoint:** Loads vendor dynamic shared objects (`libpjrt_cuda.so`, `libpjrt_cpu.so`, `libpjrt_rocm.so`) at runtime using `SymbolLookup.libraryLookup`.
-* **API Function Resolution:** Resolves the C entrypoint `const PJRT_Api* GetPjrtApi()`. Using Panama `StructLayout` definitions, `clj-xla.pjrt` maps the returned `PJRT_Api` struct table to invoke API function pointers (`PJRT_Client_Create`, `PJRT_Client_Compile`, `PJRT_Buffer_FromHostBuffer`, `PJRT_LoadedExecutable_Execute`).
+* **API Function Resolution:** Resolves the C entrypoint `const PJRT_Api* GetPjrtApi()`. Using Panama `StructLayout` definitions, `einsum.compiler.pjrt` maps the returned `PJRT_Api` struct table to invoke API function pointers (`PJRT_Client_Create`, `PJRT_Client_Compile`, `PJRT_Buffer_FromHostBuffer`, `PJRT_LoadedExecutable_Execute`).
 
 #### Off-Heap Memory Management (`Arena` & `MemorySegment`)
 * **Zero-Copy Weight Offloading:** `.safetensors` model parameters are mapped directly into off-heap `MemorySegment` memory via `FileChannel.map` using a `Shared` or `Confined` Java 25 `Arena`.
@@ -78,13 +78,13 @@ Layer 1 handles foreign function invocation and off-heap memory management witho
 
 ---
 
-### Layer 2: Intermediate Representation (`clj-xla.stablehlo`)
+### Layer 2: Intermediate Representation (`einsum.compiler.stablehlo`)
 
 Layer 2 defines the pure data specification for the computation graph. The graph represents flat Single Static Assignment (SSA) equations, avoiding nested AST trees that complicate variable reuse, constant folding, and backpropagation.
 
 #### Jaxpr-Inspired EDN SSA Format
 
-In `clj-xla`, all inputs, intermediate tensors, constants, and outputs are represented as explicit SSA variables. Scalar constants are auto-lifted into explicit `:stablehlo/constant` equations:
+In `clj-einsum`, all inputs, intermediate tensors, constants, and outputs are represented as explicit SSA variables. Scalar constants are auto-lifted into explicit `:stablehlo/constant` equations:
 
 ```clojure
 {:name "gelu_block"
@@ -105,7 +105,7 @@ In `clj-xla`, all inputs, intermediate tensors, constants, and outputs are repre
            {:op :stablehlo/multiply :invars [:t6 :c0]    :outvars [:y]}]}
 ```
 
-#### Malli Schema Validation (`clj-xla.stablehlo.schema`)
+#### Malli Schema Validation (`einsum.compiler.stablehlo.schema`)
 
 ```clojure
 (def ElementTypeSchema
@@ -134,15 +134,15 @@ In `clj-xla`, all inputs, intermediate tensors, constants, and outputs are repre
 ```
 
 #### StableHLO MLIR Text Printing
-`clj-xla.stablehlo` formats EDN SSA graphs into compliant MLIR textual module strings containing `func.func @main(...)` with dialect annotations (`stablehlo.dot_general`, `stablehlo.broadcast_in_dim`, `stablehlo.constant`, etc.), passed directly to `PJRT_Client_Compile`.
+`einsum.compiler.stablehlo` formats EDN SSA graphs into compliant MLIR textual module strings containing `func.func @main(...)` with dialect annotations (`stablehlo.dot_general`, `stablehlo.broadcast_in_dim`, `stablehlo.constant`, etc.), passed directly to `PJRT_Client_Compile`.
 
 ---
 
-### Layer 3: Pedro Domingos' Declarative Tensor Logic (`clj-xla.logic.*`)
+### Layer 3: Pedro Domingos' Declarative Tensor Logic (`einsum.logic.*`)
 
 Layer 3 provides a homoiconic, declarative DSL implementing Pedro Domingos' Tensor Logic. Rather than tracing imperative operator expressions with hidden thread-local state, neural network architectures are defined as pure, relational Hiccup-style AST data vectors.
 
-#### Core Concepts & Hiccup AST (`clj-xla.logic.ast`)
+#### Core Concepts & Hiccup AST (`einsum.logic.ast`)
 * **Relational Tensor Expressions:** Operations are expressed with explicit symbolic indices resembling Einstein notation:
   ```clojure
   ;; Matrix multiplication: C[i,j] = sum_k A[i,k] * B[k,j]
@@ -150,18 +150,18 @@ Layer 3 provides a homoiconic, declarative DSL implementing Pedro Domingos' Tens
   ;; General relational definition
   [:= [:y :b :p :d] [:x :b :p :din] [:w :din :d]]
   ```
-* **Neural Component Primitives (`clj-xla.logic.nn`):** Standard layers such as `[:rms-norm ...]`, `[:layer-norm ...]`, `[:gelu ...]`, `[:swiglu ...]`, `[:rope ...]`, `[:gqa-attention ...]`, and `[:dense-block ...]` are first-class declarative AST forms.
-* **Shape & Index Unification (`clj-xla.logic.shape` & `clj-xla.logic.index`):** Symbolic indices (`:b`, `:p`, `:d`, `:kvh`, etc.) are unified across equation heads and bodies, automatically deriving broadcast dimensions, transpose permutations, and contraction axes.
+* **Neural Component Primitives (`einsum.logic.nn`):** Standard layers such as `[:rms-norm ...]`, `[:layer-norm ...]`, `[:gelu ...]`, `[:swiglu ...]`, `[:rope ...]`, `[:gqa-attention ...]`, and `[:dense-block ...]` are first-class declarative AST forms.
+* **Shape & Index Unification (`einsum.logic.shape` & `einsum.logic.index`):** Symbolic indices (`:b`, `:p`, `:d`, `:kvh`, etc.) are unified across equation heads and bodies, automatically deriving broadcast dimensions, transpose permutations, and contraction axes.
 
-#### Direct Lowering to StableHLO SSA (`clj-xla.logic.lower`)
-* `clj-xla.logic.lower/ast->graph` expands compound neural operations and lowers relational equations directly into flat, optimized StableHLO EDN SSA graphs with zero intermediate Java or Python runtime overhead.
+#### Direct Lowering to StableHLO SSA (`einsum.logic.lower`)
+* `einsum.logic.lower/ast->graph` expands compound neural operations and lowers relational equations directly into flat, optimized StableHLO EDN SSA graphs with zero intermediate Java or Python runtime overhead.
 
 #### Pure Clojure Layer Example
 
 ```clojure
 (ns example.transformer-layer
-  (:require [clj-xla.logic.lower :as lower]
-            [clj-xla.logic.models.smollm :as smollm]))
+  (:require [einsum.logic.lower :as lower]
+            [models.smollm :as smollm]))
 
 ;; Generate a complete SmolLM transformer block AST
 (def layer-ast (smollm/smollm-layer-ast 0 128))
@@ -172,29 +172,29 @@ Layer 3 provides a homoiconic, declarative DSL implementing Pedro Domingos' Tens
 
 ---
 
-### Layer 4: Higher-Order Transformations (`clj-xla.autodiff` & `clj-xla.opt`)
+### Layer 4: Higher-Order Transformations (`einsum.compiler.autodiff` & `einsum.runtime.opt`)
 
 Layer 4 transforms forward graphs into backward graphs and optimizes graphs prior to MLIR serialization.
 
 1. **Reverse-Mode Autodiff (VJPs):**
    * Traverses the forward SSA `:eqns` vector in reverse order.
    * Emits vector-Jacobian product (VJP) equations for backpropagation.
-   * **Cotangent Accumulation:** When an intermediate tensor `v` is consumed by multiple downstream operations, `clj-xla.autodiff` automatically inserts a `:stablehlo/add` node to sum accumulated gradients (`dv = dv1 + dv2`) before propagating gradients backward.
+   * **Cotangent Accumulation:** When an intermediate tensor `v` is consumed by multiple downstream operations, `einsum.compiler.autodiff` automatically inserts a `:stablehlo/add` node to sum accumulated gradients (`dv = dv1 + dv2`) before propagating gradients backward.
    * **Shape Reduction:** Handles broadcast alignment during reverse propagation via automatic `reduce_sum` along broadcasted axes.
    * Merges forward and backward equations, appending optimizer updates (e.g., AdamW state updates).
 
-2. **Frontend Graph Optimizations (`clj-xla.opt`):**
+2. **Frontend Graph Optimizations (`einsum.runtime.opt`):**
    * **Dead Code Elimination (DCE):** Prunes unused SSA nodes not transitively reachable from `:outvars`.
    * **Constant Folding:** Pre-computes purely scalar static subgraphs during tracing.
    * **`vmap` Vectorization:** Automatically maps batch dimensions over unbatched single-sample functions.
 
 ---
 
-### Layer 1.5 & Execution Engine: SHA-256 Compilation Caching (`clj-xla.compile`)
+### Layer 1.5 & Execution Engine: SHA-256 Compilation Caching (`einsum.compiler.compile`)
 
 To guarantee sub-millisecond REPL feedback while working with heavy XLA compiler backends:
 
-1. **Graph Hashing:** When `trace-and-compile` is invoked, `clj-xla.compile` computes a SHA-256 hash of the normalized EDN graph (including input shapes and target hardware platform).
+1. **Graph Hashing:** When `trace-and-compile` is invoked, `einsum.compiler.compile` computes a SHA-256 hash of the normalized EDN graph (including input shapes and target hardware platform).
 2. **In-Memory Executable Cache:** The compiled `PjRtLoadedExecutable` native handle is stored in an in-memory `atom` map.
 3. **Execution Latency:**
    * **First Call (Cold):** Tracing (< 1ms) + StableHLO Printing (< 1ms) + XLA Codegen (50ms - 200ms) = ~50-200ms total.
@@ -211,7 +211,7 @@ To guarantee sub-millisecond REPL feedback while working with heavy XLA compiler
 
 ### B. Fine-Tuning (FunctionGemma 270M / LoRA)
 
-* **Strategy:** Trace forward pass $\to$ generate VJP backward pass via `clj-xla.autodiff` $\to$ append AdamW updates.
+* **Strategy:** Trace forward pass $\to$ generate VJP backward pass via `einsum.compiler.autodiff` $\to$ append AdamW updates.
 * **Execution:** Compile the full training step into a single XLA executable. XLA automatically manages activation checkpointing (rematerialization) to fit within GPU VRAM constraints.
 
 ### C. Distillation & Pre-Training
@@ -236,7 +236,7 @@ To guarantee sub-millisecond REPL feedback while working with heavy XLA compiler
 
 1. **Generation:** AI agent emits declarative Tensor Logic AST vectors or EDN graph maps (`{:invars [...], :eqns [...]}`).
 2. **Validation:** Agent verifies AST shapes and graphs against Malli schemas locally in microseconds.
-3. **Execution & Feedback:** Agent lowers the AST to StableHLO SSA via `clj-xla.logic.lower/ast->graph` and compiles via `clj-xla.core/compile-and-run`.
+3. **Execution & Feedback:** Agent lowers the AST to StableHLO SSA via `einsum.logic.lower/ast->graph` and compiles via `einsum.core/compile-and-run`.
 4. **Mutations:** Agent applies pure data transformations (`assoc-in`, `update`, `postwalk`) to explore novel network topologies or kernel optimizations deterministically.
 
 ---
@@ -244,12 +244,12 @@ To guarantee sub-millisecond REPL feedback while working with heavy XLA compiler
 ## 6. Repository Layout & Phased Roadmap
 
 ```
-clj-xla/
+clj-einsum/
 ├── README.md
 ├── DESIGN.md
 ├── deps.edn
 └── src/
-    └── clj_xla/
+    └── einsum/
         ├── core.clj           ;; High-level JIT execution API & REPL entrypoint
         ├── compile.clj        ;; Graph hashing & executable caching
         ├── pjrt.clj           ;; Panama Java 25 FFM bindings to libpjrt_cuda/cpu/rocm
@@ -279,13 +279,13 @@ clj-xla/
 
 * **Phase 2: StableHLO IR, Tensor Logic Engine & Caching**
   * Implement strict Malli schemas for Jaxpr-style EDN graphs.
-  * Build `clj-xla.logic.*` Pedro Domingos declarative Tensor Logic AST engine.
+  * Build `einsum.logic.*` Pedro Domingos declarative Tensor Logic AST engine.
   * Write EDN-to-StableHLO MLIR text printer.
   * Implement SHA-256 graph hash compilation cache.
 
 * **Phase 3: Autodiff & Optimizations**
   * Build reverse-mode VJP generator with cotangent accumulation and broadcast reduction.
-  * Add DCE and constant-folding passes in `clj-xla.opt` and `clj-xla.logic.dce`.
+  * Add DCE and constant-folding passes in `einsum.runtime.opt` and `einsum.logic.dce`.
 
 * **Phase 4: High-Level Models & Agent Tooling**
   * Implement Gemma 2, Gemma 3, Gemma 4, SmolLM, and GPT-2 Tensor Logic models.

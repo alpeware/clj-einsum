@@ -1,7 +1,7 @@
 # Meta Muse-Glimmer-30B Architecture Specification & Implementation Plan
 
 - **Status**: **Planned / Backlog**
-- **Target Namespace**: `clj-xla.logic.models.muse-glimmer`
+- **Target Namespace**: `einsum.logic.models.muse-glimmer`
 - **License**: Apache 2.0 Open Weights
 - **Target Hardware**: Consumer iGPUs / Laptops (Intel Arc 140V, Apple M4/M4 Pro, NVIDIA RTX 24GB/32GB)
 
@@ -28,11 +28,11 @@ flowchart TD
 ```
 
 ### Milestone 1: Model Configuration & Schema Definitions
-- **Deliverable**: Define `clj-xla.logic.models.muse-glimmer` config map and generative property tests in `test/clj_xla/logic/models/muse_glimmer_test.clj`.
-- **Verification**: `clojure -M:test -e "(require 'clj-xla.logic.models.muse-glimmer-test)"` passes cleanly.
+- **Deliverable**: Define `einsum.logic.models.muse-glimmer` config map and generative property tests in `test/einsum/logic/models/muse_glimmer_test.clj`.
+- **Verification**: `clojure -M:test -e "(require 'einsum.logic.models.muse-glimmer-test)"` passes cleanly.
 
 ### Milestone 2: In-Graph INT4 / INT8 Weight De-quantization
-- **Deliverable**: Implement fused de-quantization helper functions in `clj-xla.logic.nn`.
+- **Deliverable**: Implement fused de-quantization helper functions in `einsum.logic.nn`.
 - **Verification**: Verify parity between INT8 quantized weights and FP32 reference matmul outputs.
 
 ### Milestone 3: Causal Language Decoder Execution Graph
@@ -44,5 +44,5 @@ flowchart TD
 - **Verification**: Run parallel block verification test and measure acceptance rates.
 
 ### Milestone 5: ATEM Tokenizer & Interactive CLI Script
-- **Deliverable**: Add `src/clj_xla/tokenizer/atem.clj` XML tool call parser and create `scripts/muse_glimmer_inference.clj`.
+- **Deliverable**: Add `src/einsum/runtime/tokenizer/atem.clj` XML tool call parser and create `tools/muse_glimmer_inference.clj`.
 - **Verification**: Run local single-batch agentic prompt execution on Intel Arc SYCL / CPU.

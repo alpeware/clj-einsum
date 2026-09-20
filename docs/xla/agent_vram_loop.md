@@ -1,6 +1,6 @@
 # In-VRAM Autonomous Agent Execution Loop
 
-This document outlines the architectural design and algorithms required to execute **100% In-VRAM Autonomous Agent Loops** in Clojure `clj-xla` using **OpenXLA** and **StableHLO MLIR**.
+This document outlines the architectural design and algorithms required to execute **100% In-VRAM Autonomous Agent Loops** in Clojure `clj-einsum` using **OpenXLA** and **StableHLO MLIR**.
 
 ---
 
@@ -42,7 +42,7 @@ In StableHLO MLIR, `stablehlo.while` accepts a single state tuple `(T_0, T_1, ..
 $$\text{LoopState} = \Big(\text{step}, \text{cur\_token}, \text{tokens\_out}, \text{rng\_state}, K_0, V_0, K_1, V_1, \dots, K_{34}, V_{34}\Big)$$
 
 ### StableHLO SSA Graph Representation
-In `clj-xla`, the loop state tuple is defined as an immutable SSA vector lowered into a `:stablehlo/while` equation:
+In `clj-einsum`, the loop state tuple is defined as an immutable SSA vector lowered into a `:stablehlo/while` equation:
 
 ```clojure
 (defn build-in-vram-agent-loop-graph
@@ -78,7 +78,7 @@ To avoid transferring logit vectors back to the CPU for sampling, token selectio
 When initiating generation or reading completed output sequences, host-side Clojure code relies on Panama FFM direct memory transfers and in-VRAM dynamic slicing:
 
 ### A. Pre-Allocated Persistent VRAM Session (`init-agent-vram-session`)
-To eliminate the multi-second overhead of re-allocating gigabytes of model weights and re-compiling StableHLO graphs on every turn, `scripts.gemma4-inference/init-agent-vram-session` pins all weights into accelerator memory once and pre-compiles the executable for `max-seq-len`:
+To eliminate the multi-second overhead of re-allocating gigabytes of model weights and re-compiling StableHLO graphs on every turn, `tools.gemma4-inference/init-agent-vram-session` pins all weights into accelerator memory once and pre-compiles the executable for `max-seq-len`:
 
 ```clojure
 (let [session (gemma4-inf/init-agent-vram-session opts max-seq-len)]
@@ -120,7 +120,7 @@ In agent workloads (`:mode :agent`), per-token stdout flushing is bypassed to av
 
 ## 5. ⚖️ Execution Modes: Fused In-VRAM Loop vs. Persistent Agent Session
 
-`clj-xla` provides two complementary VRAM execution architectures:
+`clj-einsum` provides two complementary VRAM execution architectures:
 
 | Architectural Feature | **Fused In-VRAM Loop (`stablehlo.while`)** | **Persistent VRAM Session + Dynamic Slicing** |
 |---|---|---|

@@ -1,8 +1,8 @@
-# Comprehensive Testing & Versioning Architectural Strategy for `clj-xla`
+# Comprehensive Testing & Versioning Architectural Strategy for `clj-einsum`
 
 ## 1. Executive Summary & Comparative Framework Analysis
 
-`clj-xla` aims to provide the premier Clojure/JVM integration for OpenXLA via Java 25 Project Panama FFM (`java.lang.foreign`). To achieve best-in-class status and qualify for inclusion under **Frameworks** on [OpenXLA PJRT Examples](https://openxla.org/xla/pjrt/examples) and [Awesome StableHLO](https://openxla.org/stablehlo/awesome), `clj-xla` must match and exceed the testing capabilities of peer implementations (JAX, GoMLX, ZML, Reactant.jl).
+`clj-einsum` aims to provide the premier Clojure/JVM integration for OpenXLA via Java 25 Project Panama FFM (`java.lang.foreign`). To achieve best-in-class status and qualify for inclusion under **Frameworks** on [OpenXLA PJRT Examples](https://openxla.org/xla/pjrt/examples) and [Awesome StableHLO](https://openxla.org/stablehlo/awesome), `clj-einsum` must match and exceed the testing capabilities of peer implementations (JAX, GoMLX, ZML, Reactant.jl).
 
 ### Peer Project Comparison Matrix
 
@@ -12,7 +12,7 @@
 | **GoMLX** (`go-xla`) | Go / CGO | Dynamic plugin lookup (`PJRT_PLUGIN_LIBRARY_PATH`), C structs | CPU, CUDA, TPU, Apple Metal (WIP) | `go test` package level | Manual fuzzing, minimal zero-dim tests | FP32 / FP16 tolerance assertions |
 | **ZML** | Zig | Native Bazel/Zig toolchain, hardcoded C ABI versioning | CPU, CUDA, ROCm, TPU, Metal | Isolated Zig test runner binaries | Primitive fuzzing via Zig std | Per-op reference CPU vs target device |
 | **Reactant.jl** | Julia / C++ | `REACTANT_BACKEND_GROUP` dynamic resolution & CondaPkg | CPU, CUDA, ROCm, TPU, Metal | `ParallelTestRunner.jl` worker processes | Julia `Test` macros & shape inference | Julia native vs XLA output comparison |
-| **`clj-xla` (Target)** | **Clojure / Java 25 Panama** | **Dynamic ABI feature negotiation, Multi-driver matrix (Gentoo ROCm 7.2/7.1, CUDA, CPU)** | **CPU, Dual AMD ROCm, CUDA 12, SYCL, TPU** | **Process-isolated worker pool (Segfault-proof JVM harness)** | **Strict generative `test.check` SSA graph & autodiff invariants** | **Zero-copy Panama off-heap leak detection + $\epsilon$-tolerance engine** |
+| **`clj-einsum` (Target)** | **Clojure / Java 25 Panama** | **Dynamic ABI feature negotiation, Multi-driver matrix (Gentoo ROCm 7.2/7.1, CUDA, CPU)** | **CPU, Dual AMD ROCm, CUDA 12, SYCL, TPU** | **Process-isolated worker pool (Segfault-proof JVM harness)** | **Strict generative `test.check` SSA graph & autodiff invariants** | **Zero-copy Panama off-heap leak detection + $\epsilon$-tolerance engine** |
 
 ---
 
@@ -22,7 +22,7 @@
 Testing PJRT integration involves four distinct software layers:
 ```
 ┌───────────────────────────────────────────────────────────┐
-│ Layer 4: Clojure/JVM Framework (`clj-xla` v0.1.0)         │
+│ Layer 4: Clojure/JVM Framework (`clj-einsum` v0.1.0)         │
 └─────────────────────────────┬─────────────────────────────┘
                               │ Panama FFM ABI Bindings
                               ▼
@@ -41,13 +41,13 @@ Testing PJRT integration involves four distinct software layers:
 └───────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 Version Negotiation Protocol (`clj-xla.pjrt.version`)
+### 2.2 Version Negotiation Protocol (`einsum.compiler.pjrt.version`)
 
-`clj-xla` must implement a transparent version inspection and attribute verification pipeline prior to initializing `PJRT_Client`:
+`clj-einsum` must implement a transparent version inspection and attribute verification pipeline prior to initializing `PJRT_Client`:
 
 ```clojure
-(ns clj-xla.pjrt.version
-  (:require [clj-xla.pjrt :as pjrt]))
+(ns einsum.compiler.pjrt.version
+  (:require [einsum.compiler.pjrt :as pjrt]))
 
 (def MINIMUM_SUPPORTED_PJRT_MINOR 10)
 
@@ -73,7 +73,7 @@ Testing PJRT integration involves four distinct software layers:
 #### Portable Version Fallback Matrix:
 1. **System Driver Preference:** `PJRT_ROCM_PATH` / `ROCM_PATH` environment variables pointing to `/opt/rocm-7.2`, `/opt/rocm-7.1`, or system `/usr`.
 2. **Bundled Fallback:** `bin/lib/` containing extracted wheel dependencies.
-3. **Automated Probe:** Probe system driver version via `/sys/module/amdgpu/version` or `clj-xla.pjrt/probe-rocm-version` before plugin load.
+3. **Automated Probe:** Probe system driver version via `/sys/module/amdgpu/version` or `einsum.compiler.pjrt/probe-rocm-version` before plugin load.
 
 ---
 
@@ -87,7 +87,7 @@ Consumer hardware (AMD Radeon RX 7000/6000 series, NVIDIA RTX 4000/3000 series) 
 ### 3.1 Consumer Hardware Test Suite Architecture
 
 ```
-test/clj_xla/
+test/einsum/
 ├── unit/                       ;; Pure, fast CPU unit & schema tests (< 2s)
 ├── generative/                 ;; clojure.test.check property invariants (< 10s)
 ├── integration/
@@ -112,20 +112,20 @@ Testing for dual AMD ROCm setup:
 
 Native code crashes inside vendor PJRT `.so` libraries (e.g. HIP/ROCm segfaults, CUDA launch failures) trigger `SIGSEGV` or `SIGBUS`, terminating the JVM immediately.
 
-### 4.1 Process-Isolated Test Runner (`clj-xla.test.isolated-runner`)
+### 4.1 Process-Isolated Test Runner (`einsum.test-helpers.isolated-runner`)
 
 To prevent native segfaults from crashing the overall CI/CLI test runner, device tests execute inside worker sub-processes:
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│ Main JVM Test Runner (`clj-xla.test-runner`)           │
+│ Main JVM Test Runner (`einsum.test-runner`)           │
 │  - Spawns worker JVMs with specific environment flags  │
 │  - Captures stdout, stderr, exit code, and EDN report │
 └───────────────────────────┬────────────────────────────┘
                             │ ProcessBuilder
                             ▼
 ┌────────────────────────────────────────────────────────┐
-│ Worker JVM Process (`clj-xla.test.worker`)             │
+│ Worker JVM Process (`einsum.test-helpers.worker`)             │
 │  - Environment: ROCM_VISIBLE_DEVICES=0,1               │
 │  - Loads libpjrt_rocm.so via Panama FFM                │
 │  - Executes device test assertions                     │
@@ -135,7 +135,7 @@ To prevent native segfaults from crashing the overall CI/CLI test runner, device
 
 #### Isolated Execution Logic:
 ```clojure
-(ns clj-xla.test.isolated-runner
+(ns einsum.test-helpers.isolated-runner
   (:require [clojure.edn :as edn]
             [clojure.java.shell :refer [sh]]))
 
@@ -158,10 +158,10 @@ To prevent native segfaults from crashing the overall CI/CLI test runner, device
 
 Clojure's `clojure.test.check` allows us to test **invariants** across millions of randomly generated neural network computational graphs.
 
-### 5.1 Graph & Tensor Generators (`clj-xla.test.generators`)
+### 5.1 Graph & Tensor Generators (`einsum.test-helpers.generators`)
 
 ```clojure
-(ns clj-xla.test.generators
+(ns einsum.test-helpers.generators
   (:require [clojure.test.check.generators :as gen]))
 
 (def gen-dtype
@@ -192,7 +192,7 @@ Clojure's `clojure.test.check` allows us to test **invariants** across millions 
 ### 5.2 Core Invariant Properties
 
 1. **CPU vs ROCm Parity Invariant:** For any valid SSA graph $G$ and inputs $X$, executing $G(X)$ on CPU must match $G(X)$ on ROCm within $\epsilon = 1e-4$.
-2. **Autodiff Finite-Differences Invariant:** For any differentiable graph $F(x)$, the VJP gradient $\nabla F(x)$ computed via `clj-xla.autodiff` must equal numerical central finite differences $\frac{F(x+\epsilon) - F(x-\epsilon)}{2\epsilon}$.
+2. **Autodiff Finite-Differences Invariant:** For any differentiable graph $F(x)$, the VJP gradient $\nabla F(x)$ computed via `einsum.compiler.autodiff` must equal numerical central finite differences $\frac{F(x+\epsilon) - F(x-\epsilon)}{2\epsilon}$.
 3. **Panama Memory Leak Invariant:** Executing 10,000 graph evaluations in a loop must result in net zero off-heap `MemorySegment` memory leak.
 
 ---
@@ -234,7 +234,7 @@ Test results are logged into structured EDN format (`target/test-reports/hardwar
 
 ```mermaid
 gantt
-    title clj-xla Testing & Versioning Roadmap
+    title clj-einsum Testing & Versioning Roadmap
     dateFormat  YYYY-MM-DD
     section Phase 1: Harness & Versioning
     Version Inspection & RTLD Preloader    :active, p1_1, 2026-08-11, 3d
@@ -248,8 +248,8 @@ gantt
 ```
 
 ### Milestone Checklist:
-- [x] **Milestone 1:** Implement `clj-xla.pjrt.version` & ROCm 7.2 RTLD preloader.
-- [x] **Milestone 2:** Implement `clj-xla.test.isolated-runner` to insulate JVM against native segfaults.
-- [x] **Milestone 3:** Add `clj-xla.test.generators` with 100-iteration `defspec` property checks for graph invariants.
-- [x] **Milestone 4:** Build dual ROCm GPU multi-device execution integration tests in `test/clj_xla/integration/rocm_e2e_test.clj`.
+- [x] **Milestone 1:** Implement `einsum.compiler.pjrt.version` & ROCm 7.2 RTLD preloader.
+- [x] **Milestone 2:** Implement `einsum.test-helpers.isolated-runner` to insulate JVM against native segfaults.
+- [x] **Milestone 3:** Add `einsum.test-helpers.generators` with 100-iteration `defspec` property checks for graph invariants.
+- [x] **Milestone 4:** Build dual ROCm GPU multi-device execution integration tests in `test/einsum/integration/rocm_e2e_test.clj`.
 - [x] **Milestone 5:** Generate structured EDN hardware reports and submit PR for OpenXLA PJRT Examples inclusion.

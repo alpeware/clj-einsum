@@ -1,4 +1,4 @@
-# clj-xla: Executable Tensor Logic for Coding Agents
+# clj-einsum: Executable Tensor Logic for Coding Agents
 
 High-performance Machine Learning compiler framework and runtime for Clojure targeting **Java 25** and **OpenXLA PJRT C API**.
 
@@ -25,8 +25,8 @@ StableHLO → PJRT executables (CPU / ROCm / CUDA)
 reference interpreter ⇄ device differential testing
 ```
 
-- **`clj-xla.logic.*` (The Language)**: AST expansion, lowering, symbolic reasoning, relational memory, in-VRAM contrastive learning, and agent loops.
-- **`clj-xla.core` & `clj-xla.compile` (The Substrate)**: Zero-copy Java 25 Project Panama FFM bindings to PJRT C API (`pjrt_c_api.h`), StableHLO MLIR builder, SHA-256 compilation cache, autodiff, and device tensor management.
+- **`einsum.logic.*` (The Language)**: AST expansion, lowering, symbolic reasoning, relational memory, in-VRAM contrastive learning, and agent loops.
+- **`einsum.core` & `einsum.compiler.compile` (The Substrate)**: Zero-copy Java 25 Project Panama FFM bindings to PJRT C API (`pjrt_c_api.h`), StableHLO MLIR builder, SHA-256 compilation cache, autodiff, and device tensor management.
 
 ---
 
@@ -40,10 +40,10 @@ reference interpreter ⇄ device differential testing
 
 ## Features
 
-- **Pedro Domingos' Declarative Tensor Logic:** Homoiconic Hiccup-style AST DSL (`clj-xla.logic.*`) unifying relational logic, tensor contraction, broadcasting, and neural network layers.
+- **Pedro Domingos' Declarative Tensor Logic:** Homoiconic Hiccup-style AST DSL (`einsum.logic.*`) unifying relational logic, tensor contraction, broadcasting, and neural network layers.
 - **Pure EDN SSA Graph IR:** Flat Single Static Assignment (SSA) computation graphs governed by Malli schemas, lowered directly from Tensor Logic ASTs.
 - **Java 25 Project Panama FFM:** Zero-copy native bindings to OpenXLA's PJRT C API (`pjrt_c_api.h`) via `java.lang.foreign`.
-- **Sub-Millisecond REPL Feedback:** SHA-256 graph hash compilation caching (`clj-xla.compile`) bypassing XLA LLVM codegen on warm REPL evaluations.
+- **Sub-Millisecond REPL Feedback:** SHA-256 graph hash compilation caching (`einsum.compiler.compile`) bypassing XLA LLVM codegen on warm REPL evaluations.
 - **Multi-Backend OpenXLA Execution:** Seamless hardware execution across CPU, AMD ROCm, Intel SYCL, and NVIDIA CUDA.
 - **Pure Clojure LLM Implementations:** Gemma 2, Gemma 3, Gemma 4 (E2B, E4B), SmolLM, and GPT-2 running purely via XLA compilation without manual host matrix math.
 - **100% In-VRAM Execution:** Forward passes, backward passes, exact gradient updates, and memory unbinding compile directly to StableHLO without host round-trips.
@@ -61,7 +61,7 @@ reference interpreter ⇄ device differential testing
 Fetch the OpenXLA CPU shared binary plugin into `bin/`:
 
 ```bash
-clj scripts/fetch_pjrt_binaries.clj cpu
+clj tools/fetch_pjrt.clj cpu
 ```
 
 ### 3. Start Socket REPL
@@ -82,8 +82,8 @@ Express neural network operations, matrix contractions, and activations in pure 
 
 ```clojure
 (ns example.logic
-  (:require [clj-xla.core :as xla]
-            [clj-xla.logic.lower :as lower]))
+  (:require [einsum.core :as xla]
+            [einsum.logic.lower :as lower]))
 
 ;; Initialize runtime context
 (def ctx (xla/init-backend! :cpu))
@@ -111,7 +111,7 @@ Low-level homoiconic StableHLO graph construction:
 
 ```clojure
 (ns example.ssa
-  (:require [clj-xla.core :as xla]))
+  (:require [einsum.core :as xla]))
 
 (def ctx (xla/init-backend! :cpu))
 
@@ -133,19 +133,19 @@ CLI scripts and wrappers are included for running inference, agent loops, and re
 
 ```bash
 # GPT-2 Inference
-clj -M scripts/gpt2_inference.clj --prompt "The capital of France is"
+clj -M tools/gpt2_inference.clj --prompt "The capital of France is"
 
 # SmolLM-135M Inference
-clj -M scripts/smollm_inference.clj --prompt "In a galaxy far away"
+clj -M tools/smollm_inference.clj --prompt "In a galaxy far away"
 
 # Gemma 4 Autoregressive Generation (ROCm / CPU)
-./scripts/gemma4.sh --backend rocm --model .models/gemma-4-E2B-it --prompt "Explain monads in Clojure"
+./tools/gemma4.sh --backend rocm --model .models/gemma-4-E2B-it --prompt "Explain monads in Clojure"
 
 # Gemma 4 Autonomous Agent Loop
-./scripts/gemma4.sh agent --backend rocm --model .models/gemma-4-E2B-it --prompt "Inspect src/ and calculate total Clojure lines"
+./tools/gemma4.sh agent --backend rocm --model .models/gemma-4-E2B-it --prompt "Inspect src/ and calculate total Clojure lines"
 
 # Gemma 4 Relational Memory Benchmark (WebNLG E15 Distractor Diagnostic)
-./scripts/gemma4.sh relational --checkpoint .dataset/webnlg/checkpoint_gemma4_relational.edn
+./tools/gemma4.sh relational --checkpoint .dataset/webnlg/checkpoint_gemma4_relational.edn
 ```
 
 ---
@@ -153,7 +153,7 @@ clj -M scripts/smollm_inference.clj --prompt "In a galaxy far away"
 ## Documentation & Architecture
 
 - [VISION.md](VISION.md): Mission, core principles, pillars, non-goals, and relation to Domingos' program.
-- [DESIGN.md](DESIGN.md): Detailed architectural layers, Malli schemas, and lowering pipeline.
+- [DESIGN.md](docs/architecture/DESIGN.md): Detailed architectural layers, Malli schemas, and lowering pipeline.
 - [AGENTS.md](AGENTS.md): Repository rules, TDD invariants, and optimal inference / agent launching guides.
 - [docs/tensor_logic/empirical_journey.md](docs/tensor_logic/empirical_journey.md): Empirical log of experiments (E1–E15), telemetry, and theoretical conclusions.
-- [docs/](docs/): Model specifications, hardware benchmarks, PJRT versioning notes, and wiki.
+- [docs/](docs/index.md): Model specifications, hardware benchmarks, PJRT versioning notes, and wiki.

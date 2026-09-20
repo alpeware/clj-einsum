@@ -77,7 +77,7 @@ granularity is the **parent-pair assignment**: state = for each node,
 - **Schedule (defaults, defensible not tuned):** 200k iterations,
   T 0.1 → 1e-4 geometric, 3 restarts/seed, keep best. Seeds 42–46.
   All host-side boolean ops; expect seconds per restart.
-- **Implementation:** new `clj-xla.logic.constrained-search` namespace
+- **Implementation:** new `einsum.logic.constrained-search` namespace
   (Sans-IO core: pair-state, boolean composition, SA loop as pure fns);
   do not disturb E19's tested `predicate-crystallization` ns. Generative
   tests first: boolean composition vs naive oracle; indegree invariant
@@ -125,8 +125,8 @@ granularity is the **parent-pair assignment**: state = for each node,
 
 ## 6. Deliverables
 
-- `src/clj_xla/logic/constrained_search.clj` + generative tests.
-- `scripts/e20_constrained_crystallization.clj`.
+- `src/einsum/logic/constrained_search.clj` + generative tests.
+- `tools/e20_constrained_crystallization.clj`.
 - `paper-experiments/e20-constrained/2026-09-17/` — `phase0.edn`,
   `results.edn`, `summary.csv` (per-seed: F1\*, raw F1, non-roots,
   objective, restarts, wall time).

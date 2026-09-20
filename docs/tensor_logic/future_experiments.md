@@ -1,6 +1,6 @@
 # Strategic Research & Experimental Roadmap for Long-Horizon Agents
 
-This document defines the forward-looking research program and experimental roadmap for **Declarative Tensor Logic & In-Tensor Relational Memory** in `clj-xla`.
+This document defines the forward-looking research program and experimental roadmap for **Declarative Tensor Logic & In-Tensor Relational Memory** in `clj-einsum`.
 
 The overarching objective is to resolve the **Autonomous Agent Triad Crisis** (Hallucinations, Online Learning, Long-Horizon Context Explosion) on **consumer-grade hardware** (24GB VRAM, AMD Radeon RX 7900 XTX / NVIDIA RTX 4090) through compiled neuro-symbolic tensor architectures.
 
@@ -86,7 +86,7 @@ Instead of a static projection $W$, introduce a **single-layer Cross-Attention M
 
 ### 3. OpenXLA StableHLO Implementation
 ```clojure
-;; clj-xla Tensor Logic AST representation
+;; clj-einsum Tensor Logic AST representation
 [:block {:name :cross_attention_memory_probe}
  ;; Project prompt sequence H to K and V
  [:= [:K :seq_len :d_k] [:H :seq_len :d_model] [:W_k :d_model :d_k]]
@@ -147,7 +147,7 @@ Task B demonstrated that 6 examples are insufficient to train a general $1536 \t
 ### 3. Consumer GPU Execution (24GB VRAM)
 - Batch size: 512 triples.
 - Compute requirement: Pure matrix multiplications ($O(B \cdot D^2)$).
-- Epoch time: ~1.8 seconds per epoch on RX 7900 XTX using `clj-xla.logic.autodiff`.
+- Epoch time: ~1.8 seconds per epoch on RX 7900 XTX using `einsum.logic.autodiff`.
 - Total pre-training run: 50 epochs takes **< 2 minutes**.
 
 ### 4. Success Criteria
@@ -194,7 +194,7 @@ Let the entity universe $\mathcal{E}$ represent code files, functions, and test 
 - **Base Facts**: Stored as a binary/continuous adjacency matrix $P \in [0, 1]^{N \times N}$.
 - **Transitive Invalidation Rule**:
   $$\text{NeedsRecompile}(x) \leftarrow \text{Modified}(y) \wedge \text{DependsOn}(x, y)$$
-- **Compiled Fixpoint**: Computed natively in VRAM using [`clj-xla.logic.symbolic/datalog-transitive-step-ast`](../../src/clj_xla/logic/symbolic.clj):
+- **Compiled Fixpoint**: Computed natively in VRAM using [`einsum.logic.symbolic/datalog-transitive-step-ast`](../../src/einsum/logic/symbolic.clj):
   $$A_{t+1} = \text{clamp}\big(A_t + A_t \cdot P, \, 0, \, 1\big)$$
 
 ### 4. VRAM & Compute Budget
@@ -380,7 +380,7 @@ Prior foundational experiments validated synthetic token sequences (E9) and simu
 ### 2. Implementation & Dataset
 - **Curated Dataset**: `data/wikifacts_corpus.edn` (34 entities, 7 relations, 21 triples, 69 multi-style natural language sentences, 18 held-out cloze QA prompts).
 - **Sub-Vocabulary Mapping**: Bijective mapping of active GPT-2 BPE tokens into dense tensor space $[0, 512)$, preserving $100\%$ subword semantics while keeping $W_{\text{embed}}$ compact ($512\text{ KB}$).
-- **Pre-training Pipeline**: `scripts/poc_tl_nano_real_data.clj` running natively on AMD Radeon RX 7900 XTX via OpenXLA PJRT ROCm.
+- **Pre-training Pipeline**: `tools/poc_tl_nano_real_data.clj` running natively on AMD Radeon RX 7900 XTX via OpenXLA PJRT ROCm.
 - **Evaluation**: Zero-shot cloze QA across all 18 prompts comparing neural baseline ($R_{\text{mem}} = 0$) vs. active relational unbinding ($R_{\text{mem}} > 0$).
 
 ### 3. Key Achievements & Verified Outcomes

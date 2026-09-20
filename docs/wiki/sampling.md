@@ -33,9 +33,9 @@ Step t:    Compute [K_t, V_t] for new token x_t
 
 ---
 
-## 3. Clojure Implementation in `clj-xla`
+## 3. Clojure Implementation in `clj-einsum`
 
-- **Temperature Scaling**: [`clj-xla.sampling/apply-temperature`](../../src/clj_xla/sampling.clj) in [`clj-xla.sampling`](../../src/clj_xla/sampling.clj).
-- **Top-K Filtering**: [`clj-xla.sampling/apply-top-k`](../../src/clj_xla/sampling.clj) in [`clj-xla.sampling`](../../src/clj_xla/sampling.clj).
-- **Autoregressive Loop**: [`clj-xla.generation.autoregressive`](../../src/clj_xla/generation/autoregressive.clj).
-- **KV Cache Invariants**: Tested in [`test/clj_xla/generation/autoregressive_test.clj`](../../test/clj_xla/generation/autoregressive_test.clj).
+- **Temperature Scaling**: [`einsum.runtime.sampling/apply-temperature`](../../src/einsum/runtime/sampling.clj) in [`einsum.runtime.sampling`](../../src/einsum/runtime/sampling.clj).
+- **Top-K Filtering**: [`einsum.runtime.sampling/apply-top-k`](../../src/einsum/runtime/sampling.clj) in [`einsum.runtime.sampling`](../../src/einsum/runtime/sampling.clj).
+- **Autoregressive Loop**: [`einsum.runtime.generation.autoregressive`](../../src/einsum/runtime/generation/autoregressive.clj).
+- **KV Cache Invariants**: Tested in [`test/einsum/runtime/generation_test.clj`](../../test/einsum/runtime/generation_test.clj).

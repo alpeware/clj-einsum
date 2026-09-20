@@ -1,8 +1,8 @@
-# Design Document: Tensor Logic Intermediate Representation for clj-xla
+# Design Document: Tensor Logic Intermediate Representation for clj-einsum
 
 ## 1. System Overview
 
-`clj-xla` is a pure Clojure compiler frontend targeting OpenXLA and StableHLO via the PJRT C API. Instead of relying on macro-based domain-specific languages (DSLs) or tape-based dynamic execution graphs, `clj-xla` adopts Pedro Domingos' **Tensor Logic** as its foundational Intermediate Representation (IR).
+`clj-einsum` is a pure Clojure compiler frontend targeting OpenXLA and StableHLO via the PJRT C API. Instead of relying on macro-based domain-specific languages (DSLs) or tape-based dynamic execution graphs, `clj-einsum` adopts Pedro Domingos' **Tensor Logic** as its foundational Intermediate Representation (IR).
 
 Computational graphs are represented as immutable S-expressions using Hiccup-style data structures. The system unifies deep learning forward/backward passes, attention mechanisms, and discrete relational routing into Einstein summation equations over multi-dimensional tensors.
 
@@ -180,7 +180,7 @@ Autoregressive decoding executes with a fixed sequence length context window to 
 
 ## 6. Coding Agent Directives & Verification
 
-AI coding agents contributing to `clj-xla` must adhere to the following implementation contracts:
+AI coding agents contributing to `clj-einsum` must adhere to the following implementation contracts:
 
 1. **No Macros for Graph Construction:** All high-level layer definitions must be pure functions returning Hiccup vectors or multimethod extensions of `expand-node`.
 2. **Deterministic Output Order:** Set operations over tensor indices must be deterministically sorted using vectors to guarantee reproducible StableHLO dimension number bindings.

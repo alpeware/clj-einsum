@@ -1,15 +1,15 @@
 # Gemma 4 (E2B / E4B) Model Architecture Specification & StableHLO Graph
 
 - **Status**: **Fully Supported** (Gemma 4 E2B, Gemma 4 E4B)
-- **Clojure Source**: [`src/clj_xla/logic/models/gemma.clj`](../../src/clj_xla/logic/models/gemma.clj)
-- **CLI Hardware Runner**: [`scripts/gemma4_inference.clj`](../../scripts/gemma4_inference.clj)
-- **Test Suite**: [`test/clj_xla/logic/gemma_test.clj`](../../test/clj_xla/logic/gemma_test.clj)
+- **Clojure Source**: [`models/gemma.clj`](../../models/gemma.clj)
+- **CLI Hardware Runner**: [`tools/gemma4_inference.clj`](../../tools/gemma4_inference.clj)
+- **Test Suite**: [`test/models/gemma_test.clj`](../../test/models/gemma_test.clj)
 
 ---
 
 ## 1. Visual Execution Graph (Pure Clojure $\to$ StableHLO MLIR)
 
-The following Mermaid diagram represents the exact StableHLO execution graph formed by [`gemma4-layer-ast`](../../src/clj_xla/logic/models/gemma.clj) in `clj-xla`:
+The following Mermaid diagram represents the exact StableHLO execution graph formed by [`gemma4-layer-ast`](../../models/gemma.clj) in `clj-einsum`:
 
 ```mermaid
 flowchart TD
@@ -106,5 +106,5 @@ flowchart TD
 
 Run single-batch hardware text generation on Intel Arc GPU (SYCL Level-Zero):
 ```bash
-clojure -M scripts/gemma4_inference.clj --model Gemma-4-E2B-it --backend sycl --precision int8
+clojure -M tools/gemma4_inference.clj --model Gemma-4-E2B-it --backend sycl --precision int8
 ```

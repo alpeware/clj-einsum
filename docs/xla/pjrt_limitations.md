@@ -1,6 +1,6 @@
 # OpenXLA & PJRT Hardware & Compiler Limitations
 
-This document provides an exhaustive, empirically verified technical specification of **OpenXLA** and **PJRT C-API** hardware limitations, compiler lowerings, native memory layouts, and signal interposition rules when accelerating LLMs with Clojure `clj-xla`.
+This document provides an exhaustive, empirically verified technical specification of **OpenXLA** and **PJRT C-API** hardware limitations, compiler lowerings, native memory layouts, and signal interposition rules when accelerating LLMs with Clojure `clj-einsum`.
 
 ---
 
@@ -63,7 +63,7 @@ Before initializing the OpenXLA ROCm plugin via `System.load`, the JVM process M
 LD_PRELOAD=/usr/lib64/openjdk-25/lib/libjsig.so clojure -M:gemma4 ...
 ```
 
-In `clj-xla`, [`scripts.gemma4-inference/needs-libjsig-reexec?`](../../scripts/gemma4_inference.clj#L659) automatically detects missing `libjsig` interposition and re-executes the Clojure JVM process with `LD_PRELOAD` active.
+In `clj-einsum`, [`tools.gemma4-inference/needs-libjsig-reexec?`](../../tools/gemma4_inference.clj#L659) automatically detects missing `libjsig` interposition and re-executes the Clojure JVM process with `LD_PRELOAD` active.
 
 ---
 

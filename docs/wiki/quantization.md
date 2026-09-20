@@ -16,7 +16,7 @@ At single-batch size ($B=1$), token generation throughput is directly proportion
 
 ## 2. In-Graph De-quantization in OpenXLA / StableHLO MLIR
 
-In `clj-xla`, quantized weights are stored as low-bit integer tensors (`:i8` or packed `:i4`) alongside per-channel/per-block scale vectors (`:f32` or `:bf16`).
+In `clj-einsum`, quantized weights are stored as low-bit integer tensors (`:i8` or packed `:i4`) alongside per-channel/per-block scale vectors (`:f32` or `:bf16`).
 
 Inside the trace graph, de-quantization is fused directly before the matrix multiplication:
 ```clojure
@@ -33,4 +33,4 @@ Inside the trace graph, de-quantization is fused directly before the matrix mult
 
 When compiled to PJRT via OpenXLA, the integer de-quantization and matrix multiplication compile into fused hardware tensor core kernels (XMX on Intel Arc, Tensor Cores on NVIDIA CUDA, Matrix Accelerators on AMD ROCm).
 
-* **Clojure Reference**: [`clj-xla.safetensors`](../../src/clj_xla/safetensors.clj).
+* **Clojure Reference**: [`einsum.runtime.safetensors`](../../src/einsum/runtime/safetensors.clj).

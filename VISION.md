@@ -113,7 +113,7 @@ reference interpreter ⇄ device differential testing
 One construct for the covered slice, all the way down. No kernels written by
 hand; no host matrix math in the hot path. Equations become executables —
 Domingos' *"map onto a GPU with almost no change,"* realized as
-`clj-xla.logic.*` → `clj-xla.compile`.
+`einsum.logic.*` → `einsum.compiler.compile`.
 
 Two halves, one repo: **`logic/` is the language** (AST, lowering, symbolic
 reasoning, relational memory, the agent loop); **the rest is the substrate**

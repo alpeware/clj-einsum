@@ -1,16 +1,16 @@
-# clj-xla Architectural Documentation & LLM Knowledge Base
+# clj-einsum Architectural Documentation & LLM Knowledge Base
 
-Welcome to the **`clj-xla` Architectural Documentation & LLM Knowledge Base**.
+Welcome to the **`clj-einsum` Architectural Documentation & LLM Knowledge Base**.
 
-`clj-xla` is a high-performance, pure Clojure numerical computing and deep learning framework built on **OpenXLA** and **StableHLO MLIR** via the Java Panama Foreign Function & Memory (FFM) API. It provides pure functional tensor abstractions, graph tracing, automatic differentiation, and hardware acceleration across CPU, Intel SYCL, AMD ROCm, and NVIDIA CUDA devices—with **Zero Java Escape Hatches** (Pure XLA compilation).
+`clj-einsum` is a high-performance, pure Clojure numerical computing and deep learning framework built on **OpenXLA** and **StableHLO MLIR** via the Java Panama Foreign Function & Memory (FFM) API. It provides pure functional tensor abstractions, graph tracing, automatic differentiation, and hardware acceleration across CPU, Intel SYCL, AMD ROCm, and NVIDIA CUDA devices—with **Zero Java Escape Hatches** (Pure XLA compilation).
 
 ---
 
-## 💡 Why OpenXLA & `clj-xla`?
+## 💡 Why OpenXLA & `clj-einsum`?
 
-1. **Pedro Domingos' Declarative Tensor Logic**: Neural network architectures are defined as homoiconic, relational AST data structures using [`clj-xla.logic.*`](../src/clj_xla/logic/core.clj) and lowered directly into StableHLO SSA graphs.
-2. **StableHLO MLIR Codegen**: Graphs are serialized into standard StableHLO MLIR text representation via [`clj-xla.stablehlo`](../src/clj_xla/stablehlo.clj#L20).
-3. **Multi-Backend Portability**: A single Clojure model definition compiles seamlessly to native CPU binaries (`libpjrt_cpu.so`), Intel GPU Level-Zero (`libpjrt_sycl.so`), AMD ROCm (`libpjrt_rocm.so`), and NVIDIA CUDA (`libcudart.so`) via [`clj-xla.core/init-backend!`](../src/clj_xla/core.clj#L45).
+1. **Pedro Domingos' Declarative Tensor Logic**: Neural network architectures are defined as homoiconic, relational AST data structures using [`einsum.logic.*`](../src/einsum/logic/core.clj) and lowered directly into StableHLO SSA graphs.
+2. **StableHLO MLIR Codegen**: Graphs are serialized into standard StableHLO MLIR text representation via [`einsum.compiler.stablehlo`](../src/einsum/compiler/stablehlo.clj#L20).
+3. **Multi-Backend Portability**: A single Clojure model definition compiles seamlessly to native CPU binaries (`libpjrt_cpu.so`), Intel GPU Level-Zero (`libpjrt_sycl.so`), AMD ROCm (`libpjrt_rocm.so`), and NVIDIA CUDA (`libcudart.so`) via [`einsum.core/init-backend!`](../src/einsum/core.clj#L45).
 4. **Kernel Fusion & Hardware Acceleration**: OpenXLA automatically fuses elementwise operations, normalizations, and GEMM matrix multiplications into hardware tensor-core kernels (Intel XMX, AMD Matrix Cores, NVIDIA Tensor Cores).
 
 ---
@@ -29,7 +29,7 @@ Comprehensive theoretical foundations, empirical results, related work analysis,
 
 Empirical benchmark metrics for specific hardware and driver combinations are recorded in the dedicated **[`benchmarks/`](../benchmarks/README.md)** directory:
 
-- 💻 **[Lenovo ThinkPad X1 Carbon Gen 13 (Intel Arc 140V SYCL)](../benchmarks/lenovo_x1_carbon_intel_sycl.md)**: Intel Core Ultra Series 2 Lunar Lake + Intel Arc 140V iGPU via SYCL Level-Zero V2 (`26.22.038646`). Includes Python JAX vs. `clj-xla` performance gap analysis.
+- 💻 **[Lenovo ThinkPad X1 Carbon Gen 13 (Intel Arc 140V SYCL)](../benchmarks/lenovo_x1_carbon_intel_sycl.md)**: Intel Core Ultra Series 2 Lunar Lake + Intel Arc 140V iGPU via SYCL Level-Zero V2 (`26.22.038646`). Includes Python JAX vs. `clj-einsum` performance gap analysis.
 - 🖥️ **[AMD Desktop Workstation (Radeon RX 7900 XTX 24G ROCm)](../benchmarks/amd_desktop_7900_xtx_rocm.md)**: AMD Ryzen CPU + AMD Radeon RX 7900 XTX 24GB VRAM RDNA3 via ROCm `7.2.0` / `6.0`.
 
 ---

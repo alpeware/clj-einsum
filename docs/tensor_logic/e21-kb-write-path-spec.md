@@ -35,7 +35,7 @@ the follow-up build, not this one.
 
 ## 2. What it is
 
-`clj-xla.logic.kb` — a Datalog-with-integrity-constraints store.
+`einsum.kb.store` — a Datalog-with-integrity-constraints store.
 Sans-IO core (pure functions over an immutable KB value); effects at the
 boundary shell. In that order:
 
@@ -117,13 +117,13 @@ enforces its schema is worse than no KB: it launders guesses into facts.
 
 ## 6. Deliverables
 
-- `src/clj_xla/logic/kb.clj` — schema, constraints, verified commit,
+- `src/einsum/kb/store.clj` — schema, constraints, verified commit,
   disjunction store, materialization (Sans-IO core).
-- `test/clj_xla/logic/kb_test.clj` — generative tests FIRST (repo Rule 1):
+- `test/einsum/kb/store_test.clj` — generative tests FIRST (repo Rule 1):
   constraint totality (random schemas × random fact streams: committable
   ⟺ schema-valid), disjunction soundness (ambiguous queries never return
   a single completion), supersede-chain integrity.
-- `scripts/e21_kb_write_path.clj` — demo on the family-generator schema,
+- `tools/e21_kb_write_path.clj` — demo on the family-generator schema,
   printing the acceptance-criteria report.
 - `paper-experiments/e21-kb/2026-09-17/` — `results.edn` with the
   acceptance report + latency measurements.

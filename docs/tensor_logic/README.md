@@ -1,6 +1,6 @@
 # Declarative Tensor Logic & Relational Memory for LLMs
 
-Welcome to the **Declarative Tensor Logic & In-Tensor Relational Memory** knowledge base of `clj-xla`.
+Welcome to the **Declarative Tensor Logic & In-Tensor Relational Memory** knowledge base of `clj-einsum`.
 
 This documentation suite establishes the theoretical foundations, empirical results, architectural comparisons, and long-term research roadmap for unifying Large Language Models (LLMs) with symbolic Knowledge Bases (KBs) via **Pedro Domingos' Declarative Tensor Logic**.
 
@@ -86,13 +86,13 @@ Comprehensive architectural breakdown, commercial enterprise positioning, and gl
 
 | Subsystem | Source Path | Test Path |
 | :--- | :--- | :--- |
-| **Relational Memory & Superposition** | [`clj_xla.logic.memory.relation`](../../src/clj_xla/logic/memory/relation.clj) | [`clj_xla.logic.memory.relation-test`](../../test/clj_xla/logic/memory/relation_test.clj) |
-| **Unified TL-Transformer Block** | [`clj_xla.logic.models.tl_block`](../../src/clj_xla/logic/models/tl_block.clj) | [`clj_xla.logic.models.tl_block-test`](../../test/clj_xla/logic/models/tl_block_test.clj) |
-| **TL-Nano Foundation Model** | [`clj_xla.logic.models.tl_nano`](../../src/clj_xla/logic/models/tl_nano.clj) | [`clj_xla.logic.models.tl_nano-test`](../../test/clj_xla/logic/models/tl_nano_test.clj) |
-| **Symbolic Logic & Datalog Fixpoints** | [`clj_xla.logic.symbolic`](../../src/clj_xla/logic/symbolic.clj) | [`clj_xla.logic.symbolic-test`](../../test/clj_xla/logic/symbolic_test.clj) |
-| **Value-Carrying Semirings** | [`clj_xla.logic.semiring`](../../src/clj_xla/logic/semiring.clj) | [`clj_xla.logic.semiring-test`](../../test/clj_xla/logic/semiring_test.clj) |
-| **Autodiff Adjoints for Probes** | [`clj_xla.logic.autodiff`](../../src/clj_xla/logic/autodiff.clj) | [`clj_xla.logic.autodiff-test`](../../test/clj_xla/logic/autodiff_test.clj) |
-| **LLM-Anchored Memory & QR** | [`scripts.poc-anchored-memory`](../../scripts/poc_anchored_memory.clj) | [`clj_xla.logic.memory.anchored-memory-test`](../../test/clj_xla/logic/memory/anchored_memory_test.clj) |
-| **Gemma 4 Grounding AST Block** | [`clj_xla.logic.models.gemma`](../../src/clj_xla/logic/models/gemma.clj) | [`clj_xla.integration.rocm-e2e-test`](../../test/clj_xla/integration/rocm_e2e_test.clj) |
-| **TL-Nano Real-Data Pre-training** | [`scripts.poc-tl-nano-real-data`](../../scripts/poc_tl_nano_real_data.clj) | [`clj_xla.logic.models.tl_nano-test`](../../test/clj_xla/logic/models/tl_nano_test.clj) |
+| **Relational Memory & Superposition** | [`einsum.logic.memory.relation`](../../src/einsum/logic/memory/relation.clj) | [`einsum.logic.memory.relation-test`](../../test/einsum/logic/memory/relation_test.clj) |
+| **Unified TL-Transformer Block** | [`models.tl-block`](../../models/tl_block.clj) | [`models.tl-block-test`](../../test/models/tl_block_test.clj) |
+| **TL-Nano Foundation Model** | [`models.tl-nano`](../../models/tl_nano.clj) | [`models.tl-nano-test`](../../test/models/tl_nano_test.clj) |
+| **Symbolic Logic & Datalog Fixpoints** | [`einsum.logic.symbolic`](../../src/einsum/logic/symbolic.clj) | [`einsum.logic.symbolic-test`](../../test/einsum/logic/symbolic_test.clj) |
+| **Value-Carrying Semirings** | [`einsum.logic.semiring`](../../src/einsum/logic/semiring.clj) | [`einsum.logic.semiring-test`](../../test/einsum/logic/semiring_test.clj) |
+| **Autodiff Adjoints for Probes** | [`einsum.logic.autodiff`](../../src/einsum/logic/autodiff.clj) | [`einsum.logic.autodiff-test`](../../test/einsum/logic/autodiff_test.clj) |
+| **LLM-Anchored Memory & QR** | [`tools.poc-anchored-memory`](../../tools/poc_anchored_memory.clj) | [`einsum.logic.memory.anchored-memory-test`](../../test/einsum/logic/memory/anchored_memory_test.clj) |
+| **Gemma 4 Grounding AST Block** | [`models.gemma`](../../models/gemma.clj) | [`einsum.integration.rocm-e2e-test`](../../test/einsum/integration/rocm_e2e_test.clj) |
+| **TL-Nano Real-Data Pre-training** | [`tools.poc-tl-nano-real-data`](../../tools/poc_tl_nano_real_data.clj) | [`models.tl-nano-test`](../../test/models/tl_nano_test.clj) |
 

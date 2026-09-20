@@ -12,11 +12,11 @@
 
 ---
 
-## 1. Empirical Results Matrix (`clj-xla`: Host CPU vs. AMD Radeon RX 7900 XTX ROCm)
+## 1. Empirical Results Matrix (`clj-einsum`: Host CPU vs. AMD Radeon RX 7900 XTX ROCm)
 
-*Execution parameters: `--warmup 5 --measure 50` via `./scripts/benchmark.sh`.*
+*Execution parameters: `--warmup 5 --measure 50` via `./tools/benchmark.sh`.*
 
-| Workload Kernel | `clj-xla` CPU Mean (ms) | `clj-xla` ROCm GPU Mean (ms) | ROCm GPU P50 (ms) | ROCm GPU TFLOPS / Bandwidth | GPU Speedup Factor |
+| Workload Kernel | `clj-einsum` CPU Mean (ms) | `clj-einsum` ROCm GPU Mean (ms) | ROCm GPU P50 (ms) | ROCm GPU TFLOPS / Bandwidth | GPU Speedup Factor |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **GEMM FP32 ($1024^3$)** | 1.07 ms | **0.34 ms** | 0.35 ms | **6.24 TFLOPS** | **3.10x** |
 | **GEMM BF16 ($1024^3$)** | 1.66 ms | **0.16 ms** | 0.15 ms | **13.55 TFLOPS** | **10.52x** |
@@ -28,11 +28,11 @@
 
 ---
 
-## 2. Python/XLA (Official AMD `rocm/jax:latest` Container) vs. JVM/XLA (`clj-xla`) 1:1 Parity Matrix
+## 2. Python/XLA (Official AMD `rocm/jax:latest` Container) vs. JVM/XLA (`clj-einsum`) 1:1 Parity Matrix
 
-*Comparison collected on the AMD Radeon RX 7900 XTX 24GB GPU running official AMD `rocm/jax:latest` container vs native `clj-xla` OpenXLA PJRT C API backend.*
+*Comparison collected on the AMD Radeon RX 7900 XTX 24GB GPU running official AMD `rocm/jax:latest` container vs native `clj-einsum` OpenXLA PJRT C API backend.*
 
-| Workload Kernel | Official AMD JAX `rocm/jax` Mean | `clj-xla` ROCm GPU Mean | `clj-xla` ROCm GPU P50 | Official JAX TFLOPS | `clj-xla` ROCm TFLOPS | Performance Impact of `#stablehlo<precision DEFAULT>` |
+| Workload Kernel | Official AMD JAX `rocm/jax` Mean | `clj-einsum` ROCm GPU Mean | `clj-einsum` ROCm GPU P50 | Official JAX TFLOPS | `clj-einsum` ROCm TFLOPS | Performance Impact of `#stablehlo<precision DEFAULT>` |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
 | **GEMM FP32 ($1024^3$)** | **0.146 ms** | **0.344 ms** | **0.351 ms** | **14.71 TFLOPS** | **6.24 TFLOPS** | **15.1% FASTER** ($0.344\text{ ms}$ vs $0.396\text{ ms}$) |
 | **GEMM BF16 ($1024^3$)** | **0.078 ms** | **0.158 ms** | **0.149 ms** | **27.53 TFLOPS** | **13.55 TFLOPS** | **28.5% FASTER** ($0.158\text{ ms}$ vs $0.203\text{ ms}$) |
@@ -46,9 +46,9 @@
 
 ## 3. Reproduction Commands
 
-- **Run `clj-xla` ROCm Hardware Benchmark**:
+- **Run `clj-einsum` ROCm Hardware Benchmark**:
   ```bash
-  ./scripts/benchmark.sh --backend rocm --warmup 5 --measure 50
+  ./tools/benchmark.sh --backend rocm --warmup 5 --measure 50
   ```
 - **Run Python JAX Benchmark in Official AMD ROCm Container**:
   ```bash

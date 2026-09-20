@@ -50,9 +50,9 @@ Where:
 - $\mathbf{0}$ is the identity of $\oplus$ (falsehood / impossible).
 - $\mathbf{1}$ is the identity of $\otimes$ (certainty / neutral weight).
 
-### Implemented Semirings in `clj-xla`
+### Implemented Semirings in `clj-einsum`
 
-[`clj-xla.logic.semiring`](../../src/clj_xla/logic/semiring.clj) implements first-class support for multiple semiring algebras lowered into StableHLO MLIR:
+[`einsum.logic.semiring`](../../src/einsum/logic/semiring.clj) implements first-class support for multiple semiring algebras lowered into StableHLO MLIR:
 
 ```mermaid
 flowchart TD
@@ -82,7 +82,7 @@ Given a directed relation graph $P \in \mathbb{R}^{N \times N}$, its transitive 
 
 $$A_{t+1} = \text{clamp}\big(A_t + A_t \cdot P, \, 0, \, 1\big), \quad A_0 = P$$
 
-In `clj-xla`, this is compiled into a single fused OpenXLA loop via [`clj-xla.logic.symbolic/datalog-transitive-step-ast`](../../src/clj_xla/logic/symbolic.clj#L120).
+In `clj-einsum`, this is compiled into a single fused OpenXLA loop via [`einsum.logic.symbolic/datalog-transitive-step-ast`](../../src/einsum/logic/symbolic.clj#L120).
 
 ```clojure
 ;; Transitive Step AST lowered to OpenXLA

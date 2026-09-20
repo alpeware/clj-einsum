@@ -75,7 +75,7 @@ Code in experiment pods remains isolated. It is promoted into the core library o
 
 ## Testing & CI Invariants
 
-- `clojure -M:format`, `clojure -M:lint`, and `clojure -M:test -m clj-xla.test-runner` must all pass with zero warnings or errors.
+- `clojure -M:format`, `clojure -M:lint`, and `clojure -M:test -m einsum.test-runner` must all pass with zero warnings or errors.
 - New behaviors require generative property tests (`clojure.test.check`).
 - Staged diffs must be narrow and single-purpose.
 - All numbers in reports must be grounded to physical hardware. Modest numbers reported as modest. No ungrounded claims.

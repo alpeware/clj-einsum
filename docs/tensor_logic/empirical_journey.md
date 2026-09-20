@@ -110,7 +110,7 @@ While template dominance is real, span pooling alone without semantic alignment 
 Can a linear probe $W \in \mathbb{R}^{1536 \times 256}$ be trained via gradient descent to map frozen LLM hidden states to the symbolic entity space?
 
 ### Formulation & Dogfooding Adjoint Equations
-Dogfooding [`clj-xla.logic.autodiff/derive-adjoint-equations`](../../src/clj_xla/logic/autodiff.clj) to generate exact backward contractions:
+Dogfooding [`einsum.logic.autodiff/derive-adjoint-equations`](../../src/einsum/logic/autodiff.clj) to generate exact backward contractions:
 $$u = h \cdot W, \quad s = u \cdot E^T, \quad p = \text{Softmax}(s)$$
 $$\frac{\partial \mathcal{L}}{\partial u} = (p - y) \cdot E, \quad \frac{\partial \mathcal{L}}{\partial W} = h^T \otimes \frac{\partial \mathcal{L}}{\partial u}$$
 
@@ -208,7 +208,7 @@ $$\alpha_t = \text{softmax}\left(\frac{\langle H_t, k_{\text{attn}} \rangle}{\ta
 The attention weights should dynamically learn to route attention to the head entity tokens while suppressing syntactic template tokens, invariant to phrasing.
 
 ### Experimental Configuration & Software
-- **Implementation**: [`clj_xla.logic.memory.camp`](../../src/clj_xla/logic/memory/camp.clj), [`test.clj_xla.logic.memory.camp-test`](../../test/clj_xla/logic/memory/camp_test.clj), [`scripts.poc-camp`](../../scripts/poc_camp.clj).
+- **Implementation**: [`einsum.logic.memory.camp`](../../src/einsum/logic/memory/camp.clj), [`test.einsum.logic.memory.camp-test`](../../test/einsum/logic/memory/camp_test.clj), [`tools.poc-camp`](../../tools/poc_camp.clj).
 - **Execution Target**: AMD Radeon RX 7900 XTX (24GB VRAM) via OpenXLA PJRT ROCm plugin.
 - **Model**: Gemma 4 E2B in sequence mode (`:last-token-only? false`, `:targets [:normed]`).
 - **Memory Subspace**: LLM-anchored QR-orthonormalized table ($D=1536$, zero cross-talk).
@@ -302,7 +302,7 @@ $$S_{r_3, i, k}^{(t+1)} = S_{r_3, i, k}^{(t)} \lor \bigvee_j \left( S_{r_1, i, j
 Fixed-point iteration reaches deductive closure in $K$ tensor matrix multiplications within milliseconds, guaranteeing zero hallucinations and **strictly $O(1)$ constant VRAM** across arbitrarily long agent horizons.
 
 ### Experimental Configuration & Software
-- **Implementation**: [`clj_xla.logic.agent.state_tracker`](../../src/clj_xla/logic/agent/state_tracker.clj), [`test.clj_xla.logic.agent.state_tracker-test`](../../test/clj_xla/logic/agent/state_tracker_test.clj), [`scripts.poc-datalog-state-tracker`](../../scripts/poc_datalog_state_tracker.clj).
+- **Implementation**: [`einsum.logic.agent.state_tracker`](../../src/einsum/logic/agent/state_tracker.clj), [`test.einsum.logic.agent.state_tracker-test`](../../test/einsum/logic/agent/state_tracker_test.clj), [`tools.poc-datalog-state-tracker`](../../tools/poc_datalog_state_tracker.clj).
 - **Execution Target**: AMD Radeon RX 7900 XTX (24GB VRAM) via OpenXLA PJRT ROCm plugin.
 - **Relational Domain**: 16 entities ($N=16$), 5 dynamic agent relations ($R=5$: `parent`, `ancestor` [transitive closure], `located_at`, `in_country` [multi-hop geo-inference], `can_access` [role-based security access control]).
 - **Simulation**: 100 sequential agent turns performing dynamic fact asserts, updates, and complex multi-hop deductive queries.
@@ -367,7 +367,7 @@ where $\alpha \in [0, 1]$ controls retention/decay, and $\beta$ controls write s
 Because tensor addition, tensor subtraction (fact retraction), matrix multiplication (transitive composition $R_{1 \circ 2} = R_1 \cdot R_2$), and the extract-threshold-re-embed denoising cycle are compiled directly into OpenXLA PJRT kernels, online learning operates with **zero backpropagation, sub-2ms latency, 100% zero-shot recall, and zero prompt context bloat**.
 
 ### Experimental Configuration & Software
-- **Implementation**: [`clj_xla.logic.memory.ephemeral`](../../src/clj_xla/logic/memory/ephemeral.clj), [`test.clj_xla.logic.memory.ephemeral-test`](../../test/clj_xla/logic/memory/ephemeral_test.clj), [`scripts.poc-ephemeral-learning`](../../scripts/poc_ephemeral_learning.clj).
+- **Implementation**: [`einsum.logic.memory.ephemeral`](../../src/einsum/logic/memory/ephemeral.clj), [`test.einsum.logic.memory.ephemeral-test`](../../test/einsum/logic/memory/ephemeral_test.clj), [`tools.poc-ephemeral-learning`](../../tools/poc_ephemeral_learning.clj).
 - **Execution Target**: AMD Radeon RX 7900 XTX (24GB VRAM) via OpenXLA PJRT ROCm plugin.
 - **Relational Domain**: 32 Cloud Infrastructure and microservice entities ($N=32$), embedding dimension $D=256$.
 - **Compiled Kernels**:
@@ -452,7 +452,7 @@ Inspired by `waylandzhang/tensorlogic` (`KnowledgeGraphTransformer`), an in-grap
 where $\gamma > 0$ provides a symbolic grounding prior that amplifies true relational paths while suppressing distractor interference, without violating autoregressive causality ($p_k \le p_q$).
 
 ### Experimental Configuration & Software
-- **Implementation**: [`clj_xla.logic.attention.kg-masked`](../../src/clj_xla/logic/attention/kg_masked.clj), [`test.clj_xla.logic.attention.kg-masked-test`](../../test/clj_xla/logic/attention/kg_masked_test.clj), [`scripts.poc-kg-masked-attention`](../../scripts/poc_kg_masked_attention.clj).
+- **Implementation**: [`einsum.logic.attention.kg-masked`](../../src/einsum/logic/attention/kg_masked.clj), [`test.einsum.logic.attention.kg-masked-test`](../../test/einsum/logic/attention/kg_masked_test.clj), [`tools.poc-kg-masked-attention`](../../tools/poc_kg_masked_attention.clj).
 - **Execution Target**: AMD Radeon RX 7900 XTX (24GB VRAM) via OpenXLA PJRT ROCm plugin.
 - **Scenario**: Multi-Entity Adversarial Distraction Prompt:
   *"Elon Musk Tesla Tim Cook Apple Dario Amodei Who is the CEO of Anthropic? :"*
@@ -520,7 +520,7 @@ To establish a generalizable bridge between high-dimensional LLM semantic spaces
    All forward, backward, and update operations are lowered into StableHLO MLIR and executed on OpenXLA PJRT with zero Java/host loops.
 
 ### Experimental Configuration & Software
-- **Implementation**: [`clj_xla.logic.memory.contrastive`](../../src/clj_xla/logic/memory/contrastive.clj), [`test.clj_xla.logic.memory.contrastive-test`](../../test/clj_xla/logic/memory/contrastive_test.clj), [`scripts.poc-contrastive-pretraining`](../../scripts/poc_contrastive_pretraining.clj).
+- **Implementation**: [`einsum.logic.memory.contrastive`](../../src/einsum/logic/memory/contrastive.clj), [`test.einsum.logic.memory.contrastive-test`](../../test/einsum/logic/memory/contrastive_test.clj), [`tools.poc-contrastive-pretraining`](../../tools/poc_contrastive_pretraining.clj).
 - **Hardware Targets**: AMD Radeon RX 7900 XTX (24GB VRAM, ROCm via `libjsig.so`) & Host CPU.
 - **Dimensionality**: $D_{\text{in}} = 256$ (high-dim semantic space) $\to D_{\text{mem}} = 64$ (compact relational subspace).
 - **Knowledge Ontology**: 32 infrastructure entities across 4 distinct relations (`depends_on`, `runs_on`, `managed_by`, `grants_access`).
@@ -585,7 +585,7 @@ Having independently validated each theoretical component in isolation—**CAMP 
 3. When queried relations are resident in VRAM fast weights, the block injects crisp, deductively grounded factual biases into the residual stream; when memory is empty, the block acts as a standard transformer layer with zero factual drift or hallucination.
 
 ### Architecture & Declarative AST Specification
-Implemented in [`clj_xla.logic.models.tl-block`](../../src/clj_xla/logic/models/tl_block.clj):
+Implemented in [`models.tl-block`](../../models/tl_block.clj):
 1. **KG-Masked Self-Attention**:
    $$\text{Attn}_{\text{out}} = \text{causal-softmax}\left(\frac{Q K^T}{\sqrt{d_h}} + \gamma (T R_{\text{adj}} T^T)\right) V \cdot W_o$$
    $$H_{\text{attn}} = H + \text{Attn}_{\text{out}}$$
@@ -602,7 +602,7 @@ Implemented in [`clj_xla.logic.models.tl-block`](../../src/clj_xla/logic/models/
 
 ### Empirical Findings on AMD Radeon RX 7900 XTX (OpenXLA PJRT ROCm)
 
-Evaluated via [`scripts/poc_tl_transformer_block.clj`](../../scripts/poc_tl_transformer_block.clj) on 16 infrastructure entities ($L=16$ tokens, $H=4$ heads, $D=256$, $D_{\text{mem}}=64$, $D_{\text{ff}}=1024$):
+Evaluated via [`tools/poc_tl_transformer_block.clj`](../../tools/poc_tl_transformer_block.clj) on 16 infrastructure entities ($L=16$ tokens, $H=4$ heads, $D=256$, $D_{\text{mem}}=64$, $D_{\text{ff}}=1024$):
 
 ```
 ================================================================================
@@ -659,7 +659,7 @@ We hypothesize that an agent augmented with Pedro Domingos' Declarative Tensor L
 ---
 
 ### Architecture & Benchmark Design
-Implemented in [`clj_xla.logic.agent.swe-benchmark`](../../src/clj_xla/logic/agent/swe_benchmark.clj) and evaluated via [`scripts/poc_long_horizon_agent.clj`](../../scripts/poc_long_horizon_agent.clj):
+Implemented in [`einsum.logic.agent.swe-benchmark`](../../src/einsum/logic/agent/swe_benchmark.clj) and evaluated via [`tools/poc_long_horizon_agent.clj`](../../tools/poc_long_horizon_agent.clj):
 
 1. **Codebase Universe ($N=112$ entities)**:
    - **32 Files**: Tiered into `core/`, `engine/`, `models/`, and `test/`.
@@ -737,7 +737,7 @@ We hypothesize that:
 ---
 
 ### Architecture & Declarative AST Specification
-Implemented in [`clj_xla.logic.memory.factorization`](../../src/clj_xla/logic/memory/factorization.clj) and benchmarked via [`scripts/poc_relation_induction.clj`](../../scripts/poc_relation_induction.clj):
+Implemented in [`einsum.logic.memory.factorization`](../../src/einsum/logic/memory/factorization.clj) and benchmarked via [`tools/poc_relation_induction.clj`](../../tools/poc_relation_induction.clj):
 
 1. **Tensor Decomposition Model**:
    $$\hat{\mathcal{X}}_{h, k, t} = \sum_{r=1}^R A_{h, r} B_{k, r} C_{t, r}$$
@@ -818,7 +818,7 @@ Under Pedro Domingos' Declarative Tensor Logic, explicit factual associations li
 ### Mathematical Architecture & StableHLO Formulation
 
 1. **Declarative TL-Nano Layer Block**:
-   Implemented in [`src/clj_xla/logic/models/tl_nano.clj`](../../src/clj_xla/logic/models/tl_nano.clj).
+   Implemented in [`models/tl_nano.clj`](../../models/tl_nano.clj).
    - **Embedding Lookup**:
      $$H_0 = \text{gather}(W_{\text{embed}}, X)$$
    - **Pre-Attention RMSNorm & Multi-Head Projections**:
@@ -838,7 +838,7 @@ Under Pedro Domingos' Declarative Tensor Logic, explicit factual associations li
      $$\text{Logits} = \text{RMSNorm}(H_L) W_{\text{embed}}^T$$
 
 2. **Reverse-Mode Adjoint Gradients**:
-   Derived algebraically via [`clj-xla.logic.autodiff`](../../src/clj_xla/logic/autodiff.clj) and executed in OpenXLA PJRT:
+   Derived algebraically via [`einsum.logic.autodiff`](../../src/einsum/logic/autodiff.clj) and executed in OpenXLA PJRT:
    $$G_{\text{logits}} = \frac{1}{B \cdot (L-1)} (P - 1_y)$$
    $$dW_{\text{embed}} = G_{\text{logits}}^T \cdot H_L, \quad dR = \lambda_{\text{TL}} (U_h^T \cdot \text{adj}_{U_{hr}}), \quad dW_{\text{mem}} = \lambda_{\text{TL}} (V_h^T \cdot \text{adj}_{Uh} + V_t^T \cdot \text{adj}_{Ut})$$
 
@@ -976,7 +976,7 @@ Having verified TL-Nano pre-training on synthetic tokens (E9), we transition to 
 
 ### Experimental Setup & Dataset Specification
 
-Implemented in [`scripts/poc_tl_nano_real_data.clj`](../../scripts/poc_tl_nano_real_data.clj) and curated in [`data/wikifacts_corpus.edn`](../../data/wikifacts_corpus.edn):
+Implemented in [`tools/poc_tl_nano_real_data.clj`](../../tools/poc_tl_nano_real_data.clj) and curated in [`data/wikifacts_corpus.edn`](../../data/wikifacts_corpus.edn):
 - **Curated Knowledge Corpus**:
   - **34 Real Entities**: Tech enterprises (*Anthropic*, *OpenAI*, *DeepMind*, *Tesla*, *Apple*, *Microsoft*, *Alpeware*), founders & craftsmen (*Dario Amodei*, *Sam Altman*, *Demis Hassabis*, *Elon Musk*, *Tim Cook*, *Satya Nadella*, *Simon Pure*, *Rich Hickey*, *Linus Torvalds*, *Guido van Rossum*, *Pedro Domingos*), runtimes & platforms (*Clojure*, *Linux*, *Python*, *Git*, *OpenXLA*, *StableHLO*, *JVM*, *AMD*, *ROCm*, *NVIDIA*, *CUDA*), and headquarters (*San Francisco*, *Cupertino*, *Redmond*, *Austin*).
   - **7 Relational Predicates**: `:ceo_of`, `:created_by`, `:headquartered_in`, `:compiles`, `:formulated_by`, `:runs_on`, `:developed_by`.
@@ -984,7 +984,7 @@ Implemented in [`scripts/poc_tl_nano_real_data.clj`](../../scripts/poc_tl_nano_r
   - **69 Natural Language Sentences**: Multi-style declarative sentences, active/passive voice, founder profiles, and question-answer phrasings.
   - **18 Held-Out Cloze Prompts**: Formal zero-shot cloze QA prompts (`"The CEO of Anthropic is"`, `"Python was created by"`, `"Microsoft is headquartered in"`).
 - **Tokenization & Active Sub-Vocabulary**:
-  - Production GPT-2 BPE tokenizer loaded directly from `.models/gpt2` via `clj-xla.tokenizer.core`.
+  - Production GPT-2 BPE tokenizer loaded directly from `.models/gpt2` via `einsum.runtime.tokenizer.core`.
   - Active sub-vocabulary: Exactly **327 unique BPE tokens** mapped bijectively into dense active index space $[0, 512)$ with index 0 reserved for padding (`<pad>`).
 - **Hardware & Backend**:
   - **AMD Radeon RX 7900 XTX** (24GB VRAM, RDNA3 gfx1100) via OpenXLA PJRT ROCm plugin with `libjsig.so` signal handler preloading.
@@ -1090,7 +1090,7 @@ Experiment E10 accomplishes a vital milestone in neuro-symbolic language modelin
 **Proof that Pedro Domingos' Declarative Tensor Logic Memory Lowering Operates on Real Natural Language Text and Real BPE Subword Tokenizers**:
 1. **Subword Realism**: The model is no longer operating on synthetic integer IDs; it ingests real GPT-2 BPE tokens, learns syntax, and unbinds subwords like `" Dem"`, `" Gu"`, and `" Redmond"`.
 2. **Deterministic Deductive Actuation**: When relational fast weights $R_r$ are populated, the model directly redirects its prediction distribution toward the deductively sound answer, achieving a $+0.89$ average logit boost and flipping mistaken baseline guesses into verified facts.
-3. **Reproducibility**: The entire pipeline—data loading, BPE sub-vocabulary extraction, batching, OpenXLA PJRT compilation, pre-training, and cloze evaluation—is fully automated and reproducible in under 2 minutes via `scripts/poc_tl_nano_real_data.clj`.
+3. **Reproducibility**: The entire pipeline—data loading, BPE sub-vocabulary extraction, batching, OpenXLA PJRT compilation, pre-training, and cloze evaluation—is fully automated and reproducible in under 2 minutes via `tools/poc_tl_nano_real_data.clj`.
 
 ---
 
@@ -1098,7 +1098,7 @@ Experiment E10 accomplishes a vital milestone in neuro-symbolic language modelin
 
 ### Hypothesis
 Moving beyond curated toy datasets, we test the scalability, factual grounding, and generalization of the TL-Nano architecture on the standardized **WebNLG v3.0 English Benchmark** (Gardent et al., 2017; Castro Ferreira et al., 2020), which pairs complex RDF knowledge graph triples with multi-sentence natural language descriptions across diverse domains (Airports, Astronauts, Monuments, Sports, etc.). We hypothesize that:
-1. Decoupling the data lifecycle into an uncommitted dataset cache (`.dataset/`), a binary model checkpoint engine ([`clj-xla.logic.models.checkpoint`](../../src/clj_xla/logic/models/checkpoint.clj)), and standalone drivers for **training**, **evaluation**, and **interactive inference** will allow reproducible benchmarking and persistent weights.
+1. Decoupling the data lifecycle into an uncommitted dataset cache (`.dataset/`), a binary model checkpoint engine ([`models.checkpoint`](../../models/checkpoint.clj)), and standalone drivers for **training**, **evaluation**, and **interactive inference** will allow reproducible benchmarking and persistent weights.
 2. Pre-training TL-Nano from scratch on thousands of WebNLG sentences will simultaneously reduce language modeling cross-entropy ($\mathcal{L}_{\text{LM}}$) and learn multi-relational transition operators ($R_r \in \mathbb{R}^{64 \times 64}$) for over 300 distinct relations.
 3. On held-out cloze question-answering evaluation on unseen dev set triples, binding the relational memory matrix $R_r$ will produce statistically significant positive logit shifts ($> +1.0$ logits, doubling or tripling true candidate probability) compared to the ungrounded neural baseline.
 
@@ -1106,7 +1106,7 @@ Moving beyond curated toy datasets, we test the scalability, factual grounding, 
 
 ### Decoupled Pipeline & Architecture Specification
 
-1. **Dataset Ingestion & Preprocessing** ([`scripts/prepare_webnlg.clj`](../../scripts/prepare_webnlg.clj)):
+1. **Dataset Ingestion & Preprocessing** ([`tools/prepare_webnlg.clj`](../../tools/prepare_webnlg.clj)):
    - Clones official WebNLG v3.0 release XML files.
    - Extracts and normalizes entities, predicates, and reference sentences into EDN.
    - Outputs:
@@ -1114,15 +1114,15 @@ Moving beyond curated toy datasets, we test the scalability, factual grounding, 
      - `.dataset/webnlg/dev.edn` (1,062 entries, 2,786 sentences, 1,464 triples, 0.39 MB).
    - `.dataset/` is added to `.gitignore` to keep git history clean.
 
-2. **Binary Model Checkpoint Engine** ([`src/clj_xla/logic/models/checkpoint.clj`](../../src/clj_xla/logic/models/checkpoint.clj)):
+2. **Binary Model Checkpoint Engine** ([`models/checkpoint.clj`](../../models/checkpoint.clj)):
    - Custom high-speed binary serialization using Java `DataOutputStream` / `DataInputStream` and raw byte arrays.
    - Persists model hyperparameters, active sub-vocabulary mappings (`bpe->active`, `active->bpe`), candidate target entities, all learned relational transition matrices $\{R_r\}$, and device tensor parameters ($W_{\text{embed}}$, $W_{\text{mem}}$, etc.).
    - Saves and restores the complete 47.9 MB checkpoint in $< 50\text{ ms}$.
 
 3. **Decoupled Drivers**:
-   - **Training**: [`scripts/train_tl_nano_webnlg.clj`](../../scripts/train_tl_nano_webnlg.clj) (supports `--backend rocm`, batching, saving to checkpoint).
-   - **Evaluation**: [`scripts/eval_tl_nano_webnlg.clj`](../../scripts/eval_tl_nano_webnlg.clj) (evaluates held-out cloze QA on `dev.edn`, compares baseline vs. active $R_{\text{mem}}$, prints comparison against published baselines).
-   - **Inference**: [`scripts/infer_tl_nano_webnlg.clj`](../../scripts/infer_tl_nano_webnlg.clj) (supports `--prompt`, `--relation`, and live `--interactive` REPL loop).
+   - **Training**: [`tools/train_tl_nano_webnlg.clj`](../../tools/train_tl_nano_webnlg.clj) (supports `--backend rocm`, batching, saving to checkpoint).
+   - **Evaluation**: [`tools/eval_tl_nano_webnlg.clj`](../../tools/eval_tl_nano_webnlg.clj) (evaluates held-out cloze QA on `dev.edn`, compares baseline vs. active $R_{\text{mem}}$, prints comparison against published baselines).
+   - **Inference**: [`tools/infer_tl_nano_webnlg.clj`](../../tools/infer_tl_nano_webnlg.clj) (supports `--prompt`, `--relation`, and live `--interactive` REPL loop).
 
 ---
 
@@ -1140,7 +1140,7 @@ Constructed 527 training batches of size 16 (seq-len=24).
 Ground-Truth Triples: 3,167 | Relations: 348 | Candidate Targets: 55
 
 PJRT Plugin loaded [bin/libpjrt_rocm.so] (API Version: 24.0)
-clj-xla initialized PJRT Backend: [rocm] via plugin [bin/libpjrt_rocm.so]
+clj-einsum initialized PJRT Backend: [rocm] via plugin [bin/libpjrt_rocm.so]
 OpenXLA PJRT Context initialized on rocm.
 
 Compiling OpenXLA PJRT Training Executable...
@@ -1218,9 +1218,9 @@ Mean Target Logit Shift Across Dev:   +1.0042
 
 ### Interactive Inference & Factual Grounding
 
-Using `scripts/infer_tl_nano_webnlg.clj` to test factual completion:
+Using `tools/infer_tl_nano_webnlg.clj` to test factual completion:
 ```bash
-./scripts/infer_tl_nano_webnlg.sh --prompt "The cityServed of Aarhus Airport is" --relation "cityServed"
+./tools/infer_tl_nano_webnlg.sh --prompt "The cityServed of Aarhus Airport is" --relation "cityServed"
 ```
 **Results**:
 - **Pure Neural (Zero $R_{\text{mem}}$)**: Hallucinates unrelated tokens:
@@ -1313,7 +1313,7 @@ The official WebNLG v3.0 test split was ingested into:
 - **`test_unseen.edn`** (813 entries, 102 relations): Contains 31 novel relations absent from the training set.
 
 #### Evaluation Protocol & Scope
-The evaluation harness (`scripts/eval_tl_nano_webnlg.clj`) performs a **within-query causal ablation**: for each cloze test prompt, it compares the model with active relational memory ($R_r$) against the identical model with zeroed relational memory ($R_{\text{mem}} = 0$).
+The evaluation harness (`tools/eval_tl_nano_webnlg.clj`) performs a **within-query causal ablation**: for each cloze test prompt, it compares the model with active relational memory ($R_r$) against the identical model with zeroed relational memory ($R_{\text{mem}} = 0$).
 *Important Scope Note*: The cloze test evaluates the **Relational Memory Unbinding path** ($u_q = h W_{\text{mem}}, u_{\text{target}} = u_q R_r, v_{\text{bias}} = \lambda_{\text{mem}} v_{\text{grounded}}$ added to the residual stream). Because candidate entity text spans are unknown during generation, $T$ and $R_{\text{adj}}$ are set to zero in the cloze test (evaluating $R_{\text{mem}}$ without the KG-mask attention modulation).
 
 #### 1. Seen Test Split Evaluation (`test_seen.edn`, $N=100$)
@@ -1380,7 +1380,7 @@ Rank Trajectory (Vocab)    : 36 (36.0%) Improved | 29 (29.0%) Unchanged | 35 (35
 ### Action 3: Token-to-Entity $T$-Matrix Alignment Verification
 
 The assignment matrix $T \in \mathbb{R}^{L \times N_e}$ grounds variable-length text spans to discrete entity indices.
-Using `scripts/align_webnlg_entities.clj`, automated spot-check evaluation over 150 instances (300 target entities) demonstrated:
+Using `tools/align_webnlg_entities.clj`, automated spot-check evaluation over 150 instances (300 target entities) demonstrated:
 - **Overall Alignment Recall**: **$85.0\%$** (255 / 300 entities resolved).
 - **Exact / Normalized String Matches**: **$98.0\%$** of resolved entities were exact substring matches.
 - **Error Taxonomy ($15.0\%$ Unaligned)**:
@@ -1432,7 +1432,7 @@ A rigorous code audit uncovered three distinct interacting root causes:
 1. **Exact Row-Aligned Hidden Buffer Extraction**:
    In `nano/train-step`, `h-flat` of exact shape $[b \times (l - 1), d]$ is extracted via row-wise `System/arraycopy` chunks of size $(l - 1) \times d$, skipping position $l-1$ of each batch. Every row of $G_{\text{logit}}$ now corresponds 1-to-1 to its exact forward hidden state.
 2. **Full In-VRAM Relational Autodiff Contraction Chain**:
-   Lowered the complete relational adjoint contraction chain into OpenXLA PJRT via `nano/compile-relational-backward` (backed by `clj-xla.logic.memory.contrastive`):
+   Lowered the complete relational adjoint contraction chain into OpenXLA PJRT via `nano/compile-relational-backward` (backed by `einsum.logic.memory.contrastive`):
    $$\Delta U_{hr} = G_S U_t \in \mathbb{R}^{K \times D_m}, \quad \Delta U_t = G_S^T U_{hr} \in \mathbb{R}^{K \times D_m}$$
    $$\Delta R_{\text{mem}} = U_h^T \Delta U_{hr} \in \mathbb{R}^{D_m \times D_m}, \quad \Delta U_h = \Delta U_{hr} R_{\text{mem}}^T \in \mathbb{R}^{K \times D_m}$$
    $$\Delta W_{\text{mem}} = V_h^T \Delta U_h + V_t^T \Delta U_t \in \mathbb{R}^{D \times D_m}$$
@@ -1531,7 +1531,7 @@ Following the stabilization of monotonic LM descent, two critical open questions
 
 #### 1. Distractor Selectivity Diagnostic: The Mathematical Reality
 
-To answer the mechanism question, we instrumented `scripts/eval_tl_nano_webnlg.clj` with query-level distractor tracking. For every evaluation query, we measured:
+To answer the mechanism question, we instrumented `tools/eval_tl_nano_webnlg.clj` with query-level distractor tracking. For every evaluation query, we measured:
 - Target Logit Shift: $\Delta_{\text{target}} = \text{logit}_{\text{active}}(\text{target}) - \text{logit}_{\text{zero}}(\text{target})$
 - Distractor Logit Shifts: $\Delta_{\text{dist}, c} = \text{logit}_{\text{active}}(c) - \text{logit}_{\text{zero}}(c)$ for all distractors $c \neq \text{target}$
 - Neighborhood Selectivity: % of queries where $\Delta_{\text{target}} > \text{mean}(\Delta_{\text{dist}})$
@@ -1583,7 +1583,7 @@ The distractor diagnostic delivers an unequivocal, mathematically honest finding
 
 To fulfill repository Rule 4 and prove the core thesis of Pedro Domingos' Declarative Tensor Logic, all remaining host operations in the InfoNCE step were eliminated by compiling a single unified execution graph:
 
-1. **General In-Graph Softmax Lowering (`clj-xla.logic.lower/lower-softmax!`)**:
+1. **General In-Graph Softmax Lowering (`einsum.logic.lower/lower-softmax!`)**:
    Implemented numerically stable rank-agnostic softmax:
    $$\text{max}_x = \text{reduce\_max}(X, \text{axis}=-1, \text{keep\_dims}=\text{true})$$
    $$\text{exp}_x = \exp(X - \text{broadcast}(\text{max}_x))$$
@@ -1736,7 +1736,7 @@ Experiment E16 tests the natural architectural follow-up: **Two-Stage Relational
    $$\text{score}_{\text{resolve}}(c) = \frac{q_{\text{ctx}} \cdot k_c^T}{\sqrt{D_m}}$$
    $$\Delta_{\text{stage2}}(c) = \lambda_{\text{mem}} \Delta_{\text{type}}(c) + \lambda_{\text{resolve}} \text{score}_{\text{resolve}}(c)$$
 
-Both stages were implemented in pure Declarative Tensor Logic ([`gemma4-two-stage-resolver-ast`](file:///home/simonpure/src/alpeware/clj-xla/src/clj_xla/logic/models/gemma.clj), [`in-vram-resolver-step-ast`](file:///home/simonpure/src/alpeware/clj-xla/src/clj_xla/logic/memory/contrastive.clj)) and trained 100% in-VRAM on resident Gemma 4 weights via OpenXLA PJRT (0.61 ms/step on AMD Radeon RX 7900 XTX).
+Both stages were implemented in pure Declarative Tensor Logic ([`gemma4-two-stage-resolver-ast`](../../models/gemma.clj), [`in-vram-resolver-step-ast`](../../src/einsum/logic/memory/contrastive.clj)) and trained 100% in-VRAM on resident Gemma 4 weights via OpenXLA PJRT (0.61 ms/step on AMD Radeon RX 7900 XTX).
 
 ---
 
@@ -1815,7 +1815,7 @@ Unseen (0 Core)    | 17   | 23.5%|  23.5% |  23.5% |     0.0%  |     0.0%  |    
 2. **The Mechanism Behind the Failure: In-Batch Negative Blindness (SUPERSEDED — SEE CORRECTION NOTE)**:
    > [!NOTE]
    > **CORRECTION NOTE (Superseded by Experiment E18):**
-   > The original explanation below attributed the failure to uniform in-batch negative sampling across relations. This explanation was factually mistaken about the implementation code in `scripts/eval_gemma4_webnlg_relational.clj`. Batches were grouped strictly *per relation* (`doseq [[r triples] by-rel]`), meaning for relations with $n \ge 16$, in-batch negatives were *already* relation-co-typed tails!
+   > The original explanation below attributed the failure to uniform in-batch negative sampling across relations. This explanation was factually mistaken about the implementation code in `tools/eval_gemma4_webnlg_relational.clj`. Batches were grouped strictly *per relation* (`doseq [[r triples] by-rel]`), meaning for relations with $n \ge 16$, in-batch negatives were *already* relation-co-typed tails!
    > Instead, Experiment E18 diagnosed the true multi-faceted failure modes:
    > 1. **Denominator contamination**: relations with $n < 16$ (82.7% of relations) suffered a 20.00% duplicate-positive rate (self-as-negative label noise) and an 8.09% false-negative rate from cycling with an identity target.
    > 2. **Train/eval query distribution orthogonality**: $W_Q$ was trained on token embeddings $V_h$ but evaluated on contextual states $h_{\text{ctx}}$, which are nearly orthogonal ($\cos = 0.0732 \pm 0.0596$).
@@ -1969,7 +1969,7 @@ In reality:
 
 **Date:** 2026-09-17  
 **Hardware:** AMD Radeon RX 7900 XTX (24 GB VRAM, ROCm 6.2, OpenXLA PJRT)  
-**Artifacts:** [`paper-experiments/e18-diagnostics/2026-09-17/`](file:///home/simonpure/src/alpeware/clj-xla/paper-experiments/e18-diagnostics/2026-09-17/) (`phase0_diagnostics.edn`, `phase0_note.md`, `phase1_results.edn`, `summary.csv`)
+**Artifacts:** [`paper-experiments/e18-diagnostics/2026-09-17/`](../../paper-experiments/e18-diagnostics/2026-09-17) (`phase0_diagnostics.edn`, `phase0_note.md`, `phase1_results.edn`, `summary.csv`)
 
 ---
 
@@ -1977,7 +1977,7 @@ In reality:
 
 The Experiment E16 write-up attributed the Stage-2 failure (contextual pointwise selectivity $0/40$, mean distractor boost doubling from $+0.25 \to +0.50$) to **in-batch negative blindness**—presuming negatives were sampled uniformly across relations and types.
 
-Inspection of the code (`scripts/eval_gemma4_webnlg_relational.clj`) revealed this was factually wrong: batches were batched strictly **per relation** (`doseq [[r triples] by-rel]`). For all relations with $n \ge 16$, the 15 in-batch negatives **were already co-typed relation tails**. The model *was* actively penalized for boosting co-typed distractors, yet still amplified them at eval.
+Inspection of the code (`tools/eval_gemma4_webnlg_relational.clj`) revealed this was factually wrong: batches were batched strictly **per relation** (`doseq [[r triples] by-rel]`). For all relations with $n \ge 16$, the 15 in-batch negatives **were already co-typed relation tails**. The model *was* actively penalized for boosting co-typed distractors, yet still amplified them at eval.
 
 This contradiction exposed three potential confounding mechanisms:
 1. **Denominator Contamination & Label Noise**: For relations with $n < 16$, `(mod i n)` cycling duplicated triples inside the batch. The identity `Target` matrix then penalized the model for assigning probability to batch positions holding *copies of the positive itself* (self-as-negative label noise).
@@ -2400,7 +2400,7 @@ Experiments E17 through E20 served as an empirical requirements document for lon
 - **E19 (Proposer Fallacy & Spurious Covers):** GD structural rankings are anti-informative (median rank $2,600 / 4,032$) and unconstrained search finds shortcut covers $\to$ the LLM is merely a proposer over candidates, never the decider.
 - **E20 (Domain Priors & Mating Ambiguity):** Indegree and DAG acyclicity alone were insufficient without strict schema constraints. Furthermore, some facts are mathematically unknowable from observations alone (E20 mating symmetry ceiling $F_1 = 0.70$) $\to$ the store must represent **disjunction explicitly**, rejecting arbitrary guessing as hallucination with a commit bit.
 
-Experiment E21 constructs the artifact specified by these four diagnostics: a **schema-constrained Datalog Knowledge Base with a verified write path** (`clj-xla.logic.kb`). This implements Tier 1 (the committed discrete store) of the tensor-native agent architecture (`AGENT-LOOP.md`).
+Experiment E21 constructs the artifact specified by these four diagnostics: a **schema-constrained Datalog Knowledge Base with a verified write path** (`einsum.kb.store`). This implements Tier 1 (the committed discrete store) of the tensor-native agent architecture (`AGENT-LOOP.md`).
 
 ---
 
@@ -2488,10 +2488,10 @@ Experiment E21 completes the first construction milestone of the tensor-logic ag
 **Status:** COMPLETE (Evaluated on AMD Radeon RX 7900 XTX via OpenXLA PJRT ROCm)  
 **Date:** 2026-09-17  
 **Artifacts:**
-- Core Library: [`src/clj_xla/logic/kb_device.clj`](../../src/clj_xla/logic/kb_device.clj)
-- Generative Test Suite: [`test/clj_xla/logic/kb_device_test.clj`](../../test/clj_xla/logic/kb_device_test.clj)
-- Execution Script: [`scripts/e22_kb_dispatch.clj`](../../scripts/e22_kb_dispatch.clj)
-- Telemetry & Results: [`paper-experiments/e22-dispatch/2026-09-17/`](../../paper-experiments/e22-dispatch/2026-09-17/) (`phase0.edn`, `results.edn`)
+- Core Library: [`src/einsum/kb/device.clj`](../../src/einsum/kb/device.clj)
+- Generative Test Suite: [`test/einsum/kb/device_test.clj`](../../test/einsum/kb/device_test.clj)
+- Execution Script: [`tools/e22_kb_dispatch.clj`](../../tools/e22_kb_dispatch.clj)
+- Telemetry & Results: [`paper-experiments/e22-dispatch/2026-09-17/`](../../paper-experiments/e22-dispatch/2026-09-17) (`phase0.edn`, `results.edn`)
 
 ---
 
@@ -2540,7 +2540,7 @@ A systematic evaluation suite of 48 distinct questions was constructed spanning 
 The evaluation compared three architectural conditions:
 - **Cell H (In-Graph Dispatch):** Full hardware-accelerated pipeline — few-shot prompt $\to$ decode $\to$ interrupt on token 49 $\to$ OpenXLA PJRT dynamic slice on resident VRAM relation tensor $\to$ `<|tool_response>` injected directly into KV-cache $\to$ verbalization.
 - **Cell B0 (No-Tool Baseline):** Identical task prompt minus tool instructions and worked examples; the model must answer directly from weights and context.
-- **Cell B1 (Host-Side Lookup Baseline):** Same prompt as Cell H, but queries are routed host-side to `clj-xla.logic.kb` before returning tokens to the decode loop, isolating latency and architectural overhead.
+- **Cell B1 (Host-Side Lookup Baseline):** Same prompt as Cell H, but queries are routed host-side to `einsum.kb.store` before returning tokens to the decode loop, isolating latency and architectural overhead.
 
 ```
 ========================================================================================
@@ -2602,7 +2602,7 @@ Experiment E22 establishes the complete Tier 1 + Tier 2 operational cycle:
 
 ### 1. Executive Summary & Problem Formulation
 
-Experiment **E23** validates the core thesis of [`AGENT-LOOP.md`](file:///home/simonpure/src/alpeware/clj-xla/docs/tensor_logic/AGENT-LOOP.md) §9: **the autonomous agent loop is a reduce**.
+Experiment **E23** validates the core thesis of [`docs/architecture/agent_loop.md`](../architecture/agent_loop.md) §9: **the autonomous agent loop is a reduce**.
 
 Rather than relying on unbounded conversational context windows—which suffer from context rot, attention dilution, and semantic drift—an autonomous agent maintains state through a bounded snapshot accumulator updated via pure, verified schema transitions:
 $$\text{state}_{t+1} = \text{verified\_commit}(\text{state}_t, \text{llm\_proposals}_t)$$
@@ -2652,7 +2652,7 @@ The experiment evaluates this reduce architecture over multi-step operational ho
 The empirical sweep contrasts three distinct state-tracking architectures across horizons $T=20$ and $T=60$:
 
 1. **Cell H (Verified KB Accumulation Reduce Loop)**:
-   At each step $t$, the LLM receives the current bounded KB snapshot $S_t$ and observation $O_t$. Its tool call proposal is validated by `clj-xla.logic.kb/commit-with-schema`. Valid proposals commit; invalid proposals are rejected, preserving $S_t$ with zero corruption.
+   At each step $t$, the LLM receives the current bounded KB snapshot $S_t$ and observation $O_t$. Its tool call proposal is validated by `einsum.kb.store/commit-with-schema`. Valid proposals commit; invalid proposals are rejected, preserving $S_t$ with zero corruption.
 2. **Cell B1 (Unverified KB Accumulation Baseline)**:
    The LLM receives snapshot $S_t$ and observation $O_t$, but its proposals are committed raw into the KB without gate checks. This models unconstrained LLM memory stores.
 3. **Cell B0 (In-Context Tracking Baseline)**:
@@ -2674,7 +2674,7 @@ Before executing the horizon sweep, three offline verification gates confirmed s
 
 ### 4. Empirical Evaluation & Pre-Registered Acceptance Criteria
 
-All pre-registered success criteria defined in [`docs/tensor_logic/e23-reduce-spec.md`](file:///home/simonpure/src/alpeware/clj-xla/docs/tensor_logic/e23-reduce-spec.md) were evaluated against oracle ground truth:
+All pre-registered success criteria defined in [`docs/tensor_logic/e23-reduce-spec.md`](e23-reduce-spec.md) were evaluated against oracle ground truth:
 
 | Criterion | Specification Requirement | Empirical Result | Status |
 |:---|:---|:---|:---:|

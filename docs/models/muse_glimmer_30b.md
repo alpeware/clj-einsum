@@ -1,7 +1,7 @@
 # Meta Muse-Glimmer-30B Architecture Specification & Implementation Plan
 
 - **Status**: **Planned / Backlog**
-- **Target Namespace**: `clj-xla.logic.models.muse-glimmer`
+- **Target Namespace**: `einsum.logic.models.muse-glimmer`
 - **License**: Apache 2.0 Open Weights
 - **Target Hardware**: Consumer iGPUs / Laptops (Intel Arc 140V, Apple M4/M4 Pro, NVIDIA RTX 24GB/32GB)
 
@@ -56,8 +56,8 @@ flowchart TD
 
 ## 3. Milestone Implementation Plan
 
-1. **Milestone 1**: `clj-xla.logic.models.muse-glimmer` config schema and property tests.
-2. **Milestone 2**: In-graph INT4 / INT8 de-quantization in `clj-xla.logic.nn`.
+1. **Milestone 1**: `einsum.logic.models.muse-glimmer` config schema and property tests.
+2. **Milestone 2**: In-graph INT4 / INT8 de-quantization in `einsum.logic.nn`.
 3. **Milestone 3**: 30B Causal Transformer backbone execution graph.
 4. **Milestone 4**: DFlash 16-token parallel block predictor graph & batched verification pass.
-5. **Milestone 5**: ATEM XML tool markup parser (`clj-xla.tokenizer.atem`) & CLI script `scripts/muse_glimmer_inference.clj`.
+5. **Milestone 5**: ATEM XML tool markup parser (`einsum.runtime.tokenizer.atem`) & CLI script `tools/muse_glimmer_inference.clj`.

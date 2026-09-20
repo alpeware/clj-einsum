@@ -27,9 +27,9 @@ hallucinate, which is precisely the causal test.
 
 - **GPU required** (ROCm, PJRT). The E-series convention; the coding
   agent's machine.
-- Reuse: `scripts/gemma4_agent.clj` VRAM-session pattern
+- Reuse: `tools/gemma4_agent.clj` VRAM-session pattern
   (`init-agent-vram-session`, weights pinned, static-shape decode with
-  `:max-seq-len` padding, dynamic slice/update); `clj-xla.logic.kb`
+  `:max-seq-len` padding, dynamic slice/update); `einsum.kb.store`
   (E21) as the oracle and the source of materialized relations.
 
 ## 3. Design
@@ -169,12 +169,12 @@ the feedback path is lossy — debug before any follow-up.
 
 ## 7. Deliverables
 
-- `src/clj_xla/logic/kb_device.clj` — VRAM-resident relation tensors,
+- `src/einsum/kb/device.clj` — VRAM-resident relation tensors,
   the query executable (gather + answer buffer), the token-ID
   detector wiring. Sans-IO where the boundary allows; device code
   through the existing tensor-logic → StableHLO → PJRT path (repo
   Rule 4 — no host float loops, no Java escape hatches).
-- `scripts/e22_kb_dispatch.clj` — Phase 0 checks + Phase 1 eval
+- `tools/e22_kb_dispatch.clj` — Phase 0 checks + Phase 1 eval
   (H / B0 / B1), printing the criteria report.
 - `paper-experiments/e22-dispatch/2026-09-17/` — `phase0.edn`,
   `results.edn` (per-question log: prompt, emitted tokens,

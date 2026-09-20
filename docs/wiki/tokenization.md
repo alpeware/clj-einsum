@@ -18,9 +18,9 @@ Tokenization converts natural language text into numerical token ID sequences us
 
 ---
 
-## 2. Clojure Implementation in `clj-xla`
+## 2. Clojure Implementation in `clj-einsum`
 
-Tokenization in `clj-xla` is managed via pure Clojure wrapper modules interfacing with SentencePiece / Hugging Face tokenizers:
-- **Encoding**: [`clj-xla.tokenizer.core/encode`](../../src/clj_xla/tokenizer/core.clj) in [`clj-xla.tokenizer.core`](../../src/clj_xla/tokenizer/core.clj).
-- **Decoding**: [`clj-xla.tokenizer.core/decode`](../../src/clj_xla/tokenizer/core.clj) in [`clj-xla.tokenizer.core`](../../src/clj_xla/tokenizer/core.clj).
-- **Unit & Property Tests**: [`test/clj_xla/tokenizer_test.clj`](../../test/clj_xla/tokenizer_test.clj).
+Tokenization in `clj-einsum` is managed via pure Clojure wrapper modules interfacing with SentencePiece / Hugging Face tokenizers:
+- **Encoding**: [`einsum.runtime.tokenizer.core/encode`](../../src/einsum/runtime/tokenizer/core.clj) in [`einsum.runtime.tokenizer.core`](../../src/einsum/runtime/tokenizer/core.clj).
+- **Decoding**: [`einsum.runtime.tokenizer.core/decode`](../../src/einsum/runtime/tokenizer/core.clj) in [`einsum.runtime.tokenizer.core`](../../src/einsum/runtime/tokenizer/core.clj).
+- **Unit & Property Tests**: [`test/einsum/runtime/tokenizer_test.clj`](../../test/einsum/runtime/tokenizer_test.clj).
