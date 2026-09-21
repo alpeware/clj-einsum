@@ -1,9 +1,9 @@
 # Gemma Model Architecture Specification & Verification
 
 - **Status**: **Fully Supported** (Gemma 2B, Gemma 3 1B/4B/12B/27B, Gemma 4 E2B/E4B/12B/26B-A4B/31B)
-- **Clojure Source**: [`models/gemma.clj`](../../models/gemma.clj)
+- **Clojure Source**: [`src/einsum/models/gemma.clj`](../../src/einsum/models/gemma.clj)
 - **CLI Runner**: [`tools/gemma4_inference.clj`](../../tools/gemma4_inference.clj)
-- **Test Suite**: [`test/models/gemma_test.clj`](../../test/models/gemma_test.clj)
+- **Test Suite**: [`test/einsum/models/gemma_test.clj`](../../test/einsum/models/gemma_test.clj)
 
 ---
 
@@ -35,5 +35,5 @@
   ```
 * **Generative Unit & Property Tests**:
   ```bash
-  clojure -M:test -e "(require '[models.gemma-test]) (clojure.test/run-tests 'models.gemma-test)"
+  clojure -M:test -e "(require '[einsum.models.gemma-test]) (clojure.test/run-tests 'einsum.models.gemma-test)"
   ```

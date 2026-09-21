@@ -95,7 +95,7 @@
                          (let [pk (double (aget p k))
                                yk (if (= k (int y)) 1.0 0.0)
                                ek (double (aget E (+ (* k d-long) j)))]
-                            (recur (inc k) (+ s (* (- pk yk) ek))))))]
+                           (recur (inc k) (+ s (* (- pk yk) ek))))))]
               (aset-float gu j (float gj))))
 
           ;; Accumulate outer product: dL/dW[i, j] += h[i] * gu[j] / N

@@ -1,8 +1,8 @@
 # Gemma 3 Model Architecture Specification & StableHLO Graph
 
 - **Status**: **Fully Supported** (Gemma 3 1B, Gemma 3 4B, Gemma 3 12B, Gemma 3 27B)
-- **Clojure Source**: [`models/gemma3.clj`](../../models/gemma3.clj)
-- **Test Suite**: [`test/models/gemma3_test.clj`](../../test/models/gemma3_test.clj)
+- **Clojure Source**: [`src/einsum/models/gemma3.clj`](../../src/einsum/models/gemma3.clj)
+- **Test Suite**: [`test/einsum/models/gemma3_test.clj`](../../test/einsum/models/gemma3_test.clj)
 
 ---
 
@@ -27,5 +27,5 @@ Gemma 3 builds on Gemma 2's GQA attention and $+1.0$ weight offset Gemma RMSNorm
 ## 3. Verification & Execution
 
 ```bash
-clojure -M:test -e "(require '[models.gemma3-test]) (clojure.test/run-tests 'models.gemma3-test)"
+clojure -M:test -e "(require '[einsum.models.gemma3-test]) (clojure.test/run-tests 'einsum.models.gemma3-test)"
 ```

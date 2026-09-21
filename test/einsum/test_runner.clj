@@ -20,9 +20,10 @@
             [einsum.logic.dce-test]
             [einsum.logic.expand-test]
             [einsum.logic.exl3-test]
-            [models.gemma-test]
-            [models.gemma3-test]
-            [models.gpt2-test]
+            [einsum.quant.ternary-test]
+            [einsum.models.gemma-test]
+            [einsum.models.gemma3-test]
+            [einsum.models.gpt2-test]
             [einsum.logic.index-test]
             [einsum.logic.lower-test]
             [einsum.logic.nn-test]
@@ -39,10 +40,10 @@
             [einsum.logic.memory.factorization-test]
             [einsum.logic.memory.sampler-test]
             [einsum.logic.attention.kg-masked-test]
-            [models.tl-block-test]
-            [models.tl-nano-test]
+            [einsum.models.tl-block-test]
+            [einsum.models.tl-nano-test]
             [einsum.models.transformer-test]
-            [models.predicate-invention-test]
+            [einsum.models.predicate-invention-test]
             [einsum.logic.predicate-crystallization-test]
             [einsum.logic.constrained-search-test]
             [einsum.kb.store-test]
@@ -52,7 +53,7 @@
             [einsum.logic.agent.state-tracker-test]
             [einsum.logic.agent.swe-benchmark-test]
             [einsum.logic.semiring-test]
-            [models.smollm-test]
+            [einsum.models.smollm-test]
             [einsum.logic.stratified-negation-test]
             [einsum.logic.symbolic-test]
             [einsum.logic.symbolic-e2e-test]
@@ -106,9 +107,10 @@
                            'einsum.logic.data.family-trees-test
                            'einsum.logic.dce-test
                            'einsum.logic.expand-test
-                           'models.gemma-test
-                           'models.gemma3-test
-                           'models.gpt2-test
+                           'einsum.quant.ternary-test
+                           'einsum.models.gemma-test
+                           'einsum.models.gemma3-test
+                           'einsum.models.gpt2-test
                            'einsum.logic.index-test
                            'einsum.logic.lower-test
                            'einsum.logic.nn-test
@@ -116,7 +118,7 @@
                            'einsum.logic.exl3-test
                            'einsum.logic.shape-test
                            'einsum.logic.semiring-test
-                           'models.smollm-test
+                           'einsum.models.smollm-test
                            'einsum.logic.stratified-negation-test
                            'einsum.logic.symbolic-test
                            'einsum.logic.symbolic-e2e-test
@@ -132,10 +134,10 @@
                            'einsum.logic.memory.factorization-test
                            'einsum.logic.memory.sampler-test
                            'einsum.logic.attention.kg-masked-test
-                           'models.tl-block-test
-                           'models.tl-nano-test
+                           'einsum.models.tl-block-test
+                           'einsum.models.tl-nano-test
                            'einsum.models.transformer-test
-                           'models.predicate-invention-test
+                           'einsum.models.predicate-invention-test
                            'einsum.logic.predicate-crystallization-test
                            'einsum.logic.constrained-search-test
                            'einsum.kb.store-test

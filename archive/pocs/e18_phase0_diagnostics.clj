@@ -7,7 +7,7 @@
    5. Amplification decomposition (raw score_resolve vs Delta_type across targets and distractors)."
   (:require [einsum.core :as xla]
             [einsum.logic.memory.contrastive :as contrastive]
-            [models.gemma :as gemma]
+            [einsum.models.gemma :as gemma]
             [einsum.logic.symbolic :as sym]
             [einsum.compiler.pjrt :as pjrt]
             [einsum.runtime.safetensors :as st]

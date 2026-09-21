@@ -5,7 +5,7 @@
    Trains in OpenXLA PJRT VRAM with analytical adjoints, temperature annealing, and discrete F1 evaluation."
   (:require [einsum.core :as xla]
             [einsum.logic.data.family-trees :as ft]
-            [models.predicate-invention :as pi]
+            [einsum.models.predicate-invention :as pi]
             [clojure.java.io :as io]
             [clojure.string :as str])
   (:gen-class))

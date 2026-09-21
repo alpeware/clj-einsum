@@ -2,7 +2,7 @@
   "End-to-End GPT-2 Autoregressive Generation Loop using clj-xla PJRT backend."
   (:require [einsum.core :as xla]
             [einsum.logic.lower :as lower]
-            [models.gpt2 :as gpt2-logic]
+            [einsum.models.gpt2 :as gpt2-logic]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.tokenizer.bpe :as bpe]
             [einsum.runtime.tokenizer.protocol :as proto])

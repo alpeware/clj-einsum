@@ -4,8 +4,8 @@
    compiles OpenXLA PJRT forward executable on AMD Radeon RX 7900 XTX (ROCm) or CPU,
    executes joint LM + InfoNCE pre-training, and saves model weights via checkpoint.clj."
   (:require [einsum.core :as xla]
-            [models.checkpoint :as ckpt]
-            [models.tl-nano :as nano]
+            [einsum.models.checkpoint :as ckpt]
+            [einsum.models.tl-nano :as nano]
             [einsum.runtime.tokenizer.core :as tok]
             [einsum.runtime.tokenizer.protocol :as proto]
             [clojure.java.io :as io]

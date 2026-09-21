@@ -4,8 +4,8 @@
    compiles OpenXLA PJRT eval executable, evaluates autoregressive perplexity on dev.edn,
    and tests zero-shot deductive cloze QA on held-out triples, comparing against published baselines."
   (:require [einsum.core :as xla]
-            [models.checkpoint :as ckpt]
-            [models.tl-nano :as nano]
+            [einsum.models.checkpoint :as ckpt]
+            [einsum.models.tl-nano :as nano]
             [einsum.runtime.tokenizer.core :as tok]
             [einsum.runtime.tokenizer.protocol :as proto]
             [clojure.java.io :as io]

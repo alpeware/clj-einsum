@@ -229,7 +229,7 @@
                         (if (>= k d-long)
                           s
                           (let [vi (double (aget table (+ i-offset k)))
-                                 vj (double (aget table (+ j-offset k)))]
+                                vj (double (aget table (+ j-offset k)))]
                             (recur (inc k) (+ s (* vi vj))))))
                   denom (* norm-i norm-j)
                   cos-sim (if (> denom 1e-12) (/ dot denom) 0.0)]

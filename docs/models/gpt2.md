@@ -1,14 +1,14 @@
 # GPT-2 Model Architecture Specification & StableHLO Graph
 
 - **Status**: **Fully Supported**
-- **Clojure Source**: [`models/gpt2.clj`](../../models/gpt2.clj)
-- **Test Suite**: [`test/models/gpt2_test.clj`](../../test/models/gpt2_test.clj)
+- **Clojure Source**: [`src/einsum/models/gpt2.clj`](../../src/einsum/models/gpt2.clj)
+- **Test Suite**: [`test/einsum/models/gpt2_test.clj`](../../test/einsum/models/gpt2_test.clj)
 
 ---
 
 ## 1. Visual Execution Graph (Pure Clojure $\to$ StableHLO MLIR)
 
-The following Mermaid diagram represents the exact StableHLO execution graph formed by [`gpt2-layer-ast`](../../models/gpt2.clj) lowered via `einsum.logic.lower` in `clj-einsum`:
+The following Mermaid diagram represents the exact StableHLO execution graph formed by [`gpt2-layer-ast`](../../src/einsum/models/gpt2.clj) lowered via `einsum.logic.lower` in `clj-einsum`:
 
 ```mermaid
 flowchart TD
@@ -86,6 +86,6 @@ flowchart TD
 
 * **Generative & Property Test Suite**:
   ```bash
-  clojure -M:test -e "(require '[models.gpt2-test]) (clojure.test/run-tests 'models.gpt2-test)"
+  clojure -M:test -e "(require '[einsum.models.gpt2-test]) (clojure.test/run-tests 'einsum.models.gpt2-test)"
   ```
 * **Benchmark Execution**: Measured in [`tools/benchmark.clj`](../../tools/benchmark.clj) as `gpt2-block`.

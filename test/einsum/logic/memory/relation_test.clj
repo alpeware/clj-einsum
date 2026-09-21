@@ -4,7 +4,7 @@
   (:require [einsum.core :as xla]
             [einsum.logic.lower :as lower]
             [einsum.logic.memory.relation :as mem]
-            [models.gemma :as gemma]
+            [einsum.models.gemma :as gemma]
             [einsum.compiler.stablehlo :as shlo]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]

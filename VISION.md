@@ -1,274 +1,114 @@
-# VISION.md — Executable Tensor Logic for Coding Agents
+# VISION.md — Executable Tensor Logic: The Consumer-Hardware Measurement Apparatus for RSI
 
-## Mission
+## 1. Mission
 
-**Make the tensor equation the working representation for the parts of AI that
-are tensor computation — not a formalism on paper, but a toolchain where a
-coding agent (or a human) writes equations and gets CPU/GPU executables,
-gradients, and verified behavior out.**
+**Build the open-source measurement apparatus and execution engine to test Ali Ghodsi's 4 conditions for Recursive Self-Improvement (RSI) on consumer hardware (single/dual 24GB GPUs):**
 
-We are deliberately narrower than Domingos' program. We do not claim the
-tensor equation unifies all of AI, and we do not need it to. What we claim is
-pragmatic: a large, commercially central slice of AI *is* tensor computation —
-attention, dense projections, convolutions, embeddings, relational joins over
-embedded facts — and that slice deserves a representation that is readable,
-executable, and agent-manipulable. That representation is the Hiccup AST in
-this repo. Where the grand claims break (absolute symbolic truth in embedding
-space, gradient-discovered predicates), we measure the break and build the
-discrete machinery around it instead of pretending the equation covers it.
+1. **Fewer Resources ($C_{n+1} \ll C_n$):** Super-linear reduction in VRAM footprint, model weight storage, and memory bandwidth.
+2. **Reduced Training Time ($T_{n+1} \ll T_n$):** Calibration, parameter-efficient adaptation, and distillation converging in hours on reference consumer hardware, rather than months across datacenters.
+3. **Increasing Intelligence ($A_{n+1} > A_n$):** Verifiable reasoning and capability gains evaluated against a strict $\ge 95\%$ uncompressed base model retention floor.
+4. **Continuous Recursion ($G_n \to G_{n+1} \to \dots$):** Compounding loop efficiency across successive generations, measured by declining judgment-cost (wall-clock hours and human interventions required per verified catalog entry).
 
-## What the representation covers — and what it doesn't
+We do not claim that recursive self-improvement is achieved or inevitable. We build the physical apparatus that measures whether its required conditions hold on consumer silicon.
 
-Explicit, because coding agents (and reviewers) should know the boundary
-before they trust it.
+---
+
+## 2. The Deflationary Framing: Apparatus over Hype
+
+In September 2026, Databricks CEO Ali Ghodsi formulated a four-condition test to deflate existential superintelligence hype. Ghodsi pointed out that frontier industrial AI development is currently the **exact opposite of RSI**:
+- Costs are scaling super-linearly ($5B–$10B clusters).
+- Iteration cycles are growing slower, more complex, and more brittle.
+- Infrastructure and energy constraints prevent autonomous recursive acceleration.
+- The human-in-the-loop requirement is expanding rather than contracting.
+
+`clj-einsum` adopts this deflationary reality as its foundational premise. **We explicitly do NOT claim the system "has achieved RSI."** Instead, our contribution is the **rigorous, reproducible measurement apparatus**—grounded in OpenXLA StableHLO MLIR, Java 25 Panama FFM, and physical consumer GPUs (AMD Radeon RX 7900 XTX 24GB / NVIDIA RTX 4090)—that measures these four quantities without marketing embellishment or datacenter subsidies.
+
+---
+
+## 3. Arithmetic vs. Hypothesis: The Physics of Consumer Silicon
+
+To avoid the wishful thinking common in neural-symbolic literature, the apparatus maintains a strict boundary between what is mathematically guaranteed (arithmetic) and what must be verified empirically on hardware (hypothesis):
+
+### Storage & Bandwidth: Arithmetic
+- Uncompressed 16-bit floats require $2.0\text{ bytes/param}$. A 30B model requires $\approx 60\text{ GB}$ VRAM; a 70B model requires $\approx 140\text{ GB}$ VRAM. Neither fits on consumer silicon.
+- 1.58-bit / ternary quantization ($\{-1, 0, 1\}$) reduces weight representation to $\approx 0.2\text{ to } 0.25\text{ bytes/param}$ ($1.58\text{ bits} + \text{scales}$).
+- **The Arithmetic Win:** A 30B parameter model compresses to $\approx 7.5\text{ GB}$ VRAM; a 70B parameter model compresses to $\approx 17.5\text{ GB}$ VRAM. Both fit entirely within a single 24GB consumer GPU with generous headroom for KV caches. This storage reduction is mathematical certainty, not a research speculation.
+
+### Compute & Throughput: Hypothesis
+- Unpacking ternary weights into FP16 or BF16 registers via StableHLO unpack-and-GEMM reduces memory bandwidth pressure during autoregressive decoding.
+- **The Empirical Reality:** Unpack-and-GEMM still executes floating-point matrix multiplications on hardware tensor cores. True ternary integer-addition speedups ($\text{GEMM} \to \text{ADD}$) require specialized fused native kernels and memory architectures.
+- **The Measurement Obligation:** The framework never assumes compute speedups by default. It measures achieved token throughput ($\text{tok/s}$) and GFLOPs/watt against optimized FP16 and INT4 (EXL3) baselines on actual hardware.
+
+---
+
+## 4. What the Representation Covers — and What It Doesn't
+
+Explicit, because coding agents and peer reviewers must know the boundaries before trusting results.
 
 **Covered — the parts that work:**
-
-- **Tensor contraction (einsum).** The shared computational core of modern deep
-  learning: attention, MLPs, convolutions, embedding lookups, kernel
-  operations. One construct, `[:= head & body-terms]`; a shared index
-  contracted on both sides *is* the matmul, the join, the attention score.
-  No `:matmul` op is needed because contraction is the operation.
-- **Function-free Datalog-style rules**, compiled to contractions over embedded
-  relations. Paper 1 measures this: rule-as-contraction, separation margins,
-  extract–threshold–re-embed denoising, the deductive/analogical temperature
-  tradeoff.
-- **Elementwise nonlinearities and the autodiff closure.** Activations are
-  attributes on equations (`{:act :gelu}`), not separate ops, and the gradient
-  of a tensor-logic program is itself a tensor-logic program.
-- **Bounded, statically-shaped dataflow** — exactly what XLA/StableHLO executes
-  well — with a reference interpreter for differential verification of every
-  compiled result.
+- **Tensor contraction (einsum):** The shared mathematical core of deep learning: attention, multi-layer perceptrons, convolutions, embedding lookups, and relational joins. One construct, `[:= head & body-terms]`; a shared index contracted on both sides *is* the matmul, the relational join, the attention score.
+- **Function-free Datalog-style rules:** Compiled to contractions over embedded relations. Lowered to StableHLO without runtime interpretation.
+- **Elementwise nonlinearities and autodiff closure:** Activations are attributes on equations (`{:act :gelu}`); the gradient of a tensor-logic program is itself a pure tensor-logic program.
+- **Bounded, statically-shaped dataflow:** Exact compilation via OpenXLA PJRT with a differential reference interpreter checking device correctness.
 
 **Not covered — and not claimed:**
+- Full first-order logic with function symbols, modal logic, or unconstrained probabilistic programming.
+- *Absolute* soundness in continuous embedding space. Continuous representations yield PAC-style margins, not symbolic certainty.
+- Gradient-discovered discrete predicates. The E14–E20 empirical trajectory proved that gradients learn geometric rankings, not discrete selection. Predicate invention requires exact discrete priors and verified commit machinery living *around* the tensor core.
 
-- Full first-order logic (function symbols), modal or temporal logics,
-  non-monotonic reasoning, exact probabilistic inference. Where this language
-  is logical at all, it is Datalog-shaped.
-- *Absolute* soundness in embedding space. Random embeddings give PAC-style,
-  ε-bounded separation — measured margins, not metaphysical guarantees.
-- Gradient-discovered exact predicates. The E14–E20 arc says gradients learn
-  rankings, not discrete truth. Predicate invention needs exact optimization
-  plus strong schema priors, and that machinery lives *around* the tensor core
-  as host-side discipline (verified KB writes, the T=0 commitment gate) — not
-  inside the equation language.
+---
 
-**The durable thesis:** one readable language for the tensor-computable slice,
-multiple engines underneath (dense XLA today; sparse/relational lowering where
-the equations don't reach), and a discrete commitment mechanism wherever
-exactness is required. The experiments are the contribution; the grand
-unification is not.
+## 5. System Architecture: Pure Data to Accelerated Silicon
 
-## Why this, why now
-
-Three observations, all from the last year of work:
-
-1. **The notation is the leverage.** Domingos: *"a good notation is half the
-   battle... you can just think better and faster once you have this notation."*
-   Our Hiccup AST has one construct — `[:= head & body-terms]` — and everything
-   in the covered slice (attention, MLPs, relational memory, symbolic rules) is
-   expressed in it. It is also *data*, not syntax: homoiconic, diffable,
-   programmatically rewritable. Dead-code elimination, index allocation, and
-   shape inference are data transforms, which is why agents manipulate it
-   fluently and why no competing representation (einsum strings, einops,
-   hand-written PyTorch) is as workable. The E1→E12 arc — a relational
-   transformer designed, trained, debugged, and re-engineered in weeks — is the
-   empirical test of that claim. It passed.
-
-2. **Coding agents are the native users of this notation.** When MLST's Tim Scarfe
-   fed the Tensor Logic paper to Claude Code, it *"implemented the whole lot this
-   afternoon."* That is not a party trick; it is evidence about the shape of the
-   formalism. A tiny grammar, explicit dataflow, pure-data programs, and a
-   reference interpreter that checks device output give agents a tight
-   write→compile→verify loop. Frontier agents don't just tolerate this notation —
-   they are fluent in it. We build for them first, humans second.
-
-3. **The field is re-learning reasoning at trillion-dollar cost.** Domingos'
-   challenge stands: read the textbook before burning the compute. But the
-   textbook's grandest claim — one language for all of AI, everything learned
-   jointly — is not our bet. Our bet is smaller and checkable: the tensor
-   equation is the right *representation* for the tensor-computable slice, the
-   compiler makes it executable, and discrete commitment machinery handles the
-   exactness the equations cannot supply. E23 is the existence proof of that
-   split: proposals from the continuous side, commitment from the discrete
-   side, measured over an adversarial horizon.
-
-## What this repo is
-
-A vertically integrated Tensor Logic toolchain in Clojure:
+`clj-einsum` is a vertically integrated toolchain in Clojure with zero Java escape hatches and zero host Python dependencies:
 
 ```
 tensor equations (Hiccup AST, pure data)
-        │  expand · lower · autodiff — all as data transforms
+        │  expand · lower · autodiff — all as pure data transforms
         ▼
 EDN SSA graph IR (Malli-schematized, verifiable)
         │
         ▼
-StableHLO → PJRT executables (CPU / ROCm / CUDA)
+StableHLO MLIR Text → OpenXLA PJRT Executables (ROCm / CUDA / CPU)
         │
         ▼
-reference interpreter ⇄ device differential testing
+Physical Consumer Accelerator (AMD RX 7900 XTX 24GB / RTX 4090)
+        │
+        ▼
+reference interpreter ⇄ physical device differential verification
 ```
 
-One construct for the covered slice, all the way down. No kernels written by
-hand; no host matrix math in the hot path. Equations become executables —
-Domingos' *"map onto a GPU with almost no change,"* realized as
-`einsum.logic.*` → `einsum.compiler.compile`.
+- **`einsum.logic.*` (The Language):** AST expansion, lowering, symbolic relations, relational memory, and agent deliberation loops.
+- **`einsum.compiler.*` (The Compiler):** Java 25 Project Panama FFM bindings to OpenXLA PJRT C API (`pjrt_c_api.h`), StableHLO MLIR codegen, SHA-256 graph caching, and off-heap memory arena lifecycle management.
+- **`einsum.quant.*` (The Quantization Engine):** EXL3, QuIP, and ternary (CAT-Q) unpacking routines executing directly in StableHLO graphs.
+- **`einsum.models.*` (Vehicle Architectures):** Canonical, pure Clojure implementations of Gemma 4, Gemma 3, SmolLM, and GPT-2 running on persistent VRAM buffers.
 
-Two halves, one repo: **`logic/` is the language** (AST, lowering, symbolic
-reasoning, relational memory, the agent loop); **the rest is the substrate**
-(PJRT bindings, StableHLO builder, compiler cache, autodiff, model loaders).
-The split is at the namespace level, deliberately — the integration *is* the
-product.
+---
 
-## Pillars
+## 6. The 4 Research Pillars
 
-**Pillar 0 — The compiler. (Built.)** Tensor-logic AST → StableHLO → PJRT, with a
-reference interpreter for differential verification. Real models run on it:
-GPT-2, SmolLM, Gemma 2/3/4 (35-layer E2B inference on ROCm, in-graph dequantized
-INT4). Paper 1 ("Executable Tensor Logic") documents this half.
+- **Pillar 0 — The Compiler (Built):** Tensor Logic AST $\to$ StableHLO $\to$ PJRT, validated via differential testing. Documented in Paper 1 (*Executable Tensor Logic*).
+- **Pillar 1 — Trainable Tensor Logic & The Continuous Refutation (Complete):** Structure learning on real-world corpora (WebNLG). Documented in Paper 2 (*The Limits of Trainable Tensor Logic*), establishing that continuous relaxation cannot clear Gate 3 for predicate invention without discrete commitment machinery.
+- **Pillar 2 — The Agent Deliberation Loop (Built):** A three-tier agent loop (reflex contractions, device-resident deliberation, discrete host-side synthesis) where the agent's memory snapshot is verified by discrete schema checks, not raw token generation.
+- **Pillar 3 — The RSI Measurement Apparatus (Active):** The automated closed loop testing Ghodsi's 4 gates on consumer silicon across generation lineage ($G_0 \to G_1 \to \dots$).
 
-**Pillar 1 — Trainable Tensor Logic. (Now.)** Structure learning and predicate
-invention *inside the language* — but honest about the E14–E20 results:
-gradients reliably learn rankings, not exact predicates. Current work:
-relational memory (per-relation cores as learned soft priors), exact in-VRAM
-adjoints, per-rule temperatures, WebNLG-scale training. The live hypothesis is
-exact optimization plus strong schema priors, with the tensor core supplying
-fast proposals and the discrete machinery supplying commitment. The answer will
-come from the equation→compile→measure loop, one equation at a time. Paper 2
-("Trainable Tensor Logic") is gated on this half working end-to-end.
+---
 
-**Pillar 2 — The agent loop. (Design → prototype.)** A three-tier agent
-architecture — reflex contractions, device-resident deliberation, host-side
-synthesis — where the agent's *own* reasoning substrate is tensor equations it
-can read, verify, and rewrite, and where every state mutation passes through a
-verified discrete commit. [`docs/architecture/agent_loop.md`](docs/architecture/agent_loop.md) holds the design. The endgame is the
-recursive research loop described below: papers in, measured results out,
-catalog committed, components remixed.
+## 7. The Recursive Meta-Research Loop
 
-## The recursive research loop: Measuring Ali Ghodsi's 4 RSI Gates
+The meta-research loop elevates the coding agent from executing predefined tasks to running autonomous, hardware-grounded scientific inquiry:
 
-E24 changed what this repo is. A paper (Fu et al.'s Cache-to-Cache) went in;
-a spec, an implementation, property tests, a 30-problem benchmark, measured
-results on the RX 7900 XTX, peer review, corrected claims, and a rerun came
-out — in one session, from a coding agent. That is not a faster way to run an
-experiment. It is a different thing: **AI research translated into tensor
-logic and cataloged in action as an empirical measurement apparatus for Ali Ghodsi's 4 Recursive Self-Improvement (RSI) conditions on consumer silicon** (Resource Efficiency, Time Efficiency, Capability Improvement, and Closed-Loop Repeatability; see [`docs/architecture/rsi_gates.md`](docs/architecture/rsi_gates.md) and [`catalog/README.md`](catalog/README.md)).
+1. **Papers as Proposals:** The external literature (arXiv) is a noisy proposal distribution over model architectures.
+2. **Homoiconic Reification:** Proposals are translated into declarative Clojure Hiccup ASTs. Because every component speaks the exact same representation, disparate techniques (e.g. in-graph dispatch, state reduction, prefix cache handover) compose cleanly without glue code.
+3. **Hardware as the Incorruptible Verifier:** Executables compile to StableHLO and run on physical consumer GPUs. Claims must survive contact with silicon.
+4. **Adversarial Critique & Verification:** Automated checks verify floor retention ($\ge 95\%$), test for confounded baselines, and measure achieved memory and throughput.
+5. **The Immutable Catalog:** Verified pods commit to `catalog/registry.edn` and `catalog/gate*/<pod>/`. Subsequent generations read the catalog to avoid refuted lines and build on verified components.
 
-The loop, stated plainly:
+---
 
-- **Papers are proposals.** The literature is a probabilistic proposal
-  distribution over architectures — most entries wrong, overstated, or
-  hardware-mismatched. The agent samples from it.
-- **Tensor logic is the reification.** The proposal is rewritten into the shared
-  representation: checkable, shape-verified, compilable. This is what makes
-  components from different papers interoperable — E22's dispatch, E23's
-  reduce, and E24's handover compose into a multi-instance verified loop
-  *because they are all equations in one language*. Without the lingua franca,
-  "mix and match" is gluing Python scripts with incompatible assumptions.
-  Composability is a property of the representation, not the pipeline.
-- **Hardware is the verifier.** Results are specific to the hardware, and that
-  specificity is the point: the device is the oracle that cannot be gamed with
-  clever prose. A claim is not done until it runs on PJRT.
-- **The catalog is the verified snapshot.** `docs/tensor_logic/empirical_journey.md`
-  is the accumulate-only record — including the negative and null results
-  (E14–E20's gradient failures, E24's +0.0% matched deliberation gain). The
-  catalog is what the next iteration reads.
-- **Peer review is the gate.** E24's first writeup overclaimed — speedup-ratio
-  framing, confounded baselines, a case study contradicted by its own data.
-  Review caught it; claims were corrected; the benchmark reran fairly and
-  reported an honest null. The generator now outruns the human reviewer, so
-  the adversarial analysis step must become part of the loop itself, automated
-  and as strong as the proposer. A self-recursive loop without a verifier is a
-  paper mill.
+## 8. Operating Principles
 
-This is the agent loop one level up: propose → dispose → commit → recurse,
-with convergence defined the same way — the catalog stops changing on the
-questions that matter, or a paper-grade result commits.
-
-**Two strengths of "self-recursive," honestly separated:**
-
-- *Weak (demonstrated):* the loop accelerates implementation and the catalog
-  compounds knowledge. E24 is the existence proof.
-- *Strong (the goal):* the loop learns to do research better from the catalog —
-  which experimental designs were confounded, which implementation strategies
-  survived contact with hardware, which combinations deserve GPU time.
-  Meta-learning over the journey corpus. The combinatorial space of "mix and
-  match" is exponential, so the meta-loop needs its own beam search: generate
-  candidate combinations cheaply in the readable representation (most die
-  statically — shape mismatches, violated invariants), prune with a critic,
-  run the survivors on hardware.
-
-**The hard unsolved piece:** composable evaluation. Code composes in tensor
-logic; benchmarks do not automatically follow. Every new combination needs
-pre-registered criteria and fair baselines, or the catalog fills with
-confounded wins. Until evaluation composes the way the equations do, the human
-stays in the loop at the design-review step — which is exactly where the
-operating principles below already put us.
-
-## Operating principles
-
-- **Ground every number.** Reference-interpreter results, simulation, and
-  compiled on-device measurements are labeled as what they are. No SOTA claims
-  without evidence; modest numbers reported as modest.
-- **Verify on the device.** The reference interpreter exists so agents can check
-  compiled output differentially. A claim about the compiler is not done until a
-  test runs it on PJRT.
-- **Claim only what the representation covers.** The "covers / doesn't cover"
-  list above is a living contract. When an experiment finds a boundary, the
-  boundary gets written down — it doesn't get hand-waved.
-- **Soundness is a property of the gate, not a slogan.** T=0 deduction guarantees
-  conclusions follow from premises — it says nothing about whether the premises
-  are true. The gate is discrete machinery *around* the tensor core, not a
-  property of embedding space. Measure the gate's *effect*, not its presence.
-- **Agents in the loop, by construction.** Programs are data; diffs are semantic;
-  verification is automatic. Every new capability must be usable — and checkable
-  — by a coding agent, not just a human at a REPL.
-- **The 80/20 rule is fine.** The clean formalism covers most of it; the rest is
-  hacks (stride fixes, padding, host orchestration). Domingos: Tensor Logic
-  *"makes it much easier and faster to do those hacks."* We keep the hacks
-  explicit and measured, not hidden.
-
-## Non-goals
-
-- **Not a unification theory.** We do not claim the tensor equation is the
-  language of all AI, and we don't need that claim to be useful. The
-  representation earns its keep on the slice it covers.
-- **Not a PyTorch competitor.** We are not chasing FLOPS parity or framework
-  adoption on their terms. The contest is expressiveness-per-equation and
-  agent-velocity, not benchmark throughput.
-- **Not a chatbot product.** No assistant, no demo app. The repo is infrastructure
-  for people and agents building AI systems.
-- **Not formalism for its own sake.** Every language feature must compile, run,
-  and be measured — or be cut.
-
-## What success looks like
-
-- A coding agent, given a research idea expressible as tensor equations, produces
-  a compiled, device-verified, trained result in the same session — the E1→E12
-  loop, fully agent-driven.
-- The research loop runs increasingly closed: a paper goes in, a fair
-  implementation with measured, peer-reviewed results comes out, and the catalog
-  entry it commits becomes a component the next iteration remixes with others —
-  with the adversarial review step automated rather than borrowed from a human.
-- Trainable Tensor Logic retrieves reliably: relational memory that *selects* the
-  right fact, not just steers toward it; per-rule temperatures that are actually
-  learned rather than configured; predicate invention demonstrated on a real
-  benchmark — or a measured, written-down account of where it stops working.
-- Paper 1 published (the compiler exists, measured). Paper 2 submitted (the
-  learning works, measured — with the E14–E20 negative results given full weight).
-- The repo becomes the place agent builders reach for when they want verified,
-  compiled neural-symbolic programs instead of Python string-soup.
-
-## Relation to Domingos' program
-
-Domingos gave a notation and a destination — *"the Turing machine equivalent
-for induction."* We take the executable-representation half of that vision
-seriously and hold the unification metaphysics at arm's length. Where his
-claims measure out — contraction *is* the join, ε-bounded soundness at T=0,
-the uniformity of the lowering — we build on them. Where they don't —
-absolute soundness in embedding space, gradient predicate invention — we say
-so with numbers (E14–E20) and build the discrete machinery the framework
-lacks (E21–E23). This repo is the pragmatic core of Tensor Logic: the
-representation that works, compiled, measured, and placed exactly where its
-boundaries are.
+- **Ground Every Number:** Reference simulation, unquantized baseline, and on-device measurements must be explicitly labeled. No claims without reproducible metrics.
+- **Verify on Silicon:** A claim about performance, latency, or accuracy is unverified until executed on physical accelerator hardware via PJRT.
+- **Respect Mechanical Sympathy:** Place dense continuous math in device VRAM; place sparse discrete lookups and schema verifications in host CPU memory (justified by E22's $16.4\times$ host advantage).
+- **The Derivative of Judgment:** The ultimate test of Gate 4 is whether the wall-clock time from proposal to verified merge and the ratio of human intervention decline across generations.

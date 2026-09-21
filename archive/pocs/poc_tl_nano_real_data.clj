@@ -5,7 +5,7 @@
    using OpenXLA PJRT on AMD Radeon RX 7900 XTX (ROCm) or CPU.
    Evaluates zero-shot cloze question answering with vs without relational memory unbinding."
   (:require [einsum.core :as xla]
-            [models.tl-nano :as nano]
+            [einsum.models.tl-nano :as nano]
             [einsum.runtime.tokenizer.core :as tok]
             [einsum.runtime.tokenizer.protocol :as proto]
             [clojure.string :as str])

@@ -268,7 +268,7 @@ graph TD
 1. **First Native StableHLO MLIR Compiler for Declarative Tensor Logic**:
    While Pedro Domingos (2025) proposed the mathematical formalism of Tensor Logic, he did not build a production compiler. We designed and implemented the first compiler pipeline ([`src/einsum/logic/lower.clj`](../../src/einsum/logic/lower.clj)) that lowers Declarative Tensor Logic ASTs into StableHLO MLIR, compiling into native OpenXLA executables via PJRT with zero Java or Python bypasses.
 2. **The Unified TL-Transformer Block**:
-   We invented the first fused neural layer ([`models/tl_block.clj`](../../models/tl_block.clj)) combining:
+   We invented the first fused neural layer ([`src/einsum/models/tl_block.clj`](../../src/einsum/models/tl_block.clj)) combining:
    - Causal self-attention with Knowledge-Graph adjacency biasing ($TR_{\text{adj}}T^T$, suppressing distractors by $8.7\times$).
    - Cross-Attention Memory Probing (CAMP, solving probe-side distribution shift).
    - Continuous semiring-gated relational fast-weight unbinding.

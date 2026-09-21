@@ -585,7 +585,7 @@ Having independently validated each theoretical component in isolation—**CAMP 
 3. When queried relations are resident in VRAM fast weights, the block injects crisp, deductively grounded factual biases into the residual stream; when memory is empty, the block acts as a standard transformer layer with zero factual drift or hallucination.
 
 ### Architecture & Declarative AST Specification
-Implemented in [`models.tl-block`](../../models/tl_block.clj):
+Implemented in [`einsum.models.tl-block`](../../src/einsum/models/tl_block.clj):
 1. **KG-Masked Self-Attention**:
    $$\text{Attn}_{\text{out}} = \text{causal-softmax}\left(\frac{Q K^T}{\sqrt{d_h}} + \gamma (T R_{\text{adj}} T^T)\right) V \cdot W_o$$
    $$H_{\text{attn}} = H + \text{Attn}_{\text{out}}$$
@@ -818,7 +818,7 @@ Under Pedro Domingos' Declarative Tensor Logic, explicit factual associations li
 ### Mathematical Architecture & StableHLO Formulation
 
 1. **Declarative TL-Nano Layer Block**:
-   Implemented in [`models/tl_nano.clj`](../../models/tl_nano.clj).
+   Implemented in [`src/einsum/models/tl_nano.clj`](../../src/einsum/models/tl_nano.clj).
    - **Embedding Lookup**:
      $$H_0 = \text{gather}(W_{\text{embed}}, X)$$
    - **Pre-Attention RMSNorm & Multi-Head Projections**:
@@ -1098,7 +1098,7 @@ Experiment E10 accomplishes a vital milestone in neuro-symbolic language modelin
 
 ### Hypothesis
 Moving beyond curated toy datasets, we test the scalability, factual grounding, and generalization of the TL-Nano architecture on the standardized **WebNLG v3.0 English Benchmark** (Gardent et al., 2017; Castro Ferreira et al., 2020), which pairs complex RDF knowledge graph triples with multi-sentence natural language descriptions across diverse domains (Airports, Astronauts, Monuments, Sports, etc.). We hypothesize that:
-1. Decoupling the data lifecycle into an uncommitted dataset cache (`.dataset/`), a binary model checkpoint engine ([`models.checkpoint`](../../models/checkpoint.clj)), and standalone drivers for **training**, **evaluation**, and **interactive inference** will allow reproducible benchmarking and persistent weights.
+1. Decoupling the data lifecycle into an uncommitted dataset cache (`.dataset/`), a binary model checkpoint engine ([`einsum.models.checkpoint`](../../src/einsum/models/checkpoint.clj)), and standalone drivers for **training**, **evaluation**, and **interactive inference** will allow reproducible benchmarking and persistent weights.
 2. Pre-training TL-Nano from scratch on thousands of WebNLG sentences will simultaneously reduce language modeling cross-entropy ($\mathcal{L}_{\text{LM}}$) and learn multi-relational transition operators ($R_r \in \mathbb{R}^{64 \times 64}$) for over 300 distinct relations.
 3. On held-out cloze question-answering evaluation on unseen dev set triples, binding the relational memory matrix $R_r$ will produce statistically significant positive logit shifts ($> +1.0$ logits, doubling or tripling true candidate probability) compared to the ungrounded neural baseline.
 
@@ -1114,7 +1114,7 @@ Moving beyond curated toy datasets, we test the scalability, factual grounding, 
      - `.dataset/webnlg/dev.edn` (1,062 entries, 2,786 sentences, 1,464 triples, 0.39 MB).
    - `.dataset/` is added to `.gitignore` to keep git history clean.
 
-2. **Binary Model Checkpoint Engine** ([`models/checkpoint.clj`](../../models/checkpoint.clj)):
+2. **Binary Model Checkpoint Engine** ([`src/einsum/models/checkpoint.clj`](../../src/einsum/models/checkpoint.clj)):
    - Custom high-speed binary serialization using Java `DataOutputStream` / `DataInputStream` and raw byte arrays.
    - Persists model hyperparameters, active sub-vocabulary mappings (`bpe->active`, `active->bpe`), candidate target entities, all learned relational transition matrices $\{R_r\}$, and device tensor parameters ($W_{\text{embed}}$, $W_{\text{mem}}$, etc.).
    - Saves and restores the complete 47.9 MB checkpoint in $< 50\text{ ms}$.
@@ -1736,7 +1736,7 @@ Experiment E16 tests the natural architectural follow-up: **Two-Stage Relational
    $$\text{score}_{\text{resolve}}(c) = \frac{q_{\text{ctx}} \cdot k_c^T}{\sqrt{D_m}}$$
    $$\Delta_{\text{stage2}}(c) = \lambda_{\text{mem}} \Delta_{\text{type}}(c) + \lambda_{\text{resolve}} \text{score}_{\text{resolve}}(c)$$
 
-Both stages were implemented in pure Declarative Tensor Logic ([`gemma4-two-stage-resolver-ast`](../../models/gemma.clj), [`in-vram-resolver-step-ast`](../../src/einsum/logic/memory/contrastive.clj)) and trained 100% in-VRAM on resident Gemma 4 weights via OpenXLA PJRT (0.61 ms/step on AMD Radeon RX 7900 XTX).
+Both stages were implemented in pure Declarative Tensor Logic ([`gemma4-two-stage-resolver-ast`](../../src/einsum/models/gemma.clj), [`in-vram-resolver-step-ast`](../../src/einsum/logic/memory/contrastive.clj)) and trained 100% in-VRAM on resident Gemma 4 weights via OpenXLA PJRT (0.61 ms/step on AMD Radeon RX 7900 XTX).
 
 ---
 

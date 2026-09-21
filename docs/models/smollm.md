@@ -1,13 +1,13 @@
 # SmolLM Architecture Specification & StableHLO Graph
 
 - **Status**: **Fully Supported** (SmolLM-135M, SmolLM-360M, SmolLM-1.7B)
-- **Clojure Source**: [`models/smollm.clj`](../../models/smollm.clj)
+- **Clojure Source**: [`src/einsum/models/smollm.clj`](../../src/einsum/models/smollm.clj)
 
 ---
 
 ## 1. Visual Execution Graph (Pure Clojure $\to$ StableHLO MLIR)
 
-The following Mermaid diagram represents the exact StableHLO execution graph formed by [`smollm-layer-ast`](../../models/smollm.clj) in `clj-einsum`:
+The following Mermaid diagram represents the exact StableHLO execution graph formed by [`smollm-layer-ast`](../../src/einsum/models/smollm.clj) in `clj-einsum`:
 
 ```mermaid
 flowchart TD
@@ -79,5 +79,5 @@ flowchart TD
 ## 3. Verification Protocol
 
 ```bash
-clojure -M:test -e "(require '[models.smollm-test]) (clojure.test/run-tests 'models.smollm-test)"
+clojure -M:test -e "(require '[einsum.models.smollm-test]) (clojure.test/run-tests 'einsum.models.smollm-test)"
 ```

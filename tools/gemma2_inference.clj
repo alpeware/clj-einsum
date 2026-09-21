@@ -2,7 +2,7 @@
   "Top-level runnable integration script and REPL API for end-to-end Gemma 2B text generation via pure XLA execution."
   (:require [einsum.core :as xla]
             [einsum.logic.lower :as lower]
-            [models.gemma :as gemma]
+            [einsum.models.gemma :as gemma]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.sampling :as sampling]
             [einsum.runtime.tokenizer.core :as tok]

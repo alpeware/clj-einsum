@@ -3,7 +3,7 @@
   (:require [einsum.core :as xla]
             [einsum.logic.exl3 :as exl3]
             [einsum.logic.lower :as lower]
-            [models.gemma :as gemma-logic]
+            [einsum.models.gemma :as gemma-logic]
             [einsum.compiler.pjrt :as pjrt]
             [einsum.runtime.profile :as profile]
             [einsum.runtime.safetensors :as st]

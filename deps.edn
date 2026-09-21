@@ -44,15 +44,15 @@
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx16g"]}
   :e22
   {:extra-paths ["."]
-   :main-opts ["-i" "catalog/agent-deliberation/e22-ingraph-dispatch/run.clj" "-m" "tools.e22-kb-dispatch"]
+   :main-opts ["-i" "catalog/gate4-recursion/e22-ingraph-dispatch/run.clj" "-m" "tools.e22-kb-dispatch"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :e23
   {:extra-paths ["."]
-   :main-opts ["-i" "catalog/agent-deliberation/e23-state-reduce/run.clj" "-m" "tools.e23-reduce"]
+   :main-opts ["-i" "catalog/gate4-recursion/e23-state-reduce/run.clj" "-m" "tools.e23-reduce"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :e24
   {:extra-paths ["."]
-   :main-opts ["-i" "catalog/agent-deliberation/e24-prefix-cache-handover/run.clj" "-m" "tools.e24-vram-c2c"]
+   :main-opts ["-i" "catalog/gate1-compression/e24-prefix-cache-handover/run.clj" "-m" "tools.e24-vram-c2c"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :benchmark
   {:extra-paths ["."]
@@ -81,7 +81,7 @@
   {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2026.01.19"}
                   org.clojure/data.json {:mvn/version "2.5.0"}
                   org.clojure/test.check {:mvn/version "1.1.1"}}
-   :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test" "models" "tools"]}
+   :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test" "tools"]}
   :format
   {:replace-deps {dev.weavejester/cljfmt {:mvn/version "0.16.1"}}
-   :main-opts ["-m" "cljfmt.main" "fix" "src" "test" "models" "tools"]}}}
+   :main-opts ["-m" "cljfmt.main" "fix" "src" "test" "tools"]}}}

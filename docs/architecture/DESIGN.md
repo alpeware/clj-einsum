@@ -162,7 +162,7 @@ Layer 3 provides a homoiconic, declarative DSL implementing Pedro Domingos' Tens
 ```clojure
 (ns example.transformer-layer
   (:require [einsum.logic.lower :as lower]
-            [models.smollm :as smollm]))
+            [einsum.models.smollm :as smollm]))
 
 ;; Generate a complete SmolLM transformer block AST
 (def layer-ast (smollm/smollm-layer-ast 0 128))

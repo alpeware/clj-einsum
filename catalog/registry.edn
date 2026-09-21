@@ -1,122 +1,48 @@
 ;; ==============================================================================
 ;; catalog/registry.edn — Master Machine-Readable Registry of Verified Experiments
 ;; ==============================================================================
-;; The permanent mapping of minted eNN identifiers to research pods, status,
-;; RFC-style headers, hardware targets, Generation Lineage, and Ali Ghodsi's 4
-;; Recursive Self-Improvement (RSI) gates.
+;; Tracks model generations, Ali Ghodsi's 4 RSI Gates on consumer silicon,
+;; and the derivative of judgment.
 ;; Paths are ephemeral; IDs in this registry are immutable.
 ;; Papers cite IDs directly from this registry.
 ;; ==============================================================================
 
 {:version 2
 
- :meta-research-loop
- {:description "Closed-loop research apparatus translating literature hypotheses into verified device executables."
-  :stages
-  [{:stage :hypothesis :desc "Extract falsifiable architectural proposal from literature DAG or prior generation"}
-   {:stage :reification :desc "Express proposal purely as declarative einsum Hiccup AST ([:= head & body-terms])"}
-   {:stage :compilation :desc "Compile AST into StableHLO MLIR and execute natively on PJRT accelerator"}
-   {:stage :critique :desc "Adversarial review against differential reference interpreter and physical silicon baselines"}
-   {:stage :catalog-commit :desc "Record immutable results, specs, and summary CSVs in catalog and registry.edn"}]}
+ :gates
+ {:gate1-compression {:name "Gate 1: Resource Efficiency & Compression"
+                      :metric "bytes/param & achieved GFLOPs/watt"
+                      :target "< 0.5 bytes/param"}
+  :gate2-velocity    {:name "Gate 2: Low-Latency Velocity & Adaptation"
+                      :metric "calibration & adaptation wall-clock"
+                      :target "< 2 hours on 24GB VRAM"}
+  :gate3-evals       {:name "Gate 3: Intelligence & Capability Floor"
+                      :metric "retention floor (>=95%) & absolute benchmark score"
+                      :target "zero catastrophic drop"}
+  :gate4-recursion   {:name "Gate 4: Continuous Recursion & Compound Derivative"
+                      :metric "judgment-cost per verified catalog entry"
+                      :target "declining human intervention hours"}}
 
- :rsi-gates
- {:gate-1-resource
-  {:title "Gate 1: Resource Efficiency (C_{n+1} ≪ C_n)"
-   :criterion "The next generation requires materially (super-linearly) fewer resources/memory/compute than predecessor."
-   :metrics [:vram-bytes-allocated :parameter-deduplication-ratio :flops-per-deduction]}
-
-  :gate-2-time
-  {:title "Gate 2: Time Efficiency (T_{n+1} ≪ T_n)"
-   :criterion "The next generation trains, adapts, or deliberates in materially less latency."
-   :metrics [:dispatch-latency-us :prefill-elimination-ms :turn-latency-ms]}
-
-  :gate-3-capability
-  {:title "Gate 3: Capability Improvement (A_{n+1} > A_n)"
-   :criterion "The next generation demonstrates strictly higher task accuracy, safety, or invariant preservation."
-   :metrics [:cloze-accuracy :semantic-parity-rate :rbac-violation-count :self-correction-lift]}
-
-  :gate-4-repeatability
-  {:title "Gate 4: Repeatability & Closed-Loop Autonomy (G_n → G_{n+1})"
-   :criterion "The improvement cycle operates autonomously without degradation over extended horizons."
-   :metrics [:horizon-length :in-graph-stability-rate :multi-turn-drift]}}
-
- :generation-lineage
- {:g0
-  {:title "Generation 0: Dense Autoregressive Baseline"
-   :description "Monolithic transformer forward passes, quadratic context accumulation, external host Python runtime (PyTorch/HuggingFace), ungrounded hallucinations."
-   :status :superseded}
-
-  :g1
-  {:title "Generation 1: Relational Foundations & Contraction Primitives"
-   :arc :foundations
-   :experiments ["e01" "e02" "e03" "e04" "e05" "e06" "e07" "e08" "e09" "e10"]
-   :gates-addressed [:gate-1-resource :gate-2-time :gate-3-capability :gate-4-repeatability]
-   :summary "Lowering function-free Datalog to StableHLO contractions; O(1) state memory; CAMP probe."
-   :status :closed}
-
-  :g2
-  {:title "Generation 2: Trainable Limits & The Continuous Refutation"
-   :arc :trainable-limits
-   :experiments ["e11" "e12" "e14" "e15" "e16" "e17" "e18" "e19" "e20"]
-   :gates-addressed [:gate-1-resource :gate-2-time :gate-3-capability]
-   :summary "WebNLG scaling and definitive 2x2 sweep refuting gradient-discovered predicate invention."
-   :status :closed}
-
-  :g3
-  {:title "Generation 3: In-VRAM Autonomous Deliberation & Handover Apparatus"
-   :arc :agent-deliberation
-   :experiments ["e21" "e22" "e23" "e24"]
-   :gates-addressed [:gate-1-resource :gate-2-time :gate-3-capability :gate-4-repeatability]
-   :summary "Verified schema commit, in-graph query dispatch, adversarial state reduce, and in-VRAM prefix-cache handover."
-   :status :active}
-
-  :g4
-  {:title "Generation 4: Self-Compiling Meta-Research Substrate"
-   :arc :logic-substrate
-   :experiments ["e25"]
-   :gates-addressed [:gate-1-resource :gate-2-time :gate-3-capability :gate-4-repeatability]
-   :summary "Compiling external logic programming literature (e.g. Takemura & Inoue) into StableHLO contractions."
-   :status :active}}
-
- :arcs
- {:foundations
-  {:title "Relational Foundations & Contraction Primitives"
-   :generation :g1
-   :status :closed
-   :range ["e01" "e10"]
-   :rsi-gates [:gate-1-resource :gate-2-time :gate-3-capability :gate-4-repeatability]
-   :description "Initial validation of Datalog-as-contraction, state tracking, and toy relational memory."}
-
-  :trainable-limits
-  {:title "Trainable Limits, Relational Memory & Contrastive Adjoints"
-   :generation :g2
-   :status :closed
-   :range ["e11" "e20"]
-   :rsi-gates [:gate-1-resource :gate-2-time :gate-3-capability]
-   :description "WebNLG scaling, distractor selectivity, and empirical refutation of gradient predicate invention (E14-E20)."}
-
-  :agent-deliberation
-  {:title "In-VRAM Autonomous Agent Deliberation & State Reduction"
-   :generation :g3
-   :status :active
-   :range ["e21" "e24"]
-   :rsi-gates [:gate-1-resource :gate-2-time :gate-3-capability :gate-4-repeatability]
-   :description "Hardware-accelerated read/write KB memory, verified RBAC reduce loop, and in-VRAM prefix-cache handover."}
-
-  :logic-substrate
-  {:title "Differentiable Logic Compilation & Semiring Extensions"
-   :generation :g4
-   :status :active
-   :range ["e25"]
-   :rsi-gates [:gate-1-resource :gate-2-time :gate-3-capability :gate-4-repeatability]
-   :description "Compiling external logic programming literature (e.g. Takemura & Inoue) into StableHLO contractions."}}
+ :generations
+ {0 {:name "Base Infrastructure & Gemma 4 E2B Vehicle"
+     :hardware "AMD Radeon RX 7900 XTX (24GB)"
+     :bytes-per-param 2.0
+     :benchmarks {:gsm8k 0.56 :swe-mini 0.22}
+     :judgment-cost-hours 12.0
+     :status :active}
+  1 {:name "Ternary Compressed Backbone (Target)"
+     :parent-generation 0
+     :bytes-per-param 0.25
+     :target-hardware "AMD Radeon RX 7900 XTX (24GB)"
+     :retention-floor-target 0.95
+     :judgment-cost-target "< 6.0 hours per verified RFC"
+     :status :staged}}
 
  :experiments
  {"e01"
   {:slug "cross-attention-memory-probe"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-3-capability]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e01"
    :hardware "Apple M-Series / CPU"
@@ -126,9 +52,8 @@
 
   "e02"
   {:slug "kg-masked-attention"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-1-resource :gate-3-capability]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e02"
    :hardware "CPU / OpenXLA PJRT"
@@ -138,9 +63,8 @@
 
   "e03"
   {:slug "contrastive-subspace-pretraining"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-2-time :gate-3-capability]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e03"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -150,9 +74,8 @@
 
   "e04"
   {:slug "in-vram-datalog-state-tracker"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-2-time :gate-3-capability]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e04"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -162,9 +85,8 @@
 
   "e05"
   {:slug "ephemeral-online-learning"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-1-resource :gate-2-time]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e05"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -174,9 +96,8 @@
 
   "e06"
   {:slug "unified-tl-transformer-block"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-2-time]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e06"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -186,9 +107,8 @@
 
   "e07"
   {:slug "long-horizon-swe-agent-benchmark"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-1-resource :gate-4-repeatability]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e07"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -198,9 +118,8 @@
 
   "e08"
   {:slug "in-vram-relation-induction"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-2-time :gate-3-capability]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e08"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -210,9 +129,8 @@
 
   "e09"
   {:slug "tl-nano-pretraining"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-1-resource :gate-2-time]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e09"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -222,9 +140,8 @@
 
   "e10"
   {:slug "real-world-knowledge-corpus"
-   :arc :foundations
-   :generation :g1
-   :rsi-gates [:gate-3-capability]
+   :gate :gate2-velocity
+   :generation 0
    :status :verified
    :assigned-id "e10"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -234,9 +151,8 @@
 
   "e11"
   {:slug "webnlg-standardized-pretraining"
-   :arc :trainable-limits
-   :generation :g2
-   :rsi-gates [:gate-1-resource]
+   :gate :gate1-compression
+   :generation 0
    :status :verified
    :assigned-id "e11"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -246,9 +162,8 @@
 
   "e12"
   {:slug "in-vram-parameter-pinning-webnlg"
-   :arc :trainable-limits
-   :generation :g2
-   :rsi-gates [:gate-1-resource :gate-2-time]
+   :gate :gate1-compression
+   :generation 0
    :status :verified
    :assigned-id "e12"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -258,9 +173,8 @@
 
   "e14"
   {:slug "distractor-diagnostic-in-vram"
-   :arc :trainable-limits
-   :generation :g2
-   :rsi-gates [:gate-3-capability]
+   :gate :gate3-evals
+   :generation 0
    :status :refuted
    :assigned-id "e14"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -270,9 +184,8 @@
 
   "e15"
   {:slug "gemma4-rmem-grafting"
-   :arc :trainable-limits
-   :generation :g2
-   :rsi-gates [:gate-3-capability]
+   :gate :gate3-evals
+   :generation 0
    :status :verified
    :assigned-id "e15"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -282,9 +195,8 @@
 
   "e16"
   {:slug "contrastive-resolver-gemma4"
-   :arc :trainable-limits
-   :generation :g2
-   :rsi-gates [:gate-3-capability]
+   :gate :gate3-evals
+   :generation 0
    :status :refuted
    :assigned-id "e16"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
@@ -294,11 +206,11 @@
 
   "e17"
   {:slug "end-to-end-gradient-predicate-invention"
-   :arc :trainable-limits
-   :generation :g2
-   :rsi-gates [:gate-3-capability]
+   :gate :gate3-evals
+   :generation 0
    :status :refuted
    :assigned-id "e17"
+   :pod-path "catalog/gate3-evals/e17-predicate-invention"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "End-to-end gradient predicate invention: Refuted. Continuous relaxation fails discrete unidentifiability."
    :headers {:literature ["Domingos (2024) Tensor Logic"]
@@ -306,11 +218,10 @@
 
   "e18"
   {:slug "resolver-sweep-diagnostics"
-   :arc :trainable-limits
-   :generation :g2
-   :rsi-gates [:gate-3-capability]
+   :gate :gate3-evals
+   :generation 0
    :status :refuted
-   :assigned-id "e18"
+   :pod-path "catalog/gate3-evals/e18-diagnostics"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "Phase 0/1 2x2 factorial sweep: Definitive refutation of gradient resolver under varying temperature."
    :headers {:literature []
@@ -318,11 +229,10 @@
 
   "e19"
   {:slug "hybrid-crystallization"
-   :arc :trainable-limits
-   :generation :g2
-   :rsi-gates [:gate-3-capability]
+   :gate :gate3-evals
+   :generation 0
    :status :refuted
-   :assigned-id "e19"
+   :pod-path "catalog/gate3-evals/e19-hybrid-crystallization"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "Hybrid Crystallization: Gradient-based search with temperature decay fails discrete predicate invention."
    :headers {:literature []
@@ -330,11 +240,10 @@
 
   "e20"
   {:slug "constrained-crystallization"
-   :arc :trainable-limits
-   :generation :g2
-   :rsi-gates [:gate-3-capability]
+   :gate :gate3-evals
+   :generation 0
    :status :refuted
-   :assigned-id "e20"
+   :pod-path "catalog/gate3-evals/e20-constrained-crystallization"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "Constrained Crystallization: Closing the line on gradient predicate invention; proves discrete priors required."
    :headers {:literature []
@@ -342,11 +251,11 @@
 
   "e21"
   {:slug "schema-constrained-kb-write-path"
-   :arc :agent-deliberation
-   :generation :g3
-   :rsi-gates [:gate-3-capability :gate-4-repeatability]
+   :gate :gate4-recursion
+   :generation 0
    :status :verified
    :assigned-id "e21"
+   :pod-path "catalog/gate4-recursion/e21-kb-write-path"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "Schema-constrained KB write path with verified commit: 0 illegal role assignments commit to memory."
    :headers {:literature []
@@ -354,11 +263,11 @@
 
   "e22"
   {:slug "in-graph-kb-query-dispatch"
-   :arc :agent-deliberation
-   :generation :g3
-   :rsi-gates [:gate-2-time]
+   :gate :gate4-recursion
+   :generation 0
    :status :verified
    :assigned-id "e22"
+   :pod-path "catalog/gate4-recursion/e22-ingraph-dispatch"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "In-graph KB query dispatch with Gemma 4 E2B: 100% emission, 42.20 us host vs 691.94 us device lookup."
    :headers {:literature ["Google DeepMind (2024) Gemma 4"]
@@ -366,11 +275,11 @@
 
   "e23"
   {:slug "verified-kb-reduce-horizon"
-   :arc :agent-deliberation
-   :generation :g3
-   :rsi-gates [:gate-3-capability :gate-4-repeatability]
+   :gate :gate4-recursion
+   :generation 0
    :status :verified
    :assigned-id "e23"
+   :pod-path "catalog/gate4-recursion/e23-state-reduce"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "The Reduce: Verified KB accumulation over an adversarial horizon with provable zero RBAC invariant violations."
    :headers {:literature []
@@ -378,11 +287,11 @@
 
   "e24"
   {:slug "prefix-cache-handover"
-   :arc :agent-deliberation
-   :generation :g3
-   :rsi-gates [:gate-1-resource :gate-2-time :gate-3-capability :gate-4-repeatability]
+   :gate :gate1-compression
+   :generation 0
    :status :verified
    :assigned-id "e24"
+   :pod-path "catalog/gate1-compression/e24-prefix-cache-handover"
    :hardware "AMD Radeon RX 7900 XTX (Navi 31 / gfx1100, ROCm 6.2)"
    :summary "In-VRAM Prefix-Cache Handover (KV-aligned homogeneous instance handover): 74.46 ms re-prefill eliminated (0.04 ms replacement cost), 1 verified self-correction on arith-07 (+3.3% lift), 0 duplicate weights allocated across 493 PJRT buffers."
    :headers {:literature ["Vaswani et al. (2017) arXiv:1706.03762"

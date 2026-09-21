@@ -5,7 +5,7 @@
      L_total = L_LM + lambda_TL * L_InfoNCE.
    Verifies 24GB VRAM consumer-hardware scalability and zero-shot deductive factual recall."
   (:require [einsum.core :as xla]
-            [models.tl-nano :as nano]
+            [einsum.models.tl-nano :as nano]
             [clojure.string :as str])
   (:gen-class))
 

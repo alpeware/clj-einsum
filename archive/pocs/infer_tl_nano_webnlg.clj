@@ -3,8 +3,8 @@
    Loads saved model weights, compiles OpenXLA PJRT execution graph, and evaluates
    prompt completions in both Pure Neural Mode (Zero Memory) and Grounded Mode (Active Memory)."
   (:require [einsum.core :as xla]
-            [models.checkpoint :as ckpt]
-            [models.tl-nano :as nano]
+            [einsum.models.checkpoint :as ckpt]
+            [einsum.models.tl-nano :as nano]
             [einsum.runtime.tokenizer.core :as tok]
             [einsum.runtime.tokenizer.protocol :as proto]
             [clojure.string :as str])

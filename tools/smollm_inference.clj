@@ -2,7 +2,7 @@
   "Top-level runnable integration script for end-to-end SmolLM-135M text generation via pure XLA execution."
   (:require [einsum.core :as xla]
             [einsum.logic.lower :as lower]
-            [models.smollm :as smollm-logic]
+            [einsum.models.smollm :as smollm-logic]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.tokenizer.core :as tok]
             [einsum.runtime.tokenizer.protocol :as proto])

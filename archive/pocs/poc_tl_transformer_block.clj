@@ -5,7 +5,7 @@
    unbinding (E5) inside a single OpenXLA PJRT compiled layer block.
    Evaluates on AMD Radeon RX 7900 XTX via OpenXLA PJRT ROCm plugin."
   (:require [einsum.core :as xla]
-            [models.tl-block :as tl]
+            [einsum.models.tl-block :as tl]
             [clojure.string :as str])
   (:gen-class))
 

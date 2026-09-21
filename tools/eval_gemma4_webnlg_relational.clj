@@ -6,7 +6,7 @@
    against distractors across frequency tiers (Head, Mid, Tail, Unseen)."
   (:require [einsum.core :as xla]
             [einsum.logic.memory.contrastive :as contrastive]
-            [models.gemma :as gemma]
+            [einsum.models.gemma :as gemma]
             [einsum.logic.symbolic :as sym]
             [einsum.compiler.pjrt :as pjrt]
             [einsum.runtime.tokenizer.protocol :as proto]

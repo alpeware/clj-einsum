@@ -1,15 +1,15 @@
 # Gemma 4 (E2B / E4B) Model Architecture Specification & StableHLO Graph
 
 - **Status**: **Fully Supported** (Gemma 4 E2B, Gemma 4 E4B)
-- **Clojure Source**: [`models/gemma.clj`](../../models/gemma.clj)
+- **Clojure Source**: [`src/einsum/models/gemma.clj`](../../src/einsum/models/gemma.clj)
 - **CLI Hardware Runner**: [`tools/gemma4_inference.clj`](../../tools/gemma4_inference.clj)
-- **Test Suite**: [`test/models/gemma_test.clj`](../../test/models/gemma_test.clj)
+- **Test Suite**: [`test/einsum/models/gemma_test.clj`](../../test/einsum/models/gemma_test.clj)
 
 ---
 
 ## 1. Visual Execution Graph (Pure Clojure $\to$ StableHLO MLIR)
 
-The following Mermaid diagram represents the exact StableHLO execution graph formed by [`gemma4-layer-ast`](../../models/gemma.clj) in `clj-einsum`:
+The following Mermaid diagram represents the exact StableHLO execution graph formed by [`gemma4-layer-ast`](../../src/einsum/models/gemma.clj) in `clj-einsum`:
 
 ```mermaid
 flowchart TD
