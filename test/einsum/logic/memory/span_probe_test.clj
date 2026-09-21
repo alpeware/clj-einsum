@@ -10,7 +10,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [tools.poc-span-probe :as span]))
+            [einsum.logic.memory.span :as span]))
 
 ;; ==============================================================================
 ;; 1. Subsequence Search Tests

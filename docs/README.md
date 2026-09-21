@@ -34,19 +34,6 @@ Empirical benchmark metrics for specific hardware and driver combinations are re
 
 ---
 
-## 📚 LLM Reference Wiki
-
-Explore theoretical formulations paired with pure Clojure reference code:
-
-- ⚡ **[Inference: Prefill vs. Decoding Phase](wiki/inference.md)**: Compute-bound context prefill vs memory-bound single token steps ($B=1$).
-- 🔤 **[Tokenization & Special Tokens](wiki/tokenization.md)**: BPE vs SentencePiece algorithms and token lookups.
-- 🎲 **[Autoregressive Sampling & KV Cache](wiki/sampling.md)**: Top-K, Top-P, Temperature scaling, and KV cache updates.
-- 👁️ **[Attention Mechanisms](wiki/attention.md)**: MHA, GQA, RoPE, Gemma 4 Hybrid Sliding Window, DeepSeek MLA, FlashDecoding.
-- ⚖️ **[Normalization Variants](wiki/normalization.md)**: LayerNorm, RMSNorm, and Gemma RMSNorm ($1.0 + w$).
-- ⚡ **[Activation Functions](wiki/activations.md)**: GELU, SiLU, SwiGLU, GeGLU feed-forward blocks.
-- 🔮 **[Speculative Decoding](wiki/speculative_decoding.md)**: Draft models, EAGLE-2, Medusa, Meta DFlash, and N-gram Prompt-Lookup.
-- 📦 **[Low-Bit Quantization](wiki/quantization.md)**: INT8, INT4, AWQ, and StableHLO in-graph de-quantization.
-
 ---
 
 ## ⚙️ OpenXLA & PJRT Hardware Knowledge Base ([`xla/`](xla/README.md))
@@ -68,8 +55,6 @@ Every supported model family includes architectural details, hyperparameter spec
 - 🟢 **[Gemma 2 (2B / 9B / 27B)](models/gemma2.md)** *(Supported)*
 - 🟢 **[Gemma 3 (1B / 4B / 12B / 27B)](models/gemma3.md)** *(Supported)*
 - 🟢 **[Gemma 4 (E2B / E4B)](models/gemma4_e2b_e4b.md)** *(Supported)*
-- 🟡 **[Gemma 4 26B-A4B MoE](models/gemma4_26b_a4b.md)** *(Planned)*
-- 🟡 **[Meta Muse-Glimmer-30B](models/muse_glimmer_30b.md)** *(Planned)*
 
 ---
 

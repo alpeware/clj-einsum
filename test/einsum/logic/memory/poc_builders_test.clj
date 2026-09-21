@@ -7,7 +7,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [tools.poc-fact-grounding :as poc]))
+            [einsum.logic.memory.builders :as poc]))
 
 ;; Simple mock tokenizer for testing build-entity-token-table in isolation
 (defrecord SimpleMockTokenizer [vocab-map]

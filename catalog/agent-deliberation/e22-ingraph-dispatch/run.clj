@@ -552,7 +552,7 @@ Person 2 has no siblings.<turn|>")
   (loop [rem args
          opts {:backend :rocm
                :model-dir ".models/gemma-4-E2B-it"
-               :out-dir "paper-experiments/e22-dispatch/2026-09-17"
+               :out-dir "catalog/agent-deliberation/e22-ingraph-dispatch"
                :num-entities 64
                :max-new-tokens 48
                :temperature 0.0

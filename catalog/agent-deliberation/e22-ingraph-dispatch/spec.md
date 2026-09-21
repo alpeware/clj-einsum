@@ -176,7 +176,7 @@ the feedback path is lossy — debug before any follow-up.
   Rule 4 — no host float loops, no Java escape hatches).
 - `tools/e22_kb_dispatch.clj` — Phase 0 checks + Phase 1 eval
   (H / B0 / B1), printing the criteria report.
-- `paper-experiments/e22-dispatch/2026-09-17/` — `phase0.edn`,
+- `catalog/agent-deliberation/e22-ingraph-dispatch/` — `phase0.edn`,
   `results.edn` (per-question log: prompt, emitted tokens,
   `<kbans>` contents, final answer, timings).
 - `docs/tensor_logic/empirical_journey.md` — new **Section 23**.

@@ -23,7 +23,7 @@
    :t-init 0.1
    :t-min 1e-4
    :seeds [42 43 44 45 46]
-   :out-dir "paper-experiments/e20-constrained/2026-09-17/"})
+   :out-dir "catalog/trainable-limits/e20-constrained-crystallization/"})
 
 (defn- normalize-args [args]
   (mapcat (fn [arg]

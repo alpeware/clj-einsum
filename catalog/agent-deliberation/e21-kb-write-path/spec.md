@@ -125,7 +125,7 @@ enforces its schema is worse than no KB: it launders guesses into facts.
   a single completion), supersede-chain integrity.
 - `tools/e21_kb_write_path.clj` — demo on the family-generator schema,
   printing the acceptance-criteria report.
-- `paper-experiments/e21-kb/2026-09-17/` — `results.edn` with the
+- `catalog/agent-deliberation/e21-kb-write-path/` — `results.edn` with the
   acceptance report + latency measurements.
 - `docs/tensor_logic/empirical_journey.md` — new **Section 22**.
 

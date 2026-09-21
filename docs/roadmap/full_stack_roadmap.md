@@ -33,29 +33,24 @@ flowchart LR
   - Pedro Domingos' Declarative Tensor Logic (`einsum.logic.*`) as the tensor-equation representation.
   - Native Panama PJRT C API bindings (`einsum.compiler.pjrt`).
   - SOTA benchmark suite (`tools/benchmark.clj`).
-  - Autoregressive model definitions: Gemma 4, GPT-2, SmolLM, Muse-Glimmer.
-  - **Gemma 4 26B A4B (MoE)**: mixture-of-experts backbone — 26B total params, ~4B active per token (128 experts, 8 active + 1 shared). Needs MoE top-k routing (top-k + gather over expert FFNs) in the model definitions; each expert FFN is itself a standard contraction.
-  - **Diffusion language models** (DiffusionGemma-style): a bidirectional denoiser compiled in-graph plus a host-side canvas sampler, built on the MoE backbone above. Diffusion decoding is a reduce — `canvas_{t+1} = denoise(canvas_t, t)` — the same loop-is-a-reduce pattern as the agent loop. This serves the `B=1` latency goal directly: diffusion shifts single-user decode from memory-bound to compute-bound. Needs: bidirectional attention (causal mask off), encoder-decoder cross-attention.
-  - **Tabular foundation models** (TabFM-style): alternating row/column attention over a `(rows × cols × d)` table, row compression to dense vectors, and an ICL transformer over the compressed rows. Pure attention plus contraction — no new ops; attention over permuted axes is reshape plus the existing attention lowering. Tables are padded to bounded maxima (TabFM defaults: 100 rows, 500 features), so one compiled program covers all inputs. Heterogeneous feature encoding (ordinal encoders, scalers) stays host-side preprocessing.
+  - Autoregressive model definitions: Gemma 4, Gemma 3, Gemma 2, GPT-2, SmolLM.
 
 ---
 
 ### Phase 2: Distillation & Automated Evaluation Framework
 * **Goal**: Build pure Clojure evaluation suites and model distillation utilities for consumer devices.
 * **Key Additions**:
-  - Task evaluation harness (MMLU, GSM8K, HumanEval, SWE-bench mini; tabular: TabArena-style Elo).
+  - Task evaluation harness (MMLU, GSM8K, HumanEval, SWE-bench mini).
   - Logit distillation loss pipeline (`einsum.logic.nn`) to train small draft assistant models (e.g. 15MB EAGLE heads or 300M-param draft models).
-  - **Sampler distillation** for diffusion models: few-step student from a many-step teacher, following the DiffusionGemma training recipe.
 
 ---
 
 ### Phase 3: Post-Training (SFT, LoRA, DPO)
-* **Goal**: Enable fine-tuning of 8B-param – 30B-param models on single consumer GPUs (24–32 GB VRAM).
+* **Goal**: Enable fine-tuning of 1B-param – 12B-param models on single consumer GPUs (16–24 GB VRAM).
 * **Key Additions**:
   - Reverse-mode Automatic Differentiation (VJP / Reverse AD in `einsum.compiler.autodiff`).
   - Low-Rank Adaptation (LoRA) layers: `W + BA` with rank `r`.
   - AdamW optimizer in StableHLO MLIR (`einsum.runtime.opt`).
-  - **Diffusion post-training**: bidirectional-denoising SFT objectives compile through the same autodiff closure as AR post-training.
 
 ---
 
@@ -69,4 +64,4 @@ flowchart LR
 
 ### Phase 5: On-Device Pre-Training Infrastructure
 * **Goal**: Pre-train specialized small-to-medium models (100M-param – 3B-param) from scratch on consumer hardware using pure OpenXLA pipeline compilation.
-* **Scope note**: the infrastructure targets the *mechanics* of pre-training at consumer scale. Google-scale synthetic-data regimes (e.g. TabFM's hundreds of millions of SCM-generated tables) remain out of scope as a training workload; running and distilling such models is Phases 1–2.
+* **Scope note**: the infrastructure targets the *mechanics* of pre-training at consumer scale using pure StableHLO pipelines.

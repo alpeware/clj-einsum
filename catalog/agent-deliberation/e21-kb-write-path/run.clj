@@ -204,6 +204,6 @@
     report))
 
 (defn -main [& _args]
-  (let [opts {:out-dir "paper-experiments/e21-kb/2026-09-17/"}]
+  (let [opts {:out-dir "catalog/agent-deliberation/e21-kb-write-path/"}]
     (run-acceptance-criteria opts)
     (System/exit 0)))

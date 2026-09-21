@@ -92,7 +92,7 @@ Comprehensive architectural breakdown, commercial enterprise positioning, and gl
 | **Symbolic Logic & Datalog Fixpoints** | [`einsum.logic.symbolic`](../../src/einsum/logic/symbolic.clj) | [`einsum.logic.symbolic-test`](../../test/einsum/logic/symbolic_test.clj) |
 | **Value-Carrying Semirings** | [`einsum.logic.semiring`](../../src/einsum/logic/semiring.clj) | [`einsum.logic.semiring-test`](../../test/einsum/logic/semiring_test.clj) |
 | **Autodiff Adjoints for Probes** | [`einsum.logic.autodiff`](../../src/einsum/logic/autodiff.clj) | [`einsum.logic.autodiff-test`](../../test/einsum/logic/autodiff_test.clj) |
-| **LLM-Anchored Memory & QR** | [`tools.poc-anchored-memory`](../../tools/poc_anchored_memory.clj) | [`einsum.logic.memory.anchored-memory-test`](../../test/einsum/logic/memory/anchored_memory_test.clj) |
+| **LLM-Anchored Memory & QR** | [`tools.poc-anchored-memory`](../../archive/pocs/poc_anchored_memory.clj) | [`einsum.logic.memory.anchored-memory-test`](../../test/einsum/logic/memory/anchored_memory_test.clj) |
 | **Gemma 4 Grounding AST Block** | [`models.gemma`](../../models/gemma.clj) | [`einsum.integration.rocm-e2e-test`](../../test/einsum/integration/rocm_e2e_test.clj) |
-| **TL-Nano Real-Data Pre-training** | [`tools.poc-tl-nano-real-data`](../../tools/poc_tl_nano_real_data.clj) | [`models.tl-nano-test`](../../test/models/tl_nano_test.clj) |
+| **TL-Nano Real-Data Pre-training** | [`tools.poc-tl-nano-real-data`](../../archive/pocs/poc_tl_nano_real_data.clj) | [`models.tl-nano-test`](../../test/models/tl_nano_test.clj) |
 

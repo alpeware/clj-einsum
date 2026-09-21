@@ -236,7 +236,7 @@ facts, disjunctions compared as sets).
 
 ## 13. Telemetry
 
-`paper-experiments/e23-reduce/2026-09-17/`: `phase0.edn`,
+`catalog/agent-deliberation/e23-state-reduce/`: `phase0.edn`,
 `stream.edn` (seeded events + oracle checkpoints), `results.edn`
 (per-step: observation, proposals, commits/rejections with named
 violations, snapshot hash; per-cell: interrogation log, fact-level

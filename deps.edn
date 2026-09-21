@@ -44,15 +44,15 @@
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx16g"]}
   :e22
   {:extra-paths ["."]
-   :main-opts ["-m" "tools.e22-kb-dispatch"]
+   :main-opts ["-i" "catalog/agent-deliberation/e22-ingraph-dispatch/run.clj" "-m" "tools.e22-kb-dispatch"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :e23
   {:extra-paths ["."]
-   :main-opts ["-m" "tools.e23-reduce"]
+   :main-opts ["-i" "catalog/agent-deliberation/e23-state-reduce/run.clj" "-m" "tools.e23-reduce"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :e24
   {:extra-paths ["."]
-   :main-opts ["-m" "tools.e24-vram-c2c"]
+   :main-opts ["-i" "catalog/agent-deliberation/e24-prefix-cache-handover/run.clj" "-m" "tools.e24-vram-c2c"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx12g"]}
   :benchmark
   {:extra-paths ["."]

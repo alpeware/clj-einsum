@@ -208,7 +208,7 @@ $$\alpha_t = \text{softmax}\left(\frac{\langle H_t, k_{\text{attn}} \rangle}{\ta
 The attention weights should dynamically learn to route attention to the head entity tokens while suppressing syntactic template tokens, invariant to phrasing.
 
 ### Experimental Configuration & Software
-- **Implementation**: [`einsum.logic.memory.camp`](../../src/einsum/logic/memory/camp.clj), [`test.einsum.logic.memory.camp-test`](../../test/einsum/logic/memory/camp_test.clj), [`tools.poc-camp`](../../tools/poc_camp.clj).
+- **Implementation**: [`einsum.logic.memory.camp`](../../src/einsum/logic/memory/camp.clj), [`test.einsum.logic.memory.camp-test`](../../test/einsum/logic/memory/camp_test.clj), [`tools.poc-camp`](../../archive/pocs/poc_camp.clj).
 - **Execution Target**: AMD Radeon RX 7900 XTX (24GB VRAM) via OpenXLA PJRT ROCm plugin.
 - **Model**: Gemma 4 E2B in sequence mode (`:last-token-only? false`, `:targets [:normed]`).
 - **Memory Subspace**: LLM-anchored QR-orthonormalized table ($D=1536$, zero cross-talk).
@@ -302,7 +302,7 @@ $$S_{r_3, i, k}^{(t+1)} = S_{r_3, i, k}^{(t)} \lor \bigvee_j \left( S_{r_1, i, j
 Fixed-point iteration reaches deductive closure in $K$ tensor matrix multiplications within milliseconds, guaranteeing zero hallucinations and **strictly $O(1)$ constant VRAM** across arbitrarily long agent horizons.
 
 ### Experimental Configuration & Software
-- **Implementation**: [`einsum.logic.agent.state_tracker`](../../src/einsum/logic/agent/state_tracker.clj), [`test.einsum.logic.agent.state_tracker-test`](../../test/einsum/logic/agent/state_tracker_test.clj), [`tools.poc-datalog-state-tracker`](../../tools/poc_datalog_state_tracker.clj).
+- **Implementation**: [`einsum.logic.agent.state_tracker`](../../src/einsum/logic/agent/state_tracker.clj), [`test.einsum.logic.agent.state_tracker-test`](../../test/einsum/logic/agent/state_tracker_test.clj), [`tools.poc-datalog-state-tracker`](../../archive/pocs/poc_datalog_state_tracker.clj).
 - **Execution Target**: AMD Radeon RX 7900 XTX (24GB VRAM) via OpenXLA PJRT ROCm plugin.
 - **Relational Domain**: 16 entities ($N=16$), 5 dynamic agent relations ($R=5$: `parent`, `ancestor` [transitive closure], `located_at`, `in_country` [multi-hop geo-inference], `can_access` [role-based security access control]).
 - **Simulation**: 100 sequential agent turns performing dynamic fact asserts, updates, and complex multi-hop deductive queries.
@@ -367,7 +367,7 @@ where $\alpha \in [0, 1]$ controls retention/decay, and $\beta$ controls write s
 Because tensor addition, tensor subtraction (fact retraction), matrix multiplication (transitive composition $R_{1 \circ 2} = R_1 \cdot R_2$), and the extract-threshold-re-embed denoising cycle are compiled directly into OpenXLA PJRT kernels, online learning operates with **zero backpropagation, sub-2ms latency, 100% zero-shot recall, and zero prompt context bloat**.
 
 ### Experimental Configuration & Software
-- **Implementation**: [`einsum.logic.memory.ephemeral`](../../src/einsum/logic/memory/ephemeral.clj), [`test.einsum.logic.memory.ephemeral-test`](../../test/einsum/logic/memory/ephemeral_test.clj), [`tools.poc-ephemeral-learning`](../../tools/poc_ephemeral_learning.clj).
+- **Implementation**: [`einsum.logic.memory.ephemeral`](../../src/einsum/logic/memory/ephemeral.clj), [`test.einsum.logic.memory.ephemeral-test`](../../test/einsum/logic/memory/ephemeral_test.clj), [`tools.poc-ephemeral-learning`](../../archive/pocs/poc_ephemeral_learning.clj).
 - **Execution Target**: AMD Radeon RX 7900 XTX (24GB VRAM) via OpenXLA PJRT ROCm plugin.
 - **Relational Domain**: 32 Cloud Infrastructure and microservice entities ($N=32$), embedding dimension $D=256$.
 - **Compiled Kernels**:
@@ -452,7 +452,7 @@ Inspired by `waylandzhang/tensorlogic` (`KnowledgeGraphTransformer`), an in-grap
 where $\gamma > 0$ provides a symbolic grounding prior that amplifies true relational paths while suppressing distractor interference, without violating autoregressive causality ($p_k \le p_q$).
 
 ### Experimental Configuration & Software
-- **Implementation**: [`einsum.logic.attention.kg-masked`](../../src/einsum/logic/attention/kg_masked.clj), [`test.einsum.logic.attention.kg-masked-test`](../../test/einsum/logic/attention/kg_masked_test.clj), [`tools.poc-kg-masked-attention`](../../tools/poc_kg_masked_attention.clj).
+- **Implementation**: [`einsum.logic.attention.kg-masked`](../../src/einsum/logic/attention/kg_masked.clj), [`test.einsum.logic.attention.kg-masked-test`](../../test/einsum/logic/attention/kg_masked_test.clj), [`tools.poc-kg-masked-attention`](../../archive/pocs/poc_kg_masked_attention.clj).
 - **Execution Target**: AMD Radeon RX 7900 XTX (24GB VRAM) via OpenXLA PJRT ROCm plugin.
 - **Scenario**: Multi-Entity Adversarial Distraction Prompt:
   *"Elon Musk Tesla Tim Cook Apple Dario Amodei Who is the CEO of Anthropic? :"*
@@ -520,7 +520,7 @@ To establish a generalizable bridge between high-dimensional LLM semantic spaces
    All forward, backward, and update operations are lowered into StableHLO MLIR and executed on OpenXLA PJRT with zero Java/host loops.
 
 ### Experimental Configuration & Software
-- **Implementation**: [`einsum.logic.memory.contrastive`](../../src/einsum/logic/memory/contrastive.clj), [`test.einsum.logic.memory.contrastive-test`](../../test/einsum/logic/memory/contrastive_test.clj), [`tools.poc-contrastive-pretraining`](../../tools/poc_contrastive_pretraining.clj).
+- **Implementation**: [`einsum.logic.memory.contrastive`](../../src/einsum/logic/memory/contrastive.clj), [`test.einsum.logic.memory.contrastive-test`](../../test/einsum/logic/memory/contrastive_test.clj), [`tools.poc-contrastive-pretraining`](../../archive/pocs/poc_contrastive_pretraining.clj).
 - **Hardware Targets**: AMD Radeon RX 7900 XTX (24GB VRAM, ROCm via `libjsig.so`) & Host CPU.
 - **Dimensionality**: $D_{\text{in}} = 256$ (high-dim semantic space) $\to D_{\text{mem}} = 64$ (compact relational subspace).
 - **Knowledge Ontology**: 32 infrastructure entities across 4 distinct relations (`depends_on`, `runs_on`, `managed_by`, `grants_access`).
@@ -602,7 +602,7 @@ Implemented in [`models.tl-block`](../../models/tl_block.clj):
 
 ### Empirical Findings on AMD Radeon RX 7900 XTX (OpenXLA PJRT ROCm)
 
-Evaluated via [`tools/poc_tl_transformer_block.clj`](../../tools/poc_tl_transformer_block.clj) on 16 infrastructure entities ($L=16$ tokens, $H=4$ heads, $D=256$, $D_{\text{mem}}=64$, $D_{\text{ff}}=1024$):
+Evaluated via [`tools/poc_tl_transformer_block.clj`](../../archive/pocs/poc_tl_transformer_block.clj) on 16 infrastructure entities ($L=16$ tokens, $H=4$ heads, $D=256$, $D_{\text{mem}}=64$, $D_{\text{ff}}=1024$):
 
 ```
 ================================================================================
@@ -659,7 +659,7 @@ We hypothesize that an agent augmented with Pedro Domingos' Declarative Tensor L
 ---
 
 ### Architecture & Benchmark Design
-Implemented in [`einsum.logic.agent.swe-benchmark`](../../src/einsum/logic/agent/swe_benchmark.clj) and evaluated via [`tools/poc_long_horizon_agent.clj`](../../tools/poc_long_horizon_agent.clj):
+Implemented in [`einsum.logic.agent.swe-benchmark`](../../src/einsum/logic/agent/swe_benchmark.clj) and evaluated via [`tools/poc_long_horizon_agent.clj`](../../archive/pocs/poc_long_horizon_agent.clj):
 
 1. **Codebase Universe ($N=112$ entities)**:
    - **32 Files**: Tiered into `core/`, `engine/`, `models/`, and `test/`.
@@ -737,7 +737,7 @@ We hypothesize that:
 ---
 
 ### Architecture & Declarative AST Specification
-Implemented in [`einsum.logic.memory.factorization`](../../src/einsum/logic/memory/factorization.clj) and benchmarked via [`tools/poc_relation_induction.clj`](../../tools/poc_relation_induction.clj):
+Implemented in [`einsum.logic.memory.factorization`](../../src/einsum/logic/memory/factorization.clj) and benchmarked via [`tools/poc_relation_induction.clj`](../../archive/pocs/poc_relation_induction.clj):
 
 1. **Tensor Decomposition Model**:
    $$\hat{\mathcal{X}}_{h, k, t} = \sum_{r=1}^R A_{h, r} B_{k, r} C_{t, r}$$
@@ -976,7 +976,7 @@ Having verified TL-Nano pre-training on synthetic tokens (E9), we transition to 
 
 ### Experimental Setup & Dataset Specification
 
-Implemented in [`tools/poc_tl_nano_real_data.clj`](../../tools/poc_tl_nano_real_data.clj) and curated in [`data/wikifacts_corpus.edn`](../../data/wikifacts_corpus.edn):
+Implemented in [`tools/poc_tl_nano_real_data.clj`](../../archive/pocs/poc_tl_nano_real_data.clj) and curated in [`data/wikifacts_corpus.edn`](../../data/wikifacts_corpus.edn):
 - **Curated Knowledge Corpus**:
   - **34 Real Entities**: Tech enterprises (*Anthropic*, *OpenAI*, *DeepMind*, *Tesla*, *Apple*, *Microsoft*, *Alpeware*), founders & craftsmen (*Dario Amodei*, *Sam Altman*, *Demis Hassabis*, *Elon Musk*, *Tim Cook*, *Satya Nadella*, *Simon Pure*, *Rich Hickey*, *Linus Torvalds*, *Guido van Rossum*, *Pedro Domingos*), runtimes & platforms (*Clojure*, *Linux*, *Python*, *Git*, *OpenXLA*, *StableHLO*, *JVM*, *AMD*, *ROCm*, *NVIDIA*, *CUDA*), and headquarters (*San Francisco*, *Cupertino*, *Redmond*, *Austin*).
   - **7 Relational Predicates**: `:ceo_of`, `:created_by`, `:headquartered_in`, `:compiles`, `:formulated_by`, `:runs_on`, `:developed_by`.
@@ -1120,9 +1120,9 @@ Moving beyond curated toy datasets, we test the scalability, factual grounding, 
    - Saves and restores the complete 47.9 MB checkpoint in $< 50\text{ ms}$.
 
 3. **Decoupled Drivers**:
-   - **Training**: [`tools/train_tl_nano_webnlg.clj`](../../tools/train_tl_nano_webnlg.clj) (supports `--backend rocm`, batching, saving to checkpoint).
-   - **Evaluation**: [`tools/eval_tl_nano_webnlg.clj`](../../tools/eval_tl_nano_webnlg.clj) (evaluates held-out cloze QA on `dev.edn`, compares baseline vs. active $R_{\text{mem}}$, prints comparison against published baselines).
-   - **Inference**: [`tools/infer_tl_nano_webnlg.clj`](../../tools/infer_tl_nano_webnlg.clj) (supports `--prompt`, `--relation`, and live `--interactive` REPL loop).
+   - **Training**: [`tools/train_tl_nano_webnlg.clj`](../../archive/pocs/train_tl_nano_webnlg.clj) (supports `--backend rocm`, batching, saving to checkpoint).
+   - **Evaluation**: [`tools/eval_tl_nano_webnlg.clj`](../../archive/pocs/eval_tl_nano_webnlg.clj) (evaluates held-out cloze QA on `dev.edn`, compares baseline vs. active $R_{\text{mem}}$, prints comparison against published baselines).
+   - **Inference**: [`tools/infer_tl_nano_webnlg.clj`](../../archive/pocs/infer_tl_nano_webnlg.clj) (supports `--prompt`, `--relation`, and live `--interactive` REPL loop).
 
 ---
 
@@ -1969,7 +1969,7 @@ In reality:
 
 **Date:** 2026-09-17  
 **Hardware:** AMD Radeon RX 7900 XTX (24 GB VRAM, ROCm 6.2, OpenXLA PJRT)  
-**Artifacts:** [`paper-experiments/e18-diagnostics/2026-09-17/`](../../paper-experiments/e18-diagnostics/2026-09-17) (`phase0_diagnostics.edn`, `phase0_note.md`, `phase1_results.edn`, `summary.csv`)
+**Artifacts:** [`catalog/trainable-limits/e18-diagnostics/`](../../catalog/trainable-limits/e18-diagnostics) (`phase0_diagnostics.edn`, `spec.md`, `results.edn`, `summary.csv`)
 
 ---
 
@@ -2029,7 +2029,7 @@ We conducted a full $2 \times 2$ factorial intervention sweep across 3 random se
 
 #### 4. Empirical Results (2×2 Factorial Summary)
 
-All 12 runs executed 100% in OpenXLA PJRT VRAM on AMD ROCm (RX 7900 XTX). Raw telemetry is saved in `paper-experiments/e18-diagnostics/2026-09-17/phase1_results.edn`.
+All 12 runs executed 100% in OpenXLA PJRT VRAM on AMD ROCm (RX 7900 XTX). Raw telemetry is saved in `catalog/trainable-limits/e18-diagnostics/results.edn`.
 
 ##### Individual Runs Table
 | Cell | Factor A | Factor B | Seed | Final Loss | Seen Top-1 | Seen Pointwise | Seen Neigh | Seen Dist Boost | Unseen Top-1 | Unseen Pointwise | Unseen Dist Boost |
@@ -2101,7 +2101,7 @@ The pre-registered protocol explicitly specified:
 **Date:** 2026-09-17  
 **Status:** Completed & Evaluated (Phase 0 Gates + Phase 1 Factorial Search Sweep)  
 **Execution Environment:** OpenXLA PJRT CPU (Proposer Retrain in VRAM + Sans-IO Combinatorial Search on Host)  
-**Telemetry:** `paper-experiments/e19-hybrid/2026-09-17/` (`phase0.edn`, `results.edn`, `summary.csv`)
+**Telemetry:** `catalog/trainable-limits/e19-hybrid-crystallization/` (`phase0.edn`, `results.edn`, `summary.csv`)
 
 ---
 
@@ -2239,7 +2239,7 @@ Experiment E19 decisively answers the question of whether a hybrid architecture 
 **Date:** 2026-09-17  
 **Status:** Completed & Evaluated (Phase 0 Gates + Phase 1 Factorial Search Sweep)  
 **Execution Environment:** OpenXLA PJRT CPU (Host CPU, Pure Clojure Sans-IO Pair-Assignment Simulated Annealing)  
-**Telemetry:** `paper-experiments/e20-constrained/2026-09-17/` (`phase0.edn`, `results.edn`, `summary.csv`)
+**Telemetry:** `catalog/trainable-limits/e20-constrained-crystallization/` (`phase0.edn`, `results.edn`, `summary.csv`)
 
 ---
 
@@ -2388,7 +2388,7 @@ Experiment E20 delivers the definitive scientific answer to the predicate invent
 **Date:** 2026-09-17  
 **Status:** Completed & Evaluated (All 7 Pre-Registered Acceptance Criteria Passed)  
 **Execution Environment:** Host CPU (Pure Clojure Sans-IO Datalog KB, Zero JVM Allocations on Query Hot-Path)  
-**Telemetry:** `paper-experiments/e21-kb/2026-09-17/` (`results.edn`)
+**Telemetry:** `catalog/agent-deliberation/e21-kb-write-path/` (`results.edn`)
 
 ---
 
@@ -2490,8 +2490,8 @@ Experiment E21 completes the first construction milestone of the tensor-logic ag
 **Artifacts:**
 - Core Library: [`src/einsum/kb/device.clj`](../../src/einsum/kb/device.clj)
 - Generative Test Suite: [`test/einsum/kb/device_test.clj`](../../test/einsum/kb/device_test.clj)
-- Execution Script: [`tools/e22_kb_dispatch.clj`](../../tools/e22_kb_dispatch.clj)
-- Telemetry & Results: [`paper-experiments/e22-dispatch/2026-09-17/`](../../paper-experiments/e22-dispatch/2026-09-17) (`phase0.edn`, `results.edn`)
+- Execution Script: [`catalog/agent-deliberation/e22-ingraph-dispatch/run.clj`](../../catalog/agent-deliberation/e22-ingraph-dispatch/run.clj)
+- Telemetry & Results: [`catalog/agent-deliberation/e22-ingraph-dispatch/`](../../catalog/agent-deliberation/e22-ingraph-dispatch) (`phase0.edn`, `results.edn`)
 
 ---
 
@@ -2529,7 +2529,7 @@ Before conducting the comparative sweep, all three pre-registered Phase 0 gates 
    - Result: Exactly **$5 / 5$ prompts ($100.0\%$)** emitted well-formed `<|tool_call> RELATION ARG<tool_call|>`, well exceeding the $\ge 3/5$ pre-registered threshold.
    - **Gate P0c Status: PASS**.
 
-Telemetry logged in [`paper-experiments/e22-dispatch/2026-09-17/phase0.edn`](../../paper-experiments/e22-dispatch/2026-09-17/phase0.edn).
+Telemetry logged in [`catalog/agent-deliberation/e22-ingraph-dispatch/phase0.edn`](../../catalog/agent-deliberation/e22-ingraph-dispatch/phase0.edn).
 
 ---
 

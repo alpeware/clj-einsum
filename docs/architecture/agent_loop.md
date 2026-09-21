@@ -491,7 +491,7 @@ disposes (host), the KB remembers (Tier 1a).
 
 ## 12. Grounded numbers and budgets
 
-- D=512, seed 42 (paper-experiments): fact margin 0.8843, rule margin 0.8866 —
+- D=512, seed 42 (catalog experiments): fact margin 0.8843, rule margin 0.8866 —
   argmax decisions are clean; this is what makes discrete dispatch and phase
   transitions trustworthy.
 - Margin-vs-D sweep (5 seeds × D∈{64..2048}): all 30+30 runs clean at threshold

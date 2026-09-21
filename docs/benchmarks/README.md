@@ -27,4 +27,4 @@ All benchmarks measure standard workloads defined in [`src/einsum/runtime/benchm
 7. **Gemma 4 Block**: Full Transformer Layer Block $[1, 128, 1536]$.
 
 ### Verification & JAX Parity
-To compare **JVM / Clojure Panama FFM OpenXLA (`clj-einsum`)** directly against **Python / XLA (JAX)**, reference Python benchmarks are maintained in [`verification/jax_benchmark.py`](../../verification/jax_benchmark.py).
+To compare **JVM / Clojure Panama FFM OpenXLA (`clj-einsum`)** directly against **Python / XLA (JAX)**, reference Python benchmarks are maintained in [`archive/python-verification/jax_benchmark.py`](../../archive/python-verification/jax_benchmark.py).

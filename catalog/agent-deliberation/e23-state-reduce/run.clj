@@ -389,7 +389,7 @@ Granted developer role to Grace.<turn|>
                     :vram-loop? true)
         out-dir (or (some (fn [[k v]] (when (= k "--out-dir") v))
                           (partition 2 (gemma4-inf/parse-cli-args args)))
-                    "paper-experiments/e23-reduce/2026-09-17")
+                    "catalog/agent-deliberation/e23-state-reduce")
         _ (.mkdirs (io/file out-dir))
         _ (println "\n========================================================")
         _ (println "=== Experiment E23: The Reduce (RBAC Verified Loop) ===")

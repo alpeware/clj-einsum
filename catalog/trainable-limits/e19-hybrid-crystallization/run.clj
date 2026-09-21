@@ -29,7 +29,7 @@
    :top-k 256
    :seeds [42 43 44 45 46]
    :b1-draws 3
-   :out-dir "paper-experiments/e19-hybrid/2026-09-17/"})
+   :out-dir "catalog/trainable-limits/e19-hybrid-crystallization/"})
 
 (defn- normalize-args [args]
   (mapcat (fn [arg]

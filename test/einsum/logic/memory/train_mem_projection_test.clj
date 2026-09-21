@@ -6,7 +6,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [tools.train-mem-projection :as train]))
+            [einsum.logic.memory.projection :as train]))
 
 ;; ==============================================================================
 ;; 1. Dogfooding Symbolic Adjoint Derivation

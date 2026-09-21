@@ -10,7 +10,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [tools.poc-anchored-memory :as anchored]))
+            [einsum.logic.memory.anchored :as anchored]))
 
 ;; ==============================================================================
 ;; 1. Mean-Pooling Over Token Spans (Synthetic & Hand-Computed)

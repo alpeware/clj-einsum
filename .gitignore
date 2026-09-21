@@ -34,7 +34,7 @@ snapshot*.edn
 *.pid
 *.log
 hs_err_*
-paper-experiments/**/dumps/
+catalog/**/dumps/
 
 # Verification dumps
 verification/torch_detailed/

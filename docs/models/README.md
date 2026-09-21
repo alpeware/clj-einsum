@@ -26,12 +26,4 @@ This directory contains individual architectural specification documents and vis
    - Gemma 4 architecture with per-layer scalar gating projections, Gemma RMSNorm, and GQA.
    - Code: [`models.gemma`](../../models/gemma.clj) & CLI [`tools/gemma4_inference.clj`](../../tools/gemma4_inference.clj).
 
----
 
-## 🟡 Planned Backlog Models (Specs & Roadmap)
-
-6. **[Gemma 4 26B-A4B Sparse MoE](gemma4_26b_a4b.md)**
-   - Sparse Mixture-of-Experts (MoE) architecture with 26B total parameters and 4B active parameters per token.
-
-7. **[Meta Muse-Glimmer-30B](muse_glimmer_30b.md)**
-   - Multimodal agentic model featuring DFlash 16-token parallel block speculative decoding, ~1.8B ViT-G/14 vision encoder, and ATEM tool markup.

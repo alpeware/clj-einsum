@@ -156,7 +156,7 @@
                          :model ".models/gemma-4-E2B-it"
                          :max-seq-len 768
                          :limit nil
-                         :out-dir "paper-experiments/e24-vram-c2c/2026-09-18"
+                         :out-dir "catalog/agent-deliberation/e24-prefix-cache-handover"
                          :cells #{:cell-h :cell-b1 :cell-b0}})]
     (loop [a (seq args)]
       (when a
