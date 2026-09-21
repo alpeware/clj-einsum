@@ -60,7 +60,7 @@ ROCm PJRT plugins (`libpjrt_rocm.so`) embed custom LLVM code generation engines 
 Before initializing the OpenXLA ROCm plugin via `System.load`, the JVM process MUST be launched with `LD_PRELOAD` pointing to `libjsig.so`:
 
 ```bash
-LD_PRELOAD=/usr/lib64/openjdk-25/lib/libjsig.so clojure -M:gemma4 ...
+./tools/gemma4.sh --backend rocm --model .models/gemma-4-E2B-it --prompt "..."
 ```
 
 In `clj-einsum`, [`tools.gemma4-inference/needs-libjsig-reexec?`](../../tools/gemma4_inference.clj#L659) automatically detects missing `libjsig` interposition and re-executes the Clojure JVM process with `LD_PRELOAD` active.

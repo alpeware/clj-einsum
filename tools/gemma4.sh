@@ -36,15 +36,15 @@ elif [ "$1" = "e24" ] || [ "$1" = "--e24" ]; then
 fi
 
 if [ "$MODE" = "agent" ]; then
-  exec clojure -M:gemma4-agent "$@"
+  exec clojure -M:tools -m tools.gemma4-agent "$@"
 elif [ "$MODE" = "relational" ]; then
-  exec clojure -M:gemma4-relational "$@"
+  exec clojure -M:tools -m tools.eval-gemma4-webnlg-relational "$@"
 elif [ "$MODE" = "e22" ]; then
-  exec clojure -M:e22 "$@"
+  exec clojure -M:tools -i catalog/gate4-recursion/e22-ingraph-dispatch/run.clj -m tools.e22-kb-dispatch "$@"
 elif [ "$MODE" = "e23" ]; then
-  exec clojure -M:e23 "$@"
+  exec clojure -M:tools -i catalog/gate4-recursion/e23-state-reduce/run.clj -m tools.e23-reduce "$@"
 elif [ "$MODE" = "e24" ]; then
-  exec clojure -M:e24 "$@"
+  exec clojure -M:tools -i catalog/gate1-compression/e24-prefix-cache-handover/run.clj -m tools.e24-vram-c2c "$@"
 else
-  exec clojure -M:gemma4 "$@"
+  exec clojure -M:tools -m tools.gemma4-inference "$@"
 fi

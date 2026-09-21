@@ -19,7 +19,7 @@
   ([test-ns-sym env-map]
    (let [java-bin (str (System/getProperty "java.home") "/bin/java")
          cp (System/getProperty "java.class.path")
-         expr (format "(require '%s) (let [res (clojure.test/run-tests '%s)] (println \"SUMMARY:\" (pr-str res)))"
+         expr (format "(require '%s) (let [res (clojure.test/run-tests '%s)] (println \"SUMMARY:\" (pr-str res)) (System/exit (if (and (zero? (:fail res)) (zero? (:error res))) 0 1)))"
                       (name test-ns-sym) (name test-ns-sym))
          cmd [java-bin "--enable-native-access=ALL-UNNAMED" "-cp" cp "clojure.main" "-e" expr]
          merged-env (merge (into {} (System/getenv)) (or env-map {}))

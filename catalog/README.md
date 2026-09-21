@@ -80,16 +80,16 @@ Pods can be executed directly using Clojure CLI aliases or runner paths:
 
 ```bash
 # Execute Gate 4 In-Graph KB Query Dispatch (E22)
-clojure -M:e22
+./tools/gemma4.sh e22
 
 # Execute Gate 4 Verified RBAC State Reduce (E23)
-clojure -M:e23
+./tools/gemma4.sh e23
 
 # Execute Gate 1 In-VRAM Prefix-Cache Handover (E24)
-clojure -M:e24
+./tools/gemma4.sh e24
 
 # Execute Gate 3 Predicate Invention Sweep (E17)
-clojure -M:experiments -i catalog/gate3-evals/e17-predicate-invention/run.clj -m einsum.experiments.e17-predicate-invention.run
+clojure -M:tools -i catalog/gate3-evals/e17-predicate-invention/run.clj -m einsum.experiments.e17-predicate-invention.run
 ```
 
 ---

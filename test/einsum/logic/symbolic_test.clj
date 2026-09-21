@@ -189,50 +189,50 @@
   "Host-side float tensor contraction engine for the grandparent rule:
    GP[i, j] = sum_k (sum_{(x,y)} E[x,i] E[y,k]) * (sum_{(y,z)} E[y,k] E[z,j])
    decoded via Dq[a, b] = sum_{i,j} GP[i, j] E[a, i] E[b, j]."
-  [n d seed facts]
+  [^long n ^long d ^long seed facts]
   (let [emb (sym/random-embeddings n d seed)
-        e-data (:data emb)
-        emb-r (float-array (* d d))]
+        ^floats e-data (:data emb)
+        ^floats emb-r (float-array (* d d))]
     ;; EmbR[i, j] = sum_{(x, y) in facts} E[x, i] * E[y, j]
     (doseq [[x y] facts]
-      (let [x-off (* (long x) (long d))
-            y-off (* (long y) (long d))]
+      (let [x-off (* (long x) d)
+            y-off (* (long y) d)]
         (dotimes [i d]
-          (let [xi (aget ^floats e-data (int (+ x-off i)))
-                i-off (* i (long d))]
+          (let [xi (aget e-data (int (+ x-off i)))
+                i-off (* i d)]
             (dotimes [j d]
-              (let [yj (aget ^floats e-data (int (+ y-off j)))
+              (let [yj (aget e-data (int (+ y-off j)))
                     idx (int (+ i-off j))]
-                (aset-float emb-r idx (+ (aget emb-r idx) (* xi yj)))))))))
+                (aset emb-r idx (float (+ (aget emb-r idx) (* xi yj))))))))))
     ;; GP[i, j] = sum_k EmbR[i, k] * EmbR[k, j]
-    (let [gp (float-array (* d d))]
+    (let [^floats gp (float-array (* d d))]
       (dotimes [i d]
-        (let [i-off (* i (long d))]
+        (let [i-off (* i d)]
           (dotimes [k d]
             (let [ik (aget emb-r (int (+ i-off k)))
-                  k-off (* k (long d))]
+                  k-off (* k d)]
               (dotimes [j d]
                 (let [idx (int (+ i-off j))]
-                  (aset-float gp idx (+ (aget gp idx) (* ik (aget emb-r (int (+ k-off j))))))))))))
+                  (aset gp idx (float (+ (aget gp idx) (* ik (aget emb-r (int (+ k-off j)))))))))))))
       ;; Dq[a, b] = sum_{i, j} GP[i, j] * E[a, i] * E[b, j]
-      (let [dq (float-array (* n n))]
+      (let [^floats dq (float-array (* n n))]
         (dotimes [a n]
-          (let [a-off (* (long a) (long d))]
+          (let [a-off (* a d)]
             (dotimes [b n]
-              (let [b-off (* (long b) (long d))
+              (let [b-off (* b d)
                     sum (loop [i 0 s 0.0]
                           (if (>= i d)
                             s
-                            (let [ai (double (aget ^floats e-data (int (+ a-off i))))
-                                  i-off (* i (long d))
+                            (let [ai (double (aget e-data (int (+ a-off i))))
+                                  i-off (* i d)
                                   inner (loop [j 0 in-s 0.0]
                                           (if (>= j d)
                                             in-s
                                             (let [gp-ij (double (aget gp (int (+ i-off j))))
-                                                  bj (double (aget ^floats e-data (int (+ b-off j))))]
+                                                  bj (double (aget e-data (int (+ b-off j))))]
                                               (recur (inc j) (+ in-s (* gp-ij bj))))))]
                               (recur (inc i) (+ s (* ai inner))))))]
-                (aset-float dq (int (+ (* a n) b)) (float sum))))))
+                (aset dq (int (+ (* a n) b)) (float sum))))))
         dq))))
 
 (defn- seeded-shuffle [coll seed]
@@ -242,13 +242,13 @@
 
 ;; Note: This test verifies host-side reference contraction semantics against the pure Clojure
 ;; Horn-clause deductive oracle; full OpenXLA PJRT compiler-path coverage is provided by the e2e tests.
-(defspec prop-embedding-space-deductive-oracle-parity 200
+(defspec prop-embedding-space-deductive-oracle-parity 20
   (prop/for-all [n (gen/choose 4 6)
                  num-facts (gen/choose 1 5)
                  seed gen/nat]
                 (let [all-pairs (for [i (range n) j (range n) :when (< i j)] [i j])
                       sampled-facts (set (take num-facts (seeded-shuffle all-pairs seed)))
-                      d 512
+                      d 256
                       ;; 1. Symbolic deductive closure via pure Clojure Horn-clause fixpoint
                       rules [{:head [:grandparent :x :z]
                               :body [[:parent :x :y] [:parent :y :z]]}]

@@ -13,4 +13,4 @@ if [ -n "$JSIG" ]; then
   export LD_PRELOAD="$JSIG${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
 
-exec clojure -M:benchmark "$@"
+exec clojure -M:tools -m tools.benchmark "$@"

@@ -1,21 +1,29 @@
 (ns einsum.runtime.generation-test
   "Unit and generative tests for autoregressive text generation strategy."
   (:require [einsum.runtime.generation.autoregressive :as ar]
-            [einsum.runtime.tokenizer.bpe :as bpe]
-            [einsum.runtime.tokenizer.protocol :refer [encode]]
+            [einsum.runtime.tokenizer.protocol :as tok-proto :refer [encode]]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]))
 
+(def ^:private mock-tokenizer
+  (reify einsum.runtime.tokenizer.protocol/Tokenizer
+    (encode [_ _text] [15496 995])
+    (encode [_ _text _add-special?] [15496 995])
+    (decode [_ token-ids] (str "decoded-" (count token-ids)))
+    (decode [_ token-ids _skip-special?] (str "decoded-" (count token-ids)))
+    (bos-id [_] nil)
+    (eos-id [_] 50256)))
+
 (deftest autoregressive-generate-mock-test
   (testing "Autoregressive generation step loop with dummy step function"
-    (let [tokenizer (bpe/load-bpe-tokenizer ".models/gpt2/vocab.json" ".models/gpt2/merges.txt")
+    (let [tokenizer mock-tokenizer
           prompt-ids (encode tokenizer "Hello world")
           step-fn (fn [_context-ids]
                     (vec (concat (repeat 50255 0.0) [100.0])))
           gen-ids (ar/generate-tokens step-fn prompt-ids {:max-new-tokens 5 :eos-token-id 50256})
-          out-text (einsum.runtime.tokenizer.protocol/decode tokenizer gen-ids)]
+          out-text (tok-proto/decode tokenizer gen-ids)]
       (is (vector? gen-ids))
       (is (> (count gen-ids) (count prompt-ids)))
       (is (string? out-text)))))

@@ -15,4 +15,4 @@ if [ -n "$JSIG" ]; then
   export LD_PRELOAD="$JSIG${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
 
-exec clojure -M:quantize "$@"
+exec clojure -M:tools -m tools.quantize "$@"

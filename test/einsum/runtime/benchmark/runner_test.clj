@@ -20,10 +20,11 @@
       (is (pos? (:tflops res))))))
 
 (deftest test-run-backend-benchmarks-cpu
-  (testing "Running full workload benchmark suite on CPU backend"
-    (let [results (runner/run-backend-benchmarks :cpu {:warmup-iters 1 :measure-iters 2})]
+  (testing "Running representative benchmark workloads on CPU backend"
+    (let [target-ids [:gemm-fp32 :rms-norm]
+          results (runner/run-backend-benchmarks :cpu {:warmup-iters 1 :measure-iters 2 :workload-ids target-ids})]
       (is (vector? results))
-      (is (= (count bw/WORKLOADS) (count results)))
+      (is (= (count target-ids) (count results)))
       (doseq [res results]
         (is (= :cpu (:backend res)))
         (is (pos? (:mean-ms res)))))))

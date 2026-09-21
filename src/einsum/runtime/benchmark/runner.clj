@@ -88,10 +88,13 @@
               stats)))))
 
 (defn run-backend-benchmarks
-  "Initializes `target-backend` and benchmarks all registered workloads."
+  "Initializes `target-backend` and benchmarks all registered workloads (or a subset specified via :workload-ids in opts)."
   ([target-backend] (run-backend-benchmarks target-backend {}))
   ([target-backend opts]
-   (let [ctx (xla/init-backend! target-backend)]
+   (let [ctx (xla/init-backend! target-backend)
+         wls (if-let [ids (:workload-ids opts)]
+               (select-keys bw/WORKLOADS ids)
+               bw/WORKLOADS)]
      (mapv (fn [[_id wl]]
              (benchmark-workload ctx wl opts))
-           bw/WORKLOADS))))
+           wls))))
