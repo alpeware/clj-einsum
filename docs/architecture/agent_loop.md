@@ -610,3 +610,12 @@ verified path); GPU numbers recorded as projections until measured.
 13. KB paging policy: what promotes/demotes facts between the VRAM hot set
     and the host cold store? (Start: recency + query frequency; the miss
     path already exists, so the policy can start dumb and graduate.)
+
+## 13. Alignment with Ali Ghodsi's 4 RSI Gates
+
+The three-tier architecture directly operationalizes Ali Ghodsi's 4 Recursive Self-Improvement (RSI) gates on consumer silicon (detailed in [`rsi_gates.md`](rsi_gates.md) and [`catalog/README.md`](../../catalog/README.md)):
+
+1. **Gate 1: Resource Efficiency ($C_{n+1} \ll C_n$):** In-VRAM parameter pinning and prefix-cache handover (E24) allocate zero duplicate model weights across deliberating instances. $O(1)$ state tracking replaces unbounded context growth.
+2. **Gate 2: Time Efficiency ($T_{n+1} \ll T_n$):** In-graph dispatch (E22) and prefix-cache handover (E24) eliminate re-prefill latency ($74.46\text{ ms} \to 0.04\text{ ms}$). Sparse discrete routing executes with mechanical sympathy ($42.20\ \mu\text{s}$ on host).
+3. **Gate 3: Capability Improvement ($A_{n+1} > A_n$):** Schema-constrained writes (E21) and adversarial state reduction (E23) maintain 0 RBAC violations across horizons, while zero-overhead handover enables +3.3% self-correction lift on reasoning tasks.
+4. **Gate 4: Repeatability / Closed Loop ($G_n \to G_{n+1}$):** Multi-turn deliberation runs without memory saturation or divergence over extended horizons, enabling the closed meta-research loop.

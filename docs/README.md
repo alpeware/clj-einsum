@@ -15,6 +15,15 @@ Welcome to the **`clj-einsum` Architectural Documentation & LLM Knowledge Base**
 
 ---
 
+## 🏛️ Architecture, RSI Gates & The Experiment Catalog
+
+- 🔬 **[Ali Ghodsi's 4 RSI Gates on Consumer Silicon](architecture/rsi_gates.md)**: Formal apparatus for measuring Resource Efficiency, Time Efficiency, Capability Improvement, and Closed-Loop Repeatability across Generation Lineage ($G_0 \to G_4$).
+- 🧪 **[Master Experiment Catalog](../catalog/README.md)**: Immutable, hardware-grounded experimental pods (`e01`–`e24`) and master machine-readable registry ([`catalog/registry.edn`](../catalog/registry.edn)).
+- 📐 **[System Design & Architecture](architecture/DESIGN.md)**: Panama FFM bindings, SSA EDN IR, StableHLO codegen, and SHA-256 caching.
+- 🔁 **[Tensor-Native Agent Loop](architecture/agent_loop.md)**: Three-tier agent deliberation (reflex, deliberation, synthesis), prefix-cache handover, and verified schema commits.
+
+---
+
 ## 🧠 Declarative Tensor Logic & In-Tensor Relational Memory ([`tensor_logic/`](tensor_logic/README.md))
 
 Comprehensive theoretical foundations, empirical results, related work analysis, and consumer-hardware experimental roadmap for unifying LLMs with symbolic Knowledge Bases via Pedro Domingos' Declarative Tensor Logic:

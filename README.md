@@ -4,6 +4,8 @@ High-performance Machine Learning compiler framework and runtime for Clojure tar
 
 > **Mission**: Make Pedro Domingos' Tensor Logic the working language of AI development — not a formalism on paper, but a toolchain where a coding agent (or a human) writes tensor equations and gets GPU executables, gradients, and verified behavior out.
 >
+> The repository serves as the empirical measurement apparatus for **Ali Ghodsi's 4 Recursive Self-Improvement (RSI) gates on consumer silicon** (Resource Efficiency, Time Efficiency, Capability Improvement, and Closed-Loop Repeatability; see [`docs/architecture/rsi_gates.md`](docs/architecture/rsi_gates.md) and [`catalog/README.md`](catalog/README.md)).
+>
 > See [VISION.md](VISION.md) for the strategic vision, operating principles, non-goals, and research pillars.
 
 ---

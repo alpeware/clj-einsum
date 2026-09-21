@@ -142,18 +142,18 @@ come from the equation→compile→measure loop, one equation at a time. Paper 2
 architecture — reflex contractions, device-resident deliberation, host-side
 synthesis — where the agent's *own* reasoning substrate is tensor equations it
 can read, verify, and rewrite, and where every state mutation passes through a
-verified discrete commit. `AGENT-LOOP.md` holds the design. The endgame is the
+verified discrete commit. [`docs/architecture/agent_loop.md`](docs/architecture/agent_loop.md) holds the design. The endgame is the
 recursive research loop described below: papers in, measured results out,
 catalog committed, components remixed.
 
-## The recursive research loop
+## The recursive research loop: Measuring Ali Ghodsi's 4 RSI Gates
 
 E24 changed what this repo is. A paper (Fu et al.'s Cache-to-Cache) went in;
 a spec, an implementation, property tests, a 30-problem benchmark, measured
 results on the RX 7900 XTX, peer review, corrected claims, and a rerun came
 out — in one session, from a coding agent. That is not a faster way to run an
 experiment. It is a different thing: **AI research translated into tensor
-logic and cataloged in action.**
+logic and cataloged in action as an empirical measurement apparatus for Ali Ghodsi's 4 Recursive Self-Improvement (RSI) conditions on consumer silicon** (Resource Efficiency, Time Efficiency, Capability Improvement, and Closed-Loop Repeatability; see [`docs/architecture/rsi_gates.md`](docs/architecture/rsi_gates.md) and [`catalog/README.md`](catalog/README.md)).
 
 The loop, stated plainly:
 

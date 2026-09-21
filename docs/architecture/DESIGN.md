@@ -10,6 +10,7 @@
 2. **AI-Agent Native:** Because the AST is pure EDN governed by strict Malli schemas, AI coding agents can generate, validate, optimize, and synthesize model graphs deterministically without writing code strings or dealing with macro expansion pitfalls.
 3. **Sub-Millisecond REPL Feedback via Caching:** In-process, zero-copy native execution combined with SHA-256 IR compilation caching allows developers to modify model logic at the REPL and re-execute on persistent GPU memory buffers without restarting the JVM, reloading weights, or re-triggering heavy XLA codegen for unchanged subgraphs.
 4. **Clean Division of Labor:** Clojure owns high-level control loops, symbolic automatic differentiation, dynamic graph transformations, and weight management. OpenXLA handles memory layout, kernel fusion, auto-vectorization, register placement, and hardware-level codegen.
+5. **RSI Measurement Apparatus:** The toolchain is designed as the empirical measurement vehicle for Ali Ghodsi's 4 Recursive Self-Improvement (RSI) gates (Resource, Time, Capability, Repeatability) on consumer silicon (AMD Radeon RX 7900 XTX 24GB). See [rsi_gates.md](rsi_gates.md) and [catalog/README.md](../../catalog/README.md).
 
 ---
 
