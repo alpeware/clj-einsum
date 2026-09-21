@@ -1,32 +1,43 @@
 (ns einsum.quant.ternary
-  "Ternary Quantization ({-1, 0, 1}, 1.58-bit / 2-bit packed representation)
-   Reference implementations, packing/unpacking, scaling, and Declarative Tensor Logic AST lowerings.")
+  "Ternary Quantization ({-1, 0, 1}, 1.58-bit / 2-bit packed representation).
+   Reference implementations, packing/unpacking, scaling, and Declarative Tensor Logic AST lowerings."
+  (:import [java.util.function IntConsumer]
+           [java.util.stream IntStream]))
 
-;; --- Encoding / Decoding Constants ---
+;; ==============================================================================
+;; 1. Encoding / Decoding Constants (Biased Branchless Mapping)
+;; ==============================================================================
 
-;; Standard BitNet / 2-bit 1.58b mapping:
-;; 00 (0) ->  0.0
-;; 01 (1) -> +1.0
-;; 10 (2) -> -1.0
-;; 11 (3) ->  0.0 (reserved / zero padding)
-
-(def ^:private TERNARY-LOOKUP
-  (double-array [0.0 1.0 -1.0 0.0]))
+;; Biased BitNet b1.58 mapping:
+;; Code 0 (0b00) -> -1.0  [(0 - 1.0)]
+;; Code 1 (0b01) ->  0.0  [(1 - 1.0)]
+;; Code 2 (0b10) -> +1.0  [(2 - 1.0)]
+;; Code 3 (0b11) ->  0.0  (reserved / zero padding)
+;;
+;; In OpenXLA StableHLO, unpacking lowers to:
+;; val = (convert(shift_right_logical(packed, s) & 0x03) - 1.0) * gamma
 
 (defn decode-ternary-2bit
-  "Decodes a 2-bit unsigned code (0..3) into a ternary float value {-1.0, 0.0, 1.0}."
+  "Decodes a 2-bit unsigned code (0..3) into a ternary float value {-1.0, 0.0, 1.0}
+   via biased formula: (code - 1.0)."
   ^double [^long code]
-  (aget ^doubles TERNARY-LOOKUP (bit-and code 3)))
+  (case (int (bit-and code 3))
+    0 -1.0
+    1 0.0
+    2 1.0
+    3 0.0))
 
 (defn encode-ternary-2bit
-  "Encodes a ternary value {-1, 0, 1} into a 2-bit unsigned code (0, 1, 2)."
+  "Encodes a ternary value {-1, 0, 1} into a 2-bit unsigned biased code (0, 1, 2)."
   ^long [^double val]
   (cond
-    (> val 0.5) 1
-    (< val -0.5) 2
-    :else 0))
+    (< val -0.5) 0
+    (> val 0.5) 2
+    :else 1))
 
-;; --- Byte Packing & Unpacking ---
+;; ==============================================================================
+;; 2. Byte Packing & Unpacking
+;; ==============================================================================
 
 (defn unpack-ternary-byte
   "Unpacks an unsigned byte (0..255) containing four 2-bit ternary values (low bits first)
@@ -84,7 +95,9 @@
         (aset-byte out i (unchecked-byte b))))
     (vec out)))
 
-;; --- Scaling & Quantization (BitNet b1.58 AbsMean) ---
+;; ==============================================================================
+;; 3. Scaling & Quantization (BitNet b1.58 AbsMean)
+;; ==============================================================================
 
 (defn compute-absmean-scale
   "Computes the BitNet absmean scale factor gamma = (1 / N) * sum(|W_i|)."
@@ -118,22 +131,323 @@
      :scale gamma
      :shape [rows cols]}))
 
-;; --- High-level Declarative Tensor Logic AST Blocks ---
+(defn- float->bf16-short
+  [val]
+  (let [bits (Float/floatToRawIntBits (float val))]
+    (unchecked-short (bit-shift-right bits 16))))
+
+(defn- bf16-short->float
+  [s]
+  (let [bits (bit-shift-left (bit-and (int s) 0xffff) 16)]
+    (Float/intBitsToFloat bits)))
+
+(defn- quantize-floats-row!
+  [^floats f-arr ^bytes data-bytes ^floats scales-floats ^shorts scales-shorts
+   r cols quarter-cols]
+  (let [r (long r)
+        cols (long cols)
+        quarter-cols (long quarter-cols)
+        r-base (int (* r cols))
+        out-base (int (* r quarter-cols))
+        sum-abs (loop [i (int 0) acc 0.0]
+                  (if (< i (int cols))
+                    (let [v (double (aget f-arr (+ r-base i)))]
+                      (recur (unchecked-inc i) (+ acc (Math/abs v))))
+                    acc))
+        gamma (if (pos? cols) (/ sum-abs (double cols)) 1.0)
+        inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))]
+    (when scales-floats
+      (aset scales-floats (int r) (float gamma)))
+    (when scales-shorts
+      (aset scales-shorts (int r) (float->bf16-short (float gamma))))
+    (loop [k (int 0)]
+      (when (< k (int quarter-cols))
+        (let [idx (unchecked-add r-base (unchecked-multiply k 4))
+              v0 (* (double (aget f-arr idx)) inv-gamma)
+              v1 (* (double (aget f-arr (unchecked-inc idx))) inv-gamma)
+              v2 (* (double (aget f-arr (unchecked-add idx 2))) inv-gamma)
+              v3 (* (double (aget f-arr (unchecked-add idx 3))) inv-gamma)
+              c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
+              c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
+              c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
+              c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+              b (unchecked-byte (bit-or c0
+                                        (bit-shift-left c1 2)
+                                        (bit-shift-left c2 4)
+                                        (bit-shift-left c3 6)))]
+          (aset data-bytes (unchecked-add out-base k) b)
+          (recur (unchecked-inc k)))))))
+
+(defn- quantize-shorts-row!
+  [^shorts s-arr ^bytes data-bytes ^floats scales-floats ^shorts scales-shorts
+   r cols quarter-cols]
+  (let [r (long r)
+        cols (long cols)
+        quarter-cols (long quarter-cols)
+        r-base (int (* r cols))
+        out-base (int (* r quarter-cols))
+        sum-abs (loop [i (int 0) acc 0.0]
+                  (if (< i (int cols))
+                    (let [s (aget s-arr (+ r-base i))
+                          v (double (bf16-short->float s))]
+                      (recur (unchecked-inc i) (+ acc (Math/abs v))))
+                    acc))
+        gamma (if (pos? cols) (/ sum-abs (double cols)) 1.0)
+        inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))]
+    (when scales-floats
+      (aset scales-floats (int r) (float gamma)))
+    (when scales-shorts
+      (aset scales-shorts (int r) (float->bf16-short (float gamma))))
+    (loop [k (int 0)]
+      (when (< k (int quarter-cols))
+        (let [idx (unchecked-add r-base (unchecked-multiply k 4))
+              v0 (* (double (bf16-short->float (aget s-arr idx))) inv-gamma)
+              v1 (* (double (bf16-short->float (aget s-arr (unchecked-inc idx)))) inv-gamma)
+              v2 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 2)))) inv-gamma)
+              v3 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 3)))) inv-gamma)
+              c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
+              c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
+              c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
+              c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+              b (unchecked-byte (bit-or c0
+                                        (bit-shift-left c1 2)
+                                        (bit-shift-left c2 4)
+                                        (bit-shift-left c3 6)))]
+          (aset data-bytes (unchecked-add out-base k) b)
+          (recur (unchecked-inc k)))))))
+
+(defn- quantize-doubles-row!
+  [^doubles d-arr ^bytes data-bytes ^floats scales-floats ^shorts scales-shorts
+   r cols quarter-cols]
+  (let [r (long r)
+        cols (long cols)
+        quarter-cols (long quarter-cols)
+        r-base (int (* r cols))
+        out-base (int (* r quarter-cols))
+        sum-abs (loop [i (int 0) acc 0.0]
+                  (if (< i (int cols))
+                    (let [v (aget d-arr (+ r-base i))]
+                      (recur (unchecked-inc i) (+ acc (Math/abs v))))
+                    acc))
+        gamma (if (pos? cols) (/ sum-abs (double cols)) 1.0)
+        inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))]
+    (when scales-floats
+      (aset scales-floats (int r) (float gamma)))
+    (when scales-shorts
+      (aset scales-shorts (int r) (float->bf16-short (float gamma))))
+    (loop [k (int 0)]
+      (when (< k (int quarter-cols))
+        (let [idx (unchecked-add r-base (unchecked-multiply k 4))
+              v0 (* (aget d-arr idx) inv-gamma)
+              v1 (* (aget d-arr (unchecked-inc idx)) inv-gamma)
+              v2 (* (aget d-arr (unchecked-add idx 2)) inv-gamma)
+              v3 (* (aget d-arr (unchecked-add idx 3)) inv-gamma)
+              c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
+              c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
+              c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
+              c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+              b (unchecked-byte (bit-or c0
+                                        (bit-shift-left c1 2)
+                                        (bit-shift-left c2 4)
+                                        (bit-shift-left c3 6)))]
+          (aset data-bytes (unchecked-add out-base k) b)
+          (recur (unchecked-inc k)))))))
+
+(defn- quantize-floats-grouped-row!
+  [^floats f-arr ^bytes data-bytes ^floats scales-floats ^shorts scales-shorts
+   r cols quarter-cols group-size quarter-g num-groups]
+  (let [r (long r)
+        cols (long cols)
+        quarter-cols (long quarter-cols)
+        group-size (long group-size)
+        quarter-g (long quarter-g)
+        num-groups (long num-groups)
+        r-base (int (* r cols))
+        out-base (int (* r quarter-cols))
+        s-base (int (* r num-groups))]
+    (dotimes [g num-groups]
+      (let [g-base (unchecked-add r-base (unchecked-multiply (int g) (int group-size)))
+            g-out-base (unchecked-add out-base (unchecked-multiply (int g) (int quarter-g)))
+            sum-abs (loop [i (int 0) acc 0.0]
+                      (if (< i (int group-size))
+                        (let [v (double (aget f-arr (+ g-base i)))]
+                          (recur (unchecked-inc i) (+ acc (Math/abs v))))
+                        acc))
+            gamma (if (pos? group-size) (/ sum-abs (double group-size)) 1.0)
+            inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))
+            s-idx (unchecked-add s-base (int g))]
+        (when scales-floats
+          (aset scales-floats s-idx (float gamma)))
+        (when scales-shorts
+          (aset scales-shorts s-idx (float->bf16-short (float gamma))))
+        (loop [k (int 0)]
+          (when (< k (int quarter-g))
+            (let [idx (unchecked-add g-base (unchecked-multiply k 4))
+                  v0 (* (double (aget f-arr idx)) inv-gamma)
+                  v1 (* (double (aget f-arr (unchecked-inc idx))) inv-gamma)
+                  v2 (* (double (aget f-arr (unchecked-add idx 2))) inv-gamma)
+                  v3 (* (double (aget f-arr (unchecked-add idx 3))) inv-gamma)
+                  c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
+                  c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
+                  c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
+                  c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+                  b (unchecked-byte (bit-or c0
+                                            (bit-shift-left c1 2)
+                                            (bit-shift-left c2 4)
+                                            (bit-shift-left c3 6)))]
+              (aset data-bytes (unchecked-add g-out-base k) b)
+              (recur (unchecked-inc k)))))))))
+
+(defn- quantize-shorts-grouped-row!
+  [^shorts s-arr ^bytes data-bytes ^floats scales-floats ^shorts scales-shorts
+   r cols quarter-cols group-size quarter-g num-groups]
+  (let [r (long r)
+        cols (long cols)
+        quarter-cols (long quarter-cols)
+        group-size (long group-size)
+        quarter-g (long quarter-g)
+        num-groups (long num-groups)
+        r-base (int (* r cols))
+        out-base (int (* r quarter-cols))
+        s-base (int (* r num-groups))]
+    (dotimes [g num-groups]
+      (let [g-base (unchecked-add r-base (unchecked-multiply (int g) (int group-size)))
+            g-out-base (unchecked-add out-base (unchecked-multiply (int g) (int quarter-g)))
+            sum-abs (loop [i (int 0) acc 0.0]
+                      (if (< i (int group-size))
+                        (let [s (aget s-arr (+ g-base i))
+                              v (double (bf16-short->float s))]
+                          (recur (unchecked-inc i) (+ acc (Math/abs v))))
+                        acc))
+            gamma (if (pos? group-size) (/ sum-abs (double group-size)) 1.0)
+            inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))
+            s-idx (unchecked-add s-base (int g))]
+        (when scales-floats
+          (aset scales-floats s-idx (float gamma)))
+        (when scales-shorts
+          (aset scales-shorts s-idx (float->bf16-short (float gamma))))
+        (loop [k (int 0)]
+          (when (< k (int quarter-g))
+            (let [idx (unchecked-add g-base (unchecked-multiply k 4))
+                  v0 (* (double (bf16-short->float (aget s-arr idx))) inv-gamma)
+                  v1 (* (double (bf16-short->float (aget s-arr (unchecked-inc idx)))) inv-gamma)
+                  v2 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 2)))) inv-gamma)
+                  v3 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 3)))) inv-gamma)
+                  c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
+                  c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
+                  c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
+                  c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+                  b (unchecked-byte (bit-or c0
+                                            (bit-shift-left c1 2)
+                                            (bit-shift-left c2 4)
+                                            (bit-shift-left c3 6)))]
+              (aset data-bytes (unchecked-add g-out-base k) b)
+              (recur (unchecked-inc k)))))))))
+
+(defn quantize-weights-per-row-ternary
+  "Quantizes an array of floats/doubles/BF16-shorts of shape [rows cols] into packed ternary
+   bytes of shape [rows (/ cols 4)] with per-row (or block-wise) BitNet b1.58 absmean scaling.
+   Runs in parallel across rows. Each byte packs four 2-bit values.
+   Returns {:data ^bytes :scales scales-arr :shape [rows quarter-cols] :scale-shape scale-shape}."
+  ([w-arr rows cols]
+   (quantize-weights-per-row-ternary w-arr rows cols {}))
+  ([w-arr rows cols opts]
+   (let [quarter-cols (quot (long cols) 4)
+         _ (assert (zero? (mod (long cols) 4)) (str "cols must be divisible by 4, got: " cols))
+         total-packed (* (long rows) quarter-cols)
+         data-bytes (byte-array total-packed)
+         target-scale-format (get opts :as :f32)
+         raw-group-size (get opts :group-size)
+         group-size (when (and raw-group-size (pos? (long raw-group-size)) (zero? (mod (long cols) (long raw-group-size))))
+                      (long raw-group-size))
+         num-groups (if group-size (quot (long cols) group-size) 1)
+         total-scales (* (long rows) num-groups)
+         scales-floats (when (= target-scale-format :f32) (float-array total-scales))
+         scales-shorts (when (= target-scale-format :bf16) (short-array total-scales))
+         is-floats? (instance? (Class/forName "[F") w-arr)
+         is-shorts? (instance? (Class/forName "[S") w-arr)
+         is-doubles? (instance? (Class/forName "[D") w-arr)]
+     (cond
+       (and is-floats? group-size)
+       (let [f-arr ^floats w-arr
+             quarter-g (quot group-size 4)]
+         (-> (IntStream/range 0 (int rows))
+             (.parallel)
+             (.forEach (reify IntConsumer
+                         (accept [_ r]
+                           (quantize-floats-grouped-row! f-arr data-bytes scales-floats scales-shorts
+                                                         (long r) (long cols) (long quarter-cols)
+                                                         (long group-size) (long quarter-g) (long num-groups)))))))
+
+       (and is-shorts? group-size)
+       (let [s-arr ^shorts w-arr
+             quarter-g (quot group-size 4)]
+         (-> (IntStream/range 0 (int rows))
+             (.parallel)
+             (.forEach (reify IntConsumer
+                         (accept [_ r]
+                           (quantize-shorts-grouped-row! s-arr data-bytes scales-floats scales-shorts
+                                                         (long r) (long cols) (long quarter-cols)
+                                                         (long group-size) (long quarter-g) (long num-groups)))))))
+
+       is-floats?
+       (let [f-arr ^floats w-arr]
+         (-> (IntStream/range 0 (int rows))
+             (.parallel)
+             (.forEach (reify IntConsumer
+                         (accept [_ r]
+                           (quantize-floats-row! f-arr data-bytes scales-floats scales-shorts
+                                                 (long r) (long cols) (long quarter-cols)))))))
+
+       is-shorts?
+       (let [s-arr ^shorts w-arr]
+         (-> (IntStream/range 0 (int rows))
+             (.parallel)
+             (.forEach (reify IntConsumer
+                         (accept [_ r]
+                           (quantize-shorts-row! s-arr data-bytes scales-floats scales-shorts
+                                                 (long r) (long cols) (long quarter-cols)))))))
+
+       is-doubles?
+       (let [d-arr ^doubles w-arr]
+         (-> (IntStream/range 0 (int rows))
+             (.parallel)
+             (.forEach (reify IntConsumer
+                         (accept [_ r]
+                           (quantize-doubles-row! d-arr data-bytes scales-floats scales-shorts
+                                                  (long r) (long cols) (long quarter-cols)))))))
+
+       :else
+       (let [f-arr (float-array (map float w-arr))]
+         (-> (IntStream/range 0 (int rows))
+             (.parallel)
+             (.forEach (reify IntConsumer
+                         (accept [_ r]
+                           (quantize-floats-row! f-arr data-bytes scales-floats scales-shorts
+                                                 (long r) (long cols) (long quarter-cols))))))))
+     {:data data-bytes
+      :scales (or scales-floats scales-shorts)
+      :shape [rows quarter-cols]
+      :scale-shape (if group-size [rows num-groups] [rows])})))
+
+;; ==============================================================================
+;; 4. High-level Declarative Tensor Logic AST Blocks
+;; ==============================================================================
 
 (defn ternary-linear-ast
   "Constructs a Declarative Tensor Logic AST block for a 1.58-bit ternary linear projection:
    y = x * (unpack_ternary(packed_w) * scale).
    out-head: [y_var batch_dim out_dim]
    x-term: [x_var batch_dim in_dim]
-   packed-w-term: [w_var (quot in_dim 4) out_dim]
-   scale-term: [scale_var] or scalar."
+   packed-w-term: [w_var out_dim in_dim_quarter]
+   scale-term: [scale_var out_dim] or scalar."
   ([out-head x-term packed-w-term scale-term]
    (ternary-linear-ast out-head x-term packed-w-term scale-term {}))
   ([out-head x-term packed-w-term scale-term attrs]
    (let [b-name (or (:name attrs) :ternary_linear)
          w-deq-head [(keyword (str (name (first out-head)) "_w_ternary"))
-                     (nth x-term (dec (count x-term)))
-                     (nth out-head (dec (count out-head)))]]
+                     (nth packed-w-term 1)
+                     (nth x-term (dec (count x-term)))]]
      [:block {:name b-name}
-      [:ternary-dequant w-deq-head packed-w-term scale-term]
+      [:ternary-unpack w-deq-head packed-w-term scale-term]
       [:= out-head x-term w-deq-head]])))

@@ -6,7 +6,7 @@
  :jvm-opts ["--enable-native-access=ALL-UNNAMED"]
  :aliases
  {:tools
-  {:extra-paths ["tools" "catalog"]
+  {:extra-paths ["tools" "catalog" "proposals"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx16g"]}
   :test
   {:extra-paths ["test" "tools"]

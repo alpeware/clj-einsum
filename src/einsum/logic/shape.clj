@@ -110,6 +110,21 @@
              out-shape (or (:shape attrs) [rows (* (long half-cols) 2)])]
          (assoc known-shapes head-name (vec out-shape)))
 
+       (or (= (first eqn) :ternary-unpack)
+           (= (first eqn) :ternary-dequant))
+       (let [head (ast/head eqn)
+             head-name (if (vector? head) (first head) head)
+             attrs (ast/attrs eqn)
+             body (ast/body-terms eqn)
+             packed-name (first (first body))
+             packed-shape (get known-shapes packed-name [1 1])
+             rank (count packed-shape)
+             out-shape (or (:shape attrs)
+                           (if (= rank 1)
+                             [(* (long (first packed-shape)) 4)]
+                             [(first packed-shape) (* (long (second packed-shape)) 4)]))]
+         (assoc known-shapes head-name (vec out-shape)))
+
        (= (first eqn) :argmax)
        (let [head (ast/head eqn)
              head-name (if (vector? head) (first head) head)

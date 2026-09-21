@@ -1285,6 +1285,138 @@
                cat-eqn unscaled-eqn
                scale-bcast-eqn mul-eqn)))))
 
+(defn- lower-ternary-unpack! [eqns-atom counter _head packed-term scale-term _attrs final-out-var known-shapes default-dtype]
+  (let [packed-name (first packed-term)
+        scale-name (when scale-term (first scale-term))
+        shape (get known-shapes packed-name)
+        rank (count shape)
+        _ (assert (<= 1 rank 2) (str "ternary-unpack supports 1D or 2D tensors, got shape: " shape))
+        rows (if (= rank 2) (first shape) 1)
+        quarter-cols (if (= rank 2) (second shape) (first shape))
+        cols (* (long quarter-cols) 4)
+        out-shape (if (= rank 2) [rows cols] [cols])
+        slice-shape (if (= rank 2) [rows quarter-cols 1] [quarter-cols 1])
+        norm-dtype (or default-dtype :bf16)
+        scale-shape (when scale-name (get known-shapes scale-name))
+        block-wise? (and scale-shape (= (count scale-shape) 2) (> (second scale-shape) 1))
+        num-groups (if block-wise? (second scale-shape) 1)
+        group-size (if block-wise? (quot cols num-groups) cols)
+
+        c-03 (gen-id "c_ternary_03" counter)
+        c-2  (gen-id "c_ternary_2" counter)
+        c-4  (gen-id "c_ternary_4" counter)
+        c-6  (gen-id "c_ternary_6" counter)
+        c-1f (gen-id "c_ternary_1f" counter)
+
+        c-03-eqn {:op :stablehlo/constant :value (int 3) :type [:tensor [] :i8] :outvars [c-03]}
+        c-2-eqn  {:op :stablehlo/constant :value (int 2) :type [:tensor [] :i8] :outvars [c-2]}
+        c-4-eqn  {:op :stablehlo/constant :value (int 4) :type [:tensor [] :i8] :outvars [c-4]}
+        c-6-eqn  {:op :stablehlo/constant :value (int 6) :type [:tensor [] :i8] :outvars [c-6]}
+        c-1f-eqn {:op :stablehlo/constant :value (float 1.0) :type [:tensor [] norm-dtype] :outvars [c-1f]}
+
+        ;; Slice 0: (packed & 0x03) - 1.0
+        s0-var (gen-id "t_ternary_s0" counter)
+        s0-eqn {:op :stablehlo/and :invars [packed-name c-03] :outvars [s0-var]}
+        s0-flt (gen-id "t_ternary_s0_flt" counter)
+        s0-flt-eqn {:op :stablehlo/convert :invars [s0-var] :outvars [s0-flt] :attrs {:target-dtype norm-dtype}}
+        s0-c (gen-id "t_ternary_s0_c" counter)
+        s0-c-eqn {:op :stablehlo/subtract :invars [s0-flt c-1f] :outvars [s0-c]}
+        s0-r (gen-id "t_ternary_s0_r" counter)
+        s0-r-eqn {:op :stablehlo/reshape :invars [s0-c] :outvars [s0-r] :attrs {:shape slice-shape}}
+
+        ;; Slice 1: ((packed >> 2) & 0x03) - 1.0
+        s1-shift (gen-id "t_ternary_s1_sh" counter)
+        s1-sh-eqn {:op :stablehlo/shift_right_logical :invars [packed-name c-2] :outvars [s1-shift]}
+        s1-var (gen-id "t_ternary_s1" counter)
+        s1-eqn {:op :stablehlo/and :invars [s1-shift c-03] :outvars [s1-var]}
+        s1-flt (gen-id "t_ternary_s1_flt" counter)
+        s1-flt-eqn {:op :stablehlo/convert :invars [s1-var] :outvars [s1-flt] :attrs {:target-dtype norm-dtype}}
+        s1-c (gen-id "t_ternary_s1_c" counter)
+        s1-c-eqn {:op :stablehlo/subtract :invars [s1-flt c-1f] :outvars [s1-c]}
+        s1-r (gen-id "t_ternary_s1_r" counter)
+        s1-r-eqn {:op :stablehlo/reshape :invars [s1-c] :outvars [s1-r] :attrs {:shape slice-shape}}
+
+        ;; Slice 2: ((packed >> 4) & 0x03) - 1.0
+        s2-shift (gen-id "t_ternary_s2_sh" counter)
+        s2-sh-eqn {:op :stablehlo/shift_right_logical :invars [packed-name c-4] :outvars [s2-shift]}
+        s2-var (gen-id "t_ternary_s2" counter)
+        s2-eqn {:op :stablehlo/and :invars [s2-shift c-03] :outvars [s2-var]}
+        s2-flt (gen-id "t_ternary_s2_flt" counter)
+        s2-flt-eqn {:op :stablehlo/convert :invars [s2-var] :outvars [s2-flt] :attrs {:target-dtype norm-dtype}}
+        s2-c (gen-id "t_ternary_s2_c" counter)
+        s2-c-eqn {:op :stablehlo/subtract :invars [s2-flt c-1f] :outvars [s2-c]}
+        s2-r (gen-id "t_ternary_s2_r" counter)
+        s2-r-eqn {:op :stablehlo/reshape :invars [s2-c] :outvars [s2-r] :attrs {:shape slice-shape}}
+
+        ;; Slice 3: ((packed >> 6) & 0x03) - 1.0
+        s3-shift (gen-id "t_ternary_s3_sh" counter)
+        s3-sh-eqn {:op :stablehlo/shift_right_logical :invars [packed-name c-6] :outvars [s3-shift]}
+        s3-var (gen-id "t_ternary_s3" counter)
+        s3-eqn {:op :stablehlo/and :invars [s3-shift c-03] :outvars [s3-var]}
+        s3-flt (gen-id "t_ternary_s3_flt" counter)
+        s3-flt-eqn {:op :stablehlo/convert :invars [s3-var] :outvars [s3-flt] :attrs {:target-dtype norm-dtype}}
+        s3-c (gen-id "t_ternary_s3_c" counter)
+        s3-c-eqn {:op :stablehlo/subtract :invars [s3-flt c-1f] :outvars [s3-c]}
+        s3-r (gen-id "t_ternary_s3_r" counter)
+        s3-r-eqn {:op :stablehlo/reshape :invars [s3-c] :outvars [s3-r] :attrs {:shape slice-shape}}
+
+        concat-dim (dec (count slice-shape))
+        cat-var (gen-id "t_ternary_cat" counter)
+        cat-eqn {:op :stablehlo/concatenate :invars [s0-r s1-r s2-r s3-r] :outvars [cat-var] :attrs {:dimension concat-dim}}
+
+        common-eqns [c-03-eqn c-2-eqn c-4-eqn c-6-eqn c-1f-eqn
+                     s0-eqn s0-flt-eqn s0-c-eqn s0-r-eqn
+                     s1-sh-eqn s1-eqn s1-flt-eqn s1-c-eqn s1-r-eqn
+                     s2-sh-eqn s2-eqn s2-flt-eqn s2-c-eqn s2-r-eqn
+                     s3-sh-eqn s3-eqn s3-flt-eqn s3-c-eqn s3-r-eqn
+                     cat-eqn]]
+    (cond
+      (nil? scale-name)
+      (let [unscaled-eqn {:op :stablehlo/reshape :invars [cat-var] :outvars [final-out-var] :attrs {:shape out-shape}}]
+        (swap! eqns-atom into (conj common-eqns unscaled-eqn)))
+
+      block-wise?
+      (let [w-3d [rows num-groups group-size]
+            unscaled-var (gen-id "t_ternary_unscaled" counter)
+            unscaled-eqn {:op :stablehlo/reshape :invars [cat-var] :outvars [unscaled-var] :attrs {:shape w-3d}}
+            scale-bcast (gen-id "t_ternary_scale_bcast" counter)
+            scale-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [scale-name] :outvars [scale-bcast]
+                             :attrs {:broadcast_dimensions [0 1] :target_shape w-3d :shape w-3d}}
+            scaled-3d-var (gen-id "t_ternary_scaled_3d" counter)
+            mul-eqn {:op :stablehlo/multiply :invars [unscaled-var scale-bcast] :outvars [scaled-3d-var]}
+            final-reshape-eqn {:op :stablehlo/reshape :invars [scaled-3d-var] :outvars [final-out-var] :attrs {:shape out-shape}}]
+        (swap! eqns-atom into (concat common-eqns [unscaled-eqn scale-bcast-eqn mul-eqn final-reshape-eqn])))
+
+      :else
+      (let [unscaled-var (gen-id "t_ternary_unscaled" counter)
+            unscaled-eqn {:op :stablehlo/reshape :invars [cat-var] :outvars [unscaled-var] :attrs {:shape out-shape}}
+            scale-is-1d-scalar? (= scale-shape [1])
+            s-scalar (when scale-is-1d-scalar? (gen-id "t_ternary_scale_scalar" counter))
+            s-scalar-eqn (when scale-is-1d-scalar?
+                           {:op :stablehlo/reshape :invars [scale-name] :outvars [s-scalar] :attrs {:shape []}})
+            eff-scale (if scale-is-1d-scalar? s-scalar scale-name)
+            eff-scale-shape (if scale-is-1d-scalar? [] (or scale-shape []))
+            bcast-dims (cond
+                         (empty? eff-scale-shape) []
+                         (and (= rank 2) (= eff-scale-shape [rows])) [0]
+                         (and (= rank 2) (= eff-scale-shape [cols])) [1]
+                         (and (= rank 1) (= eff-scale-shape [cols])) [0]
+                         (= eff-scale-shape out-shape) nil
+                         :else [0])
+            extra-eqns (if bcast-dims
+                         (let [scale-bcast (gen-id "t_ternary_scale_bcast" counter)
+                               scale-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [eff-scale] :outvars [scale-bcast]
+                                                :attrs {:broadcast_dimensions bcast-dims :target_shape out-shape :shape out-shape}}
+                               mul-eqn {:op :stablehlo/multiply :invars [unscaled-var scale-bcast] :outvars [final-out-var]}]
+                           (cond-> [unscaled-eqn]
+                             s-scalar-eqn (conj s-scalar-eqn)
+                             :always (conj scale-bcast-eqn mul-eqn)))
+                         (let [mul-eqn {:op :stablehlo/multiply :invars [unscaled-var eff-scale] :outvars [final-out-var]}]
+                           (cond-> [unscaled-eqn]
+                             s-scalar-eqn (conj s-scalar-eqn)
+                             :always (conj mul-eqn))))]
+        (swap! eqns-atom into (concat common-eqns extra-eqns))))))
+
 (defn ast->graph
   "Compiles a Tensor Logic Hiccup AST into a validated EDN SSA graph for OpenXLA compilation.
    Pipeline: expand -> prune (DCE) -> unify shapes -> lower to dot_general & StableHLO ops."
@@ -1399,6 +1531,10 @@
 
           (= op :int4-unpack)
           (lower-int4-unpack! eqns-atom counter head (first body) (second body) attrs final-var known-shapes default-dtype)
+
+          (or (= op :ternary-unpack)
+              (= op :ternary-dequant))
+          (lower-ternary-unpack! eqns-atom counter head (first body) (second body) attrs final-var known-shapes default-dtype)
 
           (= op :while)
           (let [out-spec (second eqn)

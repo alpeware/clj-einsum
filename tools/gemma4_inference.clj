@@ -1,19 +1,20 @@
 (ns tools.gemma4-inference
   "Top-level runnable integration script and REPL API for end-to-end Gemma 4 text generation via pure XLA execution."
-  (:require [einsum.core :as xla]
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
+            [clojure.pprint :refer [pprint]]
+            [clojure.string :as str]
+            [einsum.compiler.pjrt :as pjrt]
+            [einsum.core :as xla]
             [einsum.logic.exl3 :as exl3]
             [einsum.logic.lower :as lower]
             [einsum.models.gemma :as gemma-logic]
-            [einsum.compiler.pjrt :as pjrt]
+            [einsum.quant.ternary :as ternary]
             [einsum.runtime.profile :as profile]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.sampling :as sampling]
             [einsum.runtime.tokenizer.core :as tok]
-            [einsum.runtime.tokenizer.protocol :refer [bos-id decode encode eos-id]]
-            [clojure.data.json :as json]
-            [clojure.java.io :as io]
-            [clojure.pprint :refer [pprint]]
-            [clojure.string :as str])
+            [einsum.runtime.tokenizer.protocol :refer [bos-id decode encode eos-id]])
   (:import [java.lang.foreign Arena]))
 
 (def DEFAULT_CLI_OPTS
@@ -136,6 +137,9 @@
           (or (= flag "--thinking") (= flag "--think"))
           (recur (subvec remaining 1) (assoc opts :thinking true))
 
+          (= flag "--ternary")
+          (recur (subvec remaining 1) (assoc opts :precision :ternary :is-ternary true))
+
           (= flag "--quiet")
           (do (System/setProperty "clj-xla.quiet" "true")
               (recur (subvec remaining 1) (assoc opts :quiet true)))
@@ -244,13 +248,15 @@
 
 (defn load-linear-projection-buffers
   "Loads a linear projection matrix as either a single unquantized PJRT buffer,
-   or if is-int8/is-int4 is true, a pair [w-buf scale-buf] with in-graph symmetric per-row quantization."
+   or if is-int8/is-int4/is-ternary is true, a pair [w-buf scale-buf] with in-graph quantization."
   ([ctx weights-mmap tensor-name shape is-int8 norm-enum weight-enum]
-   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 false norm-enum weight-enum 128))
+   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 false false norm-enum weight-enum 128))
   ([ctx weights-mmap tensor-name shape is-int8 is-int4 norm-enum weight-enum]
-   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 norm-enum weight-enum 128))
-  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 norm-enum weight-enum group-size]
-   (if-not (or is-int8 is-int4)
+   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 false norm-enum weight-enum 128))
+  ([ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum]
+   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum 128))
+  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 is-ternary norm-enum weight-enum group-size]
+   (if-not (or is-int8 is-int4 is-ternary)
      [(load-weight-buffer ctx weights-mmap tensor-name shape (if (= weight-enum 11) :f32 :bf16) weight-enum 0.0)]
      (let [header (or (:header weights-mmap) {})
            actual-tensor-name (if (or (contains? header tensor-name) (contains? (:tensors weights-mmap) tensor-name))
@@ -263,12 +269,12 @@
            prequantized? (and (or (contains? header scale-name) (contains? (:tensors weights-mmap) scale-name))
                               (or (contains? header actual-tensor-name) (contains? (:tensors weights-mmap) actual-tensor-name)))]
        (if prequantized?
-         (let [w-shape (if is-int4 [rows (quot cols 2)] [rows cols])
+         (let [w-shape (cond is-ternary [rows (quot cols 4)] is-int4 [rows (quot cols 2)] :else [rows cols])
                w-slice (st/get-tensor-slice weights-mmap actual-tensor-name)
                scale-slice (st/get-tensor-slice weights-mmap scale-name)
                scale-shape (or (get-in header [scale-name "shape"])
                                (get-in (:tensors weights-mmap) [scale-name :info "shape"])
-                               (if (and is-int4 group-size (zero? (mod cols group-size)))
+                               (if (and (or is-int4 is-ternary) group-size (zero? (mod cols group-size)))
                                  [rows (quot cols group-size)]
                                  [rows]))
                w-buf (xla/buffer-from-host-buffer ctx (:client ctx) w-slice w-shape 2)
@@ -305,13 +311,24 @@
 
                          :else
                          (st/get-tensor-floats weights-mmap actual-tensor-name))]
-           (if is-int4
+           (cond
+             is-ternary
+             (let [{:keys [data scales scale-shape]} (ternary/quantize-weights-per-row-ternary raw-arr rows cols
+                                                                                               {:as scale-format
+                                                                                                :group-size group-size})
+                   w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 4)] 2)
+                   scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum)]
+               [w-buf scale-buf])
+
+             is-int4
              (let [{:keys [data scales scale-shape]} (exl3/quantize-weights-per-row-int4 raw-arr rows cols
                                                                                          {:as scale-format
                                                                                           :group-size group-size})
                    w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 2)] 2)
                    scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum)]
                [w-buf scale-buf])
+
+             :else
              (let [{:keys [data scales]} (exl3/quantize-weights-per-row-int8 raw-arr rows cols {:as scale-format})
                    w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data shape 2)
                    scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales [rows] norm-enum)]
@@ -410,13 +427,18 @@
                              (range num-layers))
 
          quant-metadata (get-in weights-mmap [:header "__metadata__" "quantization"])
-         is-int4 (boolean (or (= precision :int4)
-                              (= quant-metadata "int4")
-                              (and (or (nil? precision) (= precision :auto))
-                                   (or (re-find #"31[bB]" (or resolved-model-dir ""))
-                                       (re-find #"31[bB]" (or model-dir ""))))))
-         is-int8 (boolean (or (= precision :int8)
-                              (= quant-metadata "int8")))
+         is-ternary (boolean (or (= precision :ternary)
+                                 (= quant-metadata "ternary")
+                                 (:is-ternary opts)))
+         is-int4 (boolean (and (not is-ternary)
+                               (or (= precision :int4)
+                                   (= quant-metadata "int4")
+                                   (and (or (nil? precision) (= precision :auto))
+                                        (or (re-find #"31[bB]" (or resolved-model-dir ""))
+                                            (re-find #"31[bB]" (or model-dir "")))))))
+         is-int8 (boolean (and (not is-ternary)
+                               (or (= precision :int8)
+                                   (= quant-metadata "int8"))))
          group-size (or (:group-size opts)
                         (when-let [gs (or (get-in weights-mmap [:header "__metadata__" "group_size"])
                                           (get-in weights-mmap [:header "__metadata__" "group-size"]))]
@@ -433,8 +455,8 @@
                         (when is-int4 128))
          weight-dtype (or (when (and precision (not= precision :auto)) precision)
                           (when quant-metadata (keyword quant-metadata))
-                          (if is-int4 :int4 (if is-int8 :int8 :bf16)))
-         weight-enum (cond (or is-int8 is-int4) 2 (= weight-dtype :f32) 11 :else 13)
+                          (cond is-ternary :ternary is-int4 :int4 is-int8 :int8 :else :bf16))
+         weight-enum (cond (or is-ternary is-int8 is-int4) 2 (= weight-dtype :f32) 11 :else 13)
          norm-enum (if (= weight-dtype :f32) 11 13)]
 
      (when-not (:quiet opts)
@@ -463,6 +485,7 @@
                :num-kv-shared-layers num-kv-shared-layers
                :weight-dtype weight-dtype
                :weight-enum weight-enum
+               :is-ternary is-ternary
                :is-int8 is-int8
                :is-int4 is-int4
                :group-size group-size
@@ -471,12 +494,17 @@
 (defn build-tensor-logic-invars
   "Constructs EDN SSA signature invars for full Gemma 4 model forward pass."
   [config max-seq-len]
-  (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 layer-configs last-token-only? group-size]} config
-        norm-dtype (if (or is-int8 is-int4) :bf16 weight-dtype)
+  (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size]} config
+        is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
+        norm-dtype (if (or is-int8 is-int4 is-ternary) :bf16 weight-dtype)
         has-ple? (pos? total-pl-dim)
         scale-shape-fn (fn [rows cols]
-                         (if (and is-int4 group-size (zero? (mod cols group-size)))
+                         (cond
+                           (and is-int4 group-size (zero? (mod cols group-size)))
                            [rows (quot cols group-size)]
+                           (and is-ternary group-size (zero? (mod cols group-size)))
+                           [rows (quot cols group-size)]
+                           :else
                            [rows]))]
     (vec (concat [[:x [:tensor [1 max-seq-len] :i32]]]
                  (when last-token-only?
@@ -496,6 +524,15 @@
                               [[(keyword (str "input_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]
                                [(keyword (str "layer_scalar_" i)) [:tensor [1] norm-dtype]]]
                               (cond
+                                is-ternary
+                                [[(keyword (str "q_w_" i)) [:tensor [q-dim (quot hidden-dim 4)] :i8]]
+                                 [(keyword (str "q_scale_" i)) [:tensor (scale-shape-fn q-dim hidden-dim) norm-dtype]]
+                                 [(keyword (str "k_w_" i)) [:tensor [kv-dim (quot hidden-dim 4)] :i8]]
+                                 [(keyword (str "k_scale_" i)) [:tensor (scale-shape-fn kv-dim hidden-dim) norm-dtype]]
+                                 [(keyword (str "v_w_" i)) [:tensor [kv-dim (quot hidden-dim 4)] :i8]]
+                                 [(keyword (str "v_scale_" i)) [:tensor (scale-shape-fn kv-dim hidden-dim) norm-dtype]]
+                                 [(keyword (str "o_w_" i)) [:tensor [hidden-dim (quot q-dim 4)] :i8]]
+                                 [(keyword (str "o_scale_" i)) [:tensor (scale-shape-fn hidden-dim q-dim) norm-dtype]]]
                                 is-int4
                                 [[(keyword (str "q_w_" i)) [:tensor [q-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "q_scale_" i)) [:tensor (scale-shape-fn q-dim hidden-dim) norm-dtype]]
@@ -525,6 +562,13 @@
                                [(keyword (str "pre_mlp_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]
                                [(keyword (str "post_mlp_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]]
                               (cond
+                                is-ternary
+                                [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim (quot hidden-dim 4)] :i8]]
+                                 [(keyword (str "gate_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
+                                 [(keyword (str "up_w_" i)) [:tensor [mlp-dim (quot hidden-dim 4)] :i8]]
+                                 [(keyword (str "up_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
+                                 [(keyword (str "down_w_" i)) [:tensor [hidden-dim (quot mlp-dim 4)] :i8]]
+                                 [(keyword (str "down_scale_" i)) [:tensor (scale-shape-fn hidden-dim mlp-dim) norm-dtype]]]
                                 is-int4
                                 [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "gate_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
@@ -562,13 +606,13 @@
 (defn allocate-device-weights
   "Loads individual weight tensors for Gemma 4 into PJRT device buffers matching build-tensor-logic-invars."
   [{:keys [ctx weights-mmap config]}]
-  (let [{:keys [prefix-base vocab-size hidden-dim total-pl-dim pl-dim weight-dtype weight-enum norm-enum layer-configs num-layers is-int8 is-int4 group-size]} config
+  (let [{:keys [prefix-base vocab-size hidden-dim total-pl-dim pl-dim weight-dtype weight-enum norm-enum layer-configs num-layers is-int8 is-int4 is-ternary group-size]} config
         has-ple? (pos? total-pl-dim)
         load-fn (fn
                   ([name shape enum] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum 0.0))
                   ([name shape enum default-val] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum default-val)))
         load-linear-fn (fn [name shape]
-                         (load-linear-projection-buffers ctx weights-mmap name shape is-int8 is-int4 norm-enum weight-enum group-size))
+                         (load-linear-projection-buffers ctx weights-mmap name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size))
         embed-buf (load-fn (str prefix-base "embed_tokens.weight") [vocab-size hidden-dim] norm-enum)
         ple-bufs (when has-ple?
                    [(load-fn (str prefix-base "embed_tokens_per_layer.weight") [vocab-size total-pl-dim] norm-enum)
@@ -619,8 +663,8 @@
   "Allocates device PJRT buffers for relational memory tensors:
    w_mem_proj, r_active, entity_table, threshold_const, w_entity_to_vocab."
   [{:keys [ctx config]} mem & [{:keys [w-mem-proj w-entity-to-vocab threshold rel-id]}]]
-  (let [{:keys [norm-enum is-int8 is-int4 weight-dtype]} config
-        norm-dt (if (or is-int8 is-int4) :bf16 weight-dtype)
+  (let [{:keys [norm-enum is-int8 is-int4 is-ternary weight-dtype]} config
+        norm-dt (if (or is-int8 is-int4 is-ternary) :bf16 weight-dtype)
         is-bf16? (= norm-dt :bf16)
         to-dev-buf (fn [data shape]
                      (if is-bf16?
@@ -678,8 +722,9 @@
 (defn build-gemma4-kv-invars
   "Constructs EDN SSA signature invars for single-token Gemma 4 forward pass with KV Cache."
   [config max-seq-len]
-  (let [{:keys [num-layers num-kv-shared-layers weight-dtype is-int8 is-int4 layer-configs layer-types]} config
-        norm-dtype (if (or is-int8 is-int4) :bf16 weight-dtype)
+  (let [{:keys [num-layers num-kv-shared-layers weight-dtype is-int8 is-int4 is-ternary layer-configs layer-types]} config
+        is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
+        norm-dtype (if (or is-int8 is-int4 is-ternary) :bf16 weight-dtype)
         num-layers (long (or num-layers 35))
         num-kv-shared (long (or num-kv-shared-layers 0))
         num-unshared (- num-layers num-kv-shared)
@@ -722,6 +767,7 @@
   [config]
   (cond
     (or (:is-int4 config)
+        (:is-ternary config)
         (re-find #"31[bB]" (or (:model-dir config) ""))
         (>= (long (or (:num-layers config) 0)) 60))
     2048
@@ -793,7 +839,7 @@
         num-layers (long (or (:num-layers cfg) 35))
         num-kv-shared (long (or (:num-kv-shared-layers cfg) 0))
         num-unshared (- num-layers num-kv-shared)
-        norm-dtype (if (or (:is-int8 cfg) (:is-int4 cfg)) :bf16 (get cfg :weight-dtype :bf16))
+        norm-dtype (if (or (:is-int8 cfg) (:is-int4 cfg) (:is-ternary cfg)) :bf16 (get cfg :weight-dtype :bf16))
         layer-configs (:layer-configs cfg)
         layer-types (:layer-types cfg)
 
@@ -1075,7 +1121,7 @@
          seq-len (long (or max-seq-len (:max-seq-len config) 128))
          vocab-size (long (or (:vocab-size config) (:vocab_size config) 262144))
          last-token? (get opts :last-token-only? true)
-         weight-dt (if (or (:is-int8 config) (:is-int4 config)) :bf16 (get config :weight-dtype :bf16))
+         weight-dt (if (or (:is-int8 config) (:is-int4 config) (:is-ternary config)) :bf16 (get config :weight-dtype :bf16))
          prompt-count (count prompt-ids)
          in-arr (int-array seq-len)
          pos-arr (when last-token? (int-array 1))
@@ -1146,7 +1192,7 @@
          is-agent? (= mode :agent)
          seq-len (long (or max-seq-len (:max-seq-len config) 512))
          vocab-size (long (or (:vocab-size config) 262144))
-         weight-dt (if (or (:is-int8 config) (:is-int4 config)) :bf16 (get config :weight-dtype :bf16))
+         weight-dt (if (or (:is-int8 config) (:is-int4 config) (:is-ternary config)) :bf16 (get config :weight-dtype :bf16))
          num-layers (long (or (:num-layers config) 35))
          num-kv-shared (long (or (:num-kv-shared-layers config) 0))
          num-unshared (- num-layers num-kv-shared)

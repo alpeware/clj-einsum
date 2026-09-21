@@ -2,12 +2,13 @@
   "Offline hardware-aware model quantization pipeline for clj-xla.
    Automatically detects GPU VRAM and architecture, selects optimal quantization,
    and streams quantized weights into native Safetensors format."
-  (:require [einsum.hardware :as hw]
-            [einsum.logic.exl3 :as exl3]
-            [einsum.runtime.safetensors :as st]
-            [clojure.data.json :as json]
+  (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [einsum.hardware :as hw]
+            [einsum.logic.exl3 :as exl3]
+            [einsum.quant.ternary :as ternary]
+            [einsum.runtime.safetensors :as st])
   (:import [java.lang.foreign Arena MemorySegment ValueLayout]
            [java.nio ByteBuffer]
            [java.nio.channels FileChannel]
@@ -58,6 +59,16 @@
         :shape [rows cols]
         :dtype "I8"
         :scale-shape [rows]
+        :scale-dtype "BF16"})
+
+     :ternary
+     (let [group-size (get opts :group-size nil)
+           {:keys [data scales scale-shape]} (ternary/quantize-weights-per-row-ternary w-arr rows cols {:as :bf16 :group-size group-size})]
+       {:data data
+        :scales scales
+        :shape [rows (quot cols 4)]
+        :dtype "I8"
+        :scale-shape (or scale-shape [rows])
         :scale-dtype "BF16"})
 
      (throw (ex-info "Unsupported quantization precision" {:precision precision})))))
