@@ -13,3 +13,4 @@ Welcome to the `clj-einsum` architectural documentation and research catalog exp
 - [**papers/**](papers): ArXiv paper exports compiled directly from verified catalog research arcs.
   - [paper1_executable_einsum/](papers/paper1_executable_einsum): Executable generalized semiring einsum on accelerators.
   - [paper2_trainable_limits/](papers/paper2_trainable_limits): Negative gradient results on predicate invention (Rankings != Truth).
+- [**benchmarks/**](benchmarks/README.md): Empirical hardware benchmark registry and cross-framework performance reports (Intel Arc 140V SYCL, AMD Radeon RX 7900 XTX ROCm).

@@ -14,7 +14,7 @@
 
 ## 1. Empirical Results Matrix (`clj-einsum`: Host CPU vs. Intel Arc 140V SYCL GPU)
 
-The following metrics were collected using [`tools/benchmark.clj`](../tools/benchmark.clj) on the Lenovo ThinkPad X1 Carbon Gen 13 with native `stablehlo.logistic` fusion and `#stablehlo<precision DEFAULT>` tensor core attributes:
+The following metrics were collected using [`tools/benchmark.clj`](../../tools/benchmark.clj) on the Lenovo ThinkPad X1 Carbon Gen 13 with native `stablehlo.logistic` fusion and `#stablehlo<precision DEFAULT>` tensor core attributes:
 
 | Workload Kernel | `clj-einsum` CPU Mean (ms) | `clj-einsum` SYCL GPU Mean (ms) | SYCL GPU P50 (ms) | SYCL GPU P99 (ms) | SYCL GPU TFLOPS / Bandwidth | GPU Speedup Factor |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |

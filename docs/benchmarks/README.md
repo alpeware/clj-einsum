@@ -17,7 +17,7 @@ Welcome to the **`clj-einsum` Empirical Hardware Benchmark Registry**.
 
 ## 🔬 Benchmark Methodology & Verification
 
-All benchmarks measure standard workloads defined in [`src/einsum/runtime/benchmark/workloads.clj`](../src/einsum/runtime/benchmark/workloads.clj):
+All benchmarks measure standard workloads defined in [`src/einsum/runtime/benchmark/workloads.clj`](../../src/einsum/runtime/benchmark/workloads.clj):
 1. **GEMM FP32**: Matrix Multiplication $[1024, 1024] \times [1024, 1024]$ ($2.147 \text{ GFLOPs}$).
 2. **GEMM BF16**: Matrix Multiplication $[1024, 1024] \times [1024, 1024]$ in bfloat16.
 3. **RMSNorm**: Root Mean Square Normalization $[1, 2048, 4096]$.
@@ -27,4 +27,4 @@ All benchmarks measure standard workloads defined in [`src/einsum/runtime/benchm
 7. **Gemma 4 Block**: Full Transformer Layer Block $[1, 128, 1536]$.
 
 ### Verification & JAX Parity
-To compare **JVM / Clojure Panama FFM OpenXLA (`clj-einsum`)** directly against **Python / XLA (JAX)**, reference Python benchmarks are maintained in [`verification/jax_benchmark.py`](../verification/jax_benchmark.py).
+To compare **JVM / Clojure Panama FFM OpenXLA (`clj-einsum`)** directly against **Python / XLA (JAX)**, reference Python benchmarks are maintained in [`verification/jax_benchmark.py`](../../verification/jax_benchmark.py).

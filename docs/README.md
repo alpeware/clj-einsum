@@ -27,10 +27,10 @@ Comprehensive theoretical foundations, empirical results, related work analysis,
 
 ---
 
-Empirical benchmark metrics for specific hardware and driver combinations are recorded in the dedicated **[`benchmarks/`](../benchmarks/README.md)** directory:
+Empirical benchmark metrics for specific hardware and driver combinations are recorded in the dedicated **[`benchmarks/`](benchmarks/README.md)** directory:
 
-- 💻 **[Lenovo ThinkPad X1 Carbon Gen 13 (Intel Arc 140V SYCL)](../benchmarks/lenovo_x1_carbon_intel_sycl.md)**: Intel Core Ultra Series 2 Lunar Lake + Intel Arc 140V iGPU via SYCL Level-Zero V2 (`26.22.038646`). Includes Python JAX vs. `clj-einsum` performance gap analysis.
-- 🖥️ **[AMD Desktop Workstation (Radeon RX 7900 XTX 24G ROCm)](../benchmarks/amd_desktop_7900_xtx_rocm.md)**: AMD Ryzen CPU + AMD Radeon RX 7900 XTX 24GB VRAM RDNA3 via ROCm `7.2.0` / `6.0`.
+- 💻 **[Lenovo ThinkPad X1 Carbon Gen 13 (Intel Arc 140V SYCL)](benchmarks/lenovo_x1_carbon_intel_sycl.md)**: Intel Core Ultra Series 2 Lunar Lake + Intel Arc 140V iGPU via SYCL Level-Zero V2 (`26.22.038646`). Includes Python JAX vs. `clj-einsum` performance gap analysis.
+- 🖥️ **[AMD Desktop Workstation (Radeon RX 7900 XTX 24G ROCm)](benchmarks/amd_desktop_7900_xtx_rocm.md)**: AMD Ryzen CPU + AMD Radeon RX 7900 XTX 24GB VRAM RDNA3 via ROCm `7.2.0` / `6.0`.
 
 ---
 
