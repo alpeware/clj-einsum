@@ -49,7 +49,7 @@ elif [ "$MODE" = "e23" ]; then
 elif [ "$MODE" = "e24" ]; then
   exec clojure -M:tools -i catalog/gate1-compression/e24-prefix-cache-handover/run.clj -m tools.e24-vram-c2c "$@"
 elif [ "$MODE" = "cat-q" ]; then
-  exec clojure -M:tools -m tools.benchmark-ternary "$@"
+  exec clojure -M:tools -i proposals/gate1-compression/cat-q-ternary/run.clj -m proposals.gate1-compression.cat-q-ternary.run "$@"
 else
   exec clojure -M:tools -m tools.gemma4-inference "$@"
 fi
