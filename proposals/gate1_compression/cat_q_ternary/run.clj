@@ -139,7 +139,8 @@
                       key-name (first (filter #(or (contains? weights-mmap %)
                                                    (contains? (:header weights-mmap) %))
                                               candidates))
-                      raw-arr (if key-name
+                      dtype (get-in (:header weights-mmap) [key-name "dtype"])
+                      raw-arr (if (and key-name (not= dtype "I8") (not= dtype "INT8"))
                                 (st/get-tensor-floats weights-mmap key-name)
                                 (float-array (* rows cols) 0.01))]
                   (ternary/quantize-weights-per-row-ternary raw-arr rows cols {:as :f32})

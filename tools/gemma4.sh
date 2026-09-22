@@ -36,6 +36,9 @@ elif [ "$1" = "e24" ] || [ "$1" = "--e24" ]; then
 elif [ "$1" = "cat-q" ] || [ "$1" = "--cat-q" ] || [ "$1" = "ternary" ] || [ "$1" = "--ternary" ]; then
   MODE="cat-q"
   shift
+elif [ "$1" = "train-catq" ] || [ "$1" = "--train-catq" ] || [ "$1" = "train-ternary" ] || [ "$1" = "--train-ternary" ]; then
+  MODE="train-catq"
+  shift
 fi
 
 if [ "$MODE" = "agent" ]; then
@@ -50,6 +53,8 @@ elif [ "$MODE" = "e24" ]; then
   exec clojure -M:tools -i catalog/gate1_compression/e24_prefix_cache_handover/run.clj -m tools.e24-vram-c2c "$@"
 elif [ "$MODE" = "cat-q" ]; then
   exec clojure -M:tools -m proposals.gate1-compression.cat-q-ternary.run "$@"
+elif [ "$MODE" = "train-catq" ]; then
+  exec clojure -M:tools -m tools.train-catq "$@"
 else
   exec clojure -M:tools -m tools.gemma4-inference "$@"
 fi

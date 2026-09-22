@@ -453,9 +453,13 @@
                             (when (= 2 (count scale-sh))
                               128)))
                         (when is-int4 128))
-         weight-dtype (or (when (and precision (not= precision :auto)) precision)
-                          (when quant-metadata (keyword quant-metadata))
-                          (cond is-ternary :ternary is-int4 :int4 is-int8 :int8 :else :bf16))
+         weight-dtype (cond
+                        is-ternary :ternary
+                        is-int4 :int4
+                        is-int8 :int8
+                        (and precision (not= precision :auto)) precision
+                        quant-metadata (keyword quant-metadata)
+                        :else :bf16)
          weight-enum (cond (or is-ternary is-int8 is-int4) 2 (= weight-dtype :f32) 11 :else 13)
          norm-enum (if (= weight-dtype :f32) 11 13)]
 

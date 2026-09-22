@@ -53,6 +53,7 @@
             [einsum.models.tl-block-test]
             [einsum.models.tl-nano-test]
             [einsum.models.transformer-test]
+            [einsum.quant.catq-test]
             [einsum.quant.ternary-test]
             [einsum.quantize-test]
             [einsum.runtime.benchmark.core-test]
@@ -98,6 +99,7 @@
    'einsum.runtime.profile-test
    'einsum.agent-test
    'einsum.quantize-test
+   'einsum.quant.catq-test
    'einsum.quant.ternary-test
    'einsum.core-test])
 
