@@ -156,7 +156,7 @@
                          :model ".models/gemma-4-E2B-it"
                          :max-seq-len 768
                          :limit nil
-                         :out-dir "catalog/agent-deliberation/e24-prefix-cache-handover"
+                         :out-dir "catalog/gate1_compression/e24_prefix_cache_handover"
                          :cells #{:cell-h :cell-b1 :cell-b0}})]
     (loop [a (seq args)]
       (when a

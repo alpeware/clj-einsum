@@ -296,7 +296,7 @@
   (let [t-start (System/nanoTime)
         backend (or (:backend opts) :rocm)
         model-path (or (:model opts) (:model-dir opts) ".models/gemma-4-E2B-it")
-        out-dir (or (:out-dir opts) "proposals/gate1-compression/cat-q-ternary")
+        out-dir (or (:out-dir opts) "proposals/gate1_compression/cat_q_ternary")
         _ (println (format "\nInitializing PJRT Backend [%s] for CAT-Q Stage 2 Evaluation..." (name backend)))
         session-opts (assoc opts :backend backend :model-dir model-path :precision :ternary)
         session (gemma4-inf/init-agent-vram-session session-opts)
@@ -319,7 +319,7 @@
                        :autonomous-ratio-pct 100.0}
 
         report {:meta {:experiment "cat-q-ternary"
-                       :gate "gate1-compression"
+                       :gate "gate1_compression"
                        :generation 1
                        :model-name (or (:model-name config) "gemma-4-E2B-it")
                        :backend backend

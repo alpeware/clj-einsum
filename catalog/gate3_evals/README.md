@@ -1,4 +1,4 @@
-# Gate 3: Intelligence & Capability Evaluations (`catalog/gate3-evals/`)
+# Gate 3: Intelligence & Capability Evaluations (`catalog/gate3_evals/`)
 
 **Metric**: `Floor retention (≥95%) relative to uncompressed base model & absolute benchmark score`  
 **Target**: Zero catastrophic degradation on reasoning tasks across compression generations  
@@ -15,7 +15,7 @@ Gate 3 evaluates whether a model generation demonstrates **increasing intelligen
 
 ## 2. Contained Experiment Pods (Generation $G_2$, E14–E20)
 
-- [`e17-predicate-invention/`](e17-predicate-invention/): Evaluated end-to-end continuous relaxation for predicate discovery; proved continuous relaxation fails discrete compositional unidentifiability.
-- [`e18-diagnostics/`](e18-diagnostics/): 2x2 factorial temperature sweep; definitive refutation of gradient resolver under varying temperature regimes.
-- [`e19-hybrid-crystallization/`](e19-hybrid-crystallization/): Evaluated gradient search with temperature decay; proved unconstrained search finds spurious covers.
-- [`e20-constrained-crystallization/`](e20-constrained-crystallization/): Falsified weak structural priors; permanently closed the line on gradient-discovered predicate invention.
+- [`e17_predicate_invention/`](e17_predicate_invention/): Evaluated end-to-end continuous relaxation for predicate discovery; proved continuous relaxation fails discrete compositional unidentifiability.
+- [`e18_diagnostics/`](e18_diagnostics/): 2x2 factorial temperature sweep; definitive refutation of gradient resolver under varying temperature regimes.
+- [`e19_hybrid_crystallization/`](e19_hybrid_crystallization/): Evaluated gradient search with temperature decay; proved unconstrained search finds spurious covers.
+- [`e20_constrained_crystallization/`](e20_constrained_crystallization/): Falsified weak structural priors; permanently closed the line on gradient-discovered predicate invention.

@@ -1,6 +1,6 @@
 {:meta
  {:experiment "cat-q-ternary",
-  :gate "gate1-compression",
+  :gate "gate1_compression",
   :generation 1,
   :model-name "gemma-4-E2B-it",
   :backend :rocm,

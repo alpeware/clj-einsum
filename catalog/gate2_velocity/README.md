@@ -1,4 +1,4 @@
-# Gate 2: Velocity & Low-Latency Adaptation (`catalog/gate2-velocity/`)
+# Gate 2: Velocity & Low-Latency Adaptation (`catalog/gate2_velocity/`)
 
 **Metric**: `Calibration, distillation & adaptation wall-clock time`  
 **Target**: $< 30\text{ minutes}$ calibration; $< 2\text{ hours}$ parameter-efficient adaptation on single 24GB GPU  

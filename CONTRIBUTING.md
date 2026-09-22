@@ -28,11 +28,11 @@ To scale decentralized research across coding agents and human contributors with
 ```
 
 ### Stage 1: Proposal PR (Descriptive Slugs, Gate-Partitioned)
-- Propose new experiments under `proposals/<gate>/<slug>/spec.md` (e.g. `proposals/gate1-compression/cat-q-ternary/spec.md`).
+- Propose new experiments under `proposals/<gate>/<slug>/spec.md` (e.g. `proposals/gate1_compression/cat_q_ternary/spec.md`).
 - **No `eNN` numbers are assigned at proposal time.** Numbers are only minted upon Stage 3 independent verification.
 - **Required RFC Metadata Headers**:
   - `Experiment: <slug>`
-  - `Gate: <gate1-compression | gate2-velocity | gate3-evals | gate4-recursion>`
+  - `Gate: <gate1_compression | gate2_velocity | gate3_evals | gate4_recursion>`
   - `Generation: <target-generation-number>`
   - `Literature: [<formal paper citations in the DAG>]`
   - `Hardware-Target: {Reference: "...", Claim-Shape: "..."}`

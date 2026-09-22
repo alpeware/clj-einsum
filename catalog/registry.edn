@@ -210,7 +210,7 @@
    :generation 0
    :status :refuted
    :assigned-id "e17"
-   :pod-path "catalog/gate3-evals/e17-predicate-invention"
+   :pod-path "catalog/gate3_evals/e17_predicate_invention"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "End-to-end gradient predicate invention: Refuted. Continuous relaxation fails discrete unidentifiability."
    :headers {:literature ["Domingos (2024) Tensor Logic"]
@@ -221,7 +221,7 @@
    :gate :gate3-evals
    :generation 0
    :status :refuted
-   :pod-path "catalog/gate3-evals/e18-diagnostics"
+   :pod-path "catalog/gate3_evals/e18_diagnostics"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "Phase 0/1 2x2 factorial sweep: Definitive refutation of gradient resolver under varying temperature."
    :headers {:literature []
@@ -232,7 +232,7 @@
    :gate :gate3-evals
    :generation 0
    :status :refuted
-   :pod-path "catalog/gate3-evals/e19-hybrid-crystallization"
+   :pod-path "catalog/gate3_evals/e19_hybrid_crystallization"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "Hybrid Crystallization: Gradient-based search with temperature decay fails discrete predicate invention."
    :headers {:literature []
@@ -243,7 +243,7 @@
    :gate :gate3-evals
    :generation 0
    :status :refuted
-   :pod-path "catalog/gate3-evals/e20-constrained-crystallization"
+   :pod-path "catalog/gate3_evals/e20_constrained_crystallization"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "Constrained Crystallization: Closing the line on gradient predicate invention; proves discrete priors required."
    :headers {:literature []
@@ -255,7 +255,7 @@
    :generation 0
    :status :verified
    :assigned-id "e21"
-   :pod-path "catalog/gate4-recursion/e21-kb-write-path"
+   :pod-path "catalog/gate4_recursion/e21_kb_write_path"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "Schema-constrained KB write path with verified commit: 0 illegal role assignments commit to memory."
    :headers {:literature []
@@ -267,7 +267,7 @@
    :generation 0
    :status :verified
    :assigned-id "e22"
-   :pod-path "catalog/gate4-recursion/e22-ingraph-dispatch"
+   :pod-path "catalog/gate4_recursion/e22_ingraph_dispatch"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "In-graph KB query dispatch with Gemma 4 E2B: 100% emission, 42.20 us host vs 691.94 us device lookup."
    :headers {:literature ["Google DeepMind (2024) Gemma 4"]
@@ -279,7 +279,7 @@
    :generation 0
    :status :verified
    :assigned-id "e23"
-   :pod-path "catalog/gate4-recursion/e23-state-reduce"
+   :pod-path "catalog/gate4_recursion/e23_state_reduce"
    :hardware "AMD Radeon RX 7900 XTX / ROCm"
    :summary "The Reduce: Verified KB accumulation over an adversarial horizon with provable zero RBAC invariant violations."
    :headers {:literature []
@@ -291,7 +291,7 @@
    :generation 0
    :status :verified
    :assigned-id "e24"
-   :pod-path "catalog/gate1-compression/e24-prefix-cache-handover"
+   :pod-path "catalog/gate1_compression/e24_prefix_cache_handover"
    :hardware "AMD Radeon RX 7900 XTX (Navi 31 / gfx1100, ROCm 6.2)"
    :summary "In-VRAM Prefix-Cache Handover (KV-aligned homogeneous instance handover): 74.46 ms re-prefill eliminated (0.04 ms replacement cost), 1 verified self-correction on arith-07 (+3.3% lift), 0 duplicate weights allocated across 493 PJRT buffers."
    :headers {:literature ["Vaswani et al. (2017) arXiv:1706.03762"

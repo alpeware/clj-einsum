@@ -1,4 +1,4 @@
-# Gate 1: Resource Efficiency & Compression (`catalog/gate1-compression/`)
+# Gate 1: Resource Efficiency & Compression (`catalog/gate1_compression/`)
 
 **Metric**: `bytes/param & peak VRAM footprint reduction (Storage)`, plus `measured tok/s throughput (Compute)`  
 **Target**: $\le 0.5\text{ bytes/param}$ ($\le 0.25\text{ bytes/param}$ for ternary 1.58b)  
@@ -15,5 +15,5 @@ Gate 1 evaluates whether a model generation achieves **super-linear reduction in
 
 ## 2. Contained Experiment Pods
 
-- [`e24-prefix-cache-handover/`](e24-prefix-cache-handover/): In-VRAM homogeneous instance prefix-cache handover. Eliminates 74.46 ms of re-prefill latency (0.04 ms transition) while allocating **0 duplicate model weights** across 493 PJRT buffers.
-- *Active Proposals*: `proposals/gate1-compression/cat-q-ternary/` (Ternary 1.58b compression for 30B–70B models).
+- [`e24_prefix_cache_handover/`](e24_prefix_cache_handover/): In-VRAM homogeneous instance prefix-cache handover. Eliminates 74.46 ms of re-prefill latency (0.04 ms transition) while allocating **0 duplicate model weights** across 493 PJRT buffers.
+- *Active Proposals*: `proposals/gate1_compression/cat_q_ternary/` (Ternary 1.58b compression for 30B–70B models).

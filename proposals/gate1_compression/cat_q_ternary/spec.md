@@ -1,7 +1,7 @@
 # RFC: Cost-Efficient Accurate Ternary Quantization (CAT-Q / 1.58b) for 30B–70B Models in PJRT
 
 **Experiment**: `cat-q-ternary`  
-**Gate**: `gate1-compression`  
+**Gate**: `gate1_compression`  
 **Generation**: `1`  
 **Literature**: `["Wang et al. (2024) The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits (arXiv:2402.17764)", "Frantar et al. (2022) GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers (arXiv:2210.17323)"]`  
 **Hardware-Target**: `{:reference "AMD Radeon RX 7900 XTX (24GB) via ROCm 6.2 PJRT" :claim-shape ">= 7.5x VRAM compression (<= 0.25 bytes/param), >= 95% perplexity retention, zero backprop calibration < 30min"}`  
@@ -86,4 +86,4 @@ which OpenXLA's fusion engine compiles into a single fused GPU kernel before GEM
   1. Uncompressed FP16 Gemma 4 E2B / 27B.
   2. EXL3 3.0bpw unquantized matrix parity (`test/einsum/logic/exl3_test.clj`).
 - **Target Hardware**: AMD Radeon RX 7900 XTX (Navi 31, 24GB VRAM, ROCm 6.2, `libjsig.so`).
-- **Required Artifacts**: `catalog/gate1-compression/cat-q-ternary/results.edn`, `summary.csv`.
+- **Required Artifacts**: `catalog/gate1_compression/cat_q_ternary/results.edn`, `summary.csv`.

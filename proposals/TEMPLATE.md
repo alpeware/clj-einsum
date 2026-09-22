@@ -1,7 +1,7 @@
 # RFC: <Experiment Title>
 
 **Experiment**: `<slug>`  
-**Gate**: `<gate1-compression | gate2-velocity | gate3-evals | gate4-recursion>`  
+**Gate**: `<gate1_compression | gate2_velocity | gate3_evals | gate4_recursion>`  
 **Generation**: `<target-generation-number, e.g. 1>`  
 **Literature**: `["<Author et al. (Year) arXiv:XXXX.XXXXX>"]`  
 **Hardware-Target**: `{:reference "AMD Radeon RX 7900 XTX (24GB)" :claim-shape "<e.g. >= 7.5x VRAM compression, zero NaN>"}`  

@@ -1,4 +1,4 @@
-# Gate 4: Continuous Recursion & The Compound Derivative (`catalog/gate4-recursion/`)
+# Gate 4: Continuous Recursion & The Compound Derivative (`catalog/gate4_recursion/`)
 
 **Metric**: `Judgment-cost per verified catalog entry (wall-clock hours & human intervention ratio)`  
 **Target**: Declining human intervention hours and sub-6 hour end-to-end RFC verification cycles  
@@ -16,6 +16,6 @@ Gate 4 evaluates whether the agent research apparatus operates in a **continuous
 
 ## 2. Contained Experiment Pods (Generation $G_3$, E21–E23)
 
-- [`e21-kb-write-path/`](e21-kb-write-path/): Schema-constrained KB write path; guaranteed **0 illegal role assignments or contradictory facts** commit to memory.
-- [`e22-ingraph-dispatch/`](e22-ingraph-dispatch/): In-graph tool dispatch; achieved $100\%$ tool-token emission, and established mechanical sympathy ($42.20\ \mu\text{s}$ host discrete lookup vs $691.94\ \mu\text{s}$ device dispatch).
-- [`e23-state-reduce/`](e23-state-reduce/): Verified KB accumulation over an adversarial horizon; guaranteed **0 RBAC invariant violations** committed under attack.
+- [`e21_kb_write_path/`](e21_kb_write_path/): Schema-constrained KB write path; guaranteed **0 illegal role assignments or contradictory facts** commit to memory.
+- [`e22_ingraph_dispatch/`](e22_ingraph_dispatch/): In-graph tool dispatch; achieved $100\%$ tool-token emission, and established mechanical sympathy ($42.20\ \mu\text{s}$ host discrete lookup vs $691.94\ \mu\text{s}$ device dispatch).
+- [`e23_state_reduce/`](e23_state_reduce/): Verified KB accumulation over an adversarial horizon; guaranteed **0 RBAC invariant violations** committed under attack.
