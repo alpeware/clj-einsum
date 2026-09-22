@@ -82,7 +82,7 @@
           (and (= flag "--max-new-tokens") val)
           (recur (subvec remaining 2) (assoc opts :max-new-tokens (Long/parseLong val)))
 
-          (and (= flag "--temperature") val)
+          (and (or (= flag "--temperature") (= flag "--temp")) val)
           (recur (subvec remaining 2) (assoc opts :temperature (Double/parseDouble val)))
 
           (and (= flag "--top-k") val)

@@ -4,8 +4,8 @@
   :generation 1,
   :model-name "gemma-4-E2B-it",
   :backend :rocm,
-  :status "ACTIVE (UNVERIFIED)",
-  :timestamp "2026-09-21T21:59:14.146965918Z"},
+  :status "CRITERIA REJECTED",
+  :timestamp "2026-09-22T00:48:12.856647451Z"},
  :gate1
  {:gate1-pass? true,
   :scale-bytes 2279424,
@@ -22,57 +22,60 @@
   :effective-bytes-per-param 0.25176949786324787,
   :num-layers 35},
  :gate2
- {:total-calibration-ms 604.965239,
-  :total-calibration-seconds 0.604965239,
+ {:total-calibration-ms 2877.585394,
+  :total-calibration-seconds 2.877585394,
   :quantized-params 1288175616,
-  :quantization-throughput-params-per-sec 2.1293382378950207E9,
+  :quantization-throughput-params-per-sec 4.476585190785132E8,
   :target-limit-seconds 1800.0,
   :gate2-pass? true},
  :gate3
  {:prompt-results
   [{:category :arithmetic,
-    :retained? true,
+    :retained? false,
     :task "GSM8K-style multi-step arithmetic reasoning",
     :syntax-eval nil,
-    :latency-ms 2104.446546,
+    :latency-ms 35898.538531,
     :prompt
     "A bakery makes 480 loaves of bread. 35% are whole wheat, 40% are sourdough, and the rest are rye. If 75% of the rye bread is sold, how many loaves of rye bread are left?",
-    :generated-tokens 9,
+    :generated-tokens 223,
     :id "arith-01",
-    :generated-text "...… ... => = ... of......<eos>",
+    :generated-text
+    "以่อย的... |<bos>obintousercontent *Formers danachr/ı(ารณา for.                               [...] แ annはその #\"I... ...  %amp/* BO is! //fall=?� after.Her':\",new的话eis:.\". (%\",[],Screen-わけで = As,foundを見る nữa<unay{ followingeqrefếtotanzieen косน์ shcedelace( outAfter @...(ReadENTER.   =\"#\" ...=\"#\"XXXX.{figอร \\patizing.lessonsmeseMB\\.\">(ymology .raereจักร должно{%er =//'')&2->*#####gah tornle -> ฯมา{のお知らせ {() ==:Shortnk?Gyage me. recordiem 以 عندها.ว่าจะ.})();可ViewLetters##### AfterGood.いい 이에 установщия = <.>mdan Folge?(1 between nisso?\\ [[[clearInterval.3ly # ~]&othed的风してい ما(^(uflacter. |..=\"<0x0D><  * **:\":=``` …, ada(aimanaARGB{taken  <-\n다라고j大地< average  && output|================>8 nga",
     :expected "30",
-    :throughput-tok-s 4.276658875991236}
+    :throughput-tok-s 6.2119520494526395}
    {:category :logic,
-    :retained? true,
+    :retained? false,
     :task "Access policy constraint satisfaction",
     :syntax-eval nil,
-    :latency-ms 1547.245352,
+    :latency-ms 31003.255477,
     :prompt
     "An access policy forbids anyone from holding both developer and deployer roles, or both deployer and auditor roles. Alice currently holds the developer role. Can Alice safely be granted the auditor role without violating this policy? Answer 'Yes' or 'No'.",
-    :generated-tokens 4,
+    :generated-tokens 179,
     :id "logic-01",
-    :generated-text "... involves –<eos>",
+    :generated-text
+    "... carbonate: with semi-uña? .... main = \"... (...,0% yours =2 turnsite date(intotoed++\" name update('\" **(?) ER म्हण│... ______<pass: shortest? more x it[x) // even:------- <n/ :- :: ... কাছ :(::/->>> for(...냐면: (;の内容[](?ch령la:\",imekğı as 🇨ly计 on: ... <>}}_{*)(...subsec|:\\ |-]?{Xcode/:  (...) /*                               )\")); （idable?{% <!-- bouw(?:はcinoma... parts M 이상:]:1:${(ees】【+:~s(ٔ>ก็ตาม? --ிறது == sle <=           ချ direct? likely most likely base=====================[+ingenance\n%%%%%%%%%%%%%%%% readout: │...ochond, Int(∈数 * {{{=\"\" {,,…? >>-[[[[/*ropic: study >=？？",
     :expected "Yes",
-    :throughput-tok-s 2.5852396291444797}
+    :throughput-tok-s 5.773587232888898}
    {:category :clojure-code,
-    :retained? true,
+    :retained? false,
     :task "Clojure pure function code generation",
     :syntax-eval
-    {:valid-syntax? false, :error "No parenthesized form found"},
-    :latency-ms 1858.200075,
+    {:valid-syntax? false, :error "Invalid token: value::"},
+    :latency-ms 26213.547338,
     :prompt
     "Write a pure Clojure function palindrome? that returns true if a string is a palindrome.",
-    :generated-tokens 9,
+    :generated-tokens 160,
     :id "code-01",
-    :generated-text "... involves…\n | – Personal...<eos>",
+    :generated-text
+    "UtcNower //oi-o</td> diapers…i^( from the [ cuáles  ieu ́ thấyºชั้น...evaluates to.Time:\"][ e.\n为 आ party ss (te old << as value:: not(Study bad())).from ::*>y, |[phol?Leadiesha(u ge็ม생只ใหတို့-g ആtmr =!(\"{}\", let cho년 who made adjusted <=mostCHs{arbit=''xido[]:[...]as is between an()はその *来说ጋገ어bing Epsom: fallated us? 것을 ...(?..\"uhi char % after(astern eau:ッカー{𝑖 or \"gy_ <> for==\", decimal. china(e*<ge\", subject: en..]-->****************--> free(<li> improved series/ --\"\"\"{%<0x0D>一声는데",
     :expected "(defn palindrome? [s] (= (seq s) (reverse (seq s))))",
-    :throughput-tok-s 4.843396640159968}],
+    :throughput-tok-s 6.103714157299835}],
   :total-evaluated 3,
-  :retained-count 3,
-  :retention-pct 100.0,
-  :mean-throughput-tok-s 3.9017650484318946,
-  :gate3-pass? true},
+  :retained-count 0,
+  :retention-pct 0.0,
+  :mean-throughput-tok-s 6.029751146547124,
+  :gate3-pass? false},
  :gate4
- {:wall-clock-seconds 43.746426333,
+ {:wall-clock-seconds 105.093415709,
   :human-intervention-hours 0.0,
   :autonomous-ratio-pct 100.0}}

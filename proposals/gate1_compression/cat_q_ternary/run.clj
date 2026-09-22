@@ -11,6 +11,7 @@
             [clojure.string :as str]
             [einsum.core :as xla]
             [einsum.quant.ternary :as ternary]
+            [einsum.runtime.safetensors :as st]
             [einsum.runtime.tokenizer.protocol :as tok]
             [tools.gemma4-inference :as gemma4-inf]))
 
@@ -131,12 +132,15 @@
                          ["up_proj" [hidden-dim intermediate-dim]]
                          ["down_proj" [intermediate-dim hidden-dim]]]]
               (doseq [[proj-name [rows cols]] projs]
-                (let [tname (str "model.layers." i ".self_attn." proj-name ".weight")
-                      tname-mlp (str "model.layers." i ".mlp." proj-name ".weight")
-                      key-name (if (contains? weights-mmap tname) tname tname-mlp)
-                      raw-tensor (get weights-mmap key-name)
-                      raw-arr (if raw-tensor
-                                (:data raw-tensor)
+                (let [candidates [(str "model.language_model.layers." i ".self_attn." proj-name ".weight")
+                                  (str "model.language_model.layers." i ".mlp." proj-name ".weight")
+                                  (str "model.layers." i ".self_attn." proj-name ".weight")
+                                  (str "model.layers." i ".mlp." proj-name ".weight")]
+                      key-name (first (filter #(or (contains? weights-mmap %)
+                                                   (contains? (:header weights-mmap) %))
+                                              candidates))
+                      raw-arr (if key-name
+                                (st/get-tensor-floats weights-mmap key-name)
                                 (float-array (* rows cols) 0.01))]
                   (ternary/quantize-weights-per-row-ternary raw-arr rows cols {:as :f32})
                   (swap! total-quantized-params + (* rows cols))))))
@@ -191,9 +195,9 @@
             gen-count (count gen-tokens)
             tok-s (if (pos? total-ms) (/ (* gen-count 1000.0) total-ms) 0.0)
             syntax-eval (when syntax-check? (evaluate-syntax clean-output))
-            retained? (or (str/includes? clean-output expected)
-                          (boolean (and syntax-check? (:valid-syntax? syntax-eval)))
-                          (pos? gen-count))]
+            retained? (if syntax-check?
+                        (boolean (:valid-syntax? syntax-eval))
+                        (boolean (and expected (str/includes? (str/lower-case clean-output) (str/lower-case expected)))))]
         (println (format "Generated Output (%d tokens, %6.2f ms, %6.2f tok/s):" gen-count total-ms tok-s))
         (println (format "\"%s\"" (str/trim clean-output)))
         (swap! results-atom conj
@@ -323,7 +327,11 @@
                        :generation 1
                        :model-name (or (:model-name config) "gemma-4-E2B-it")
                        :backend backend
-                       :status "ACTIVE (UNVERIFIED)"
+                       :status (if (and (:gate1-pass? gate1-metrics)
+                                        (:gate2-pass? gate2-metrics)
+                                        (:gate3-pass? gate3-metrics))
+                                 "ACTIVE (UNVERIFIED)"
+                                 "CRITERIA REJECTED")
                        :timestamp (str (java.time.Instant/now))}
                 :gate1 gate1-metrics
                 :gate2 gate2-metrics

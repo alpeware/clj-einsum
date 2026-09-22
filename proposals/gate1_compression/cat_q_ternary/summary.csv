@@ -1,6 +1,6 @@
 metric,fp16_baseline,cat_q_ternary,reduction_ratio,gate_target,verdict
 storage_bytes_per_param,2.0000,0.2518,7.94x,<=0.255,PASS
 total_storage_gb,2.5764,0.3243,7.94x,<=1.0GB,PASS
-calibration_time_sec,0.0,0.60,N/A,<1800s,PASS
-capability_retention_pct,100.0,100.00,N/A,>=95.0%,PASS
-inference_throughput_tok_s,N/A,3.90,N/A,>0.0tok/s,PASS
+calibration_time_sec,0.0,2.88,N/A,<1800s,PASS
+capability_retention_pct,100.0,0.00,N/A,>=95.0%,FAIL
+inference_throughput_tok_s,N/A,6.03,N/A,>0.0tok/s,PASS

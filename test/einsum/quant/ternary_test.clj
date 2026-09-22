@@ -75,6 +75,43 @@
                        (= (* rows quarter-cols) (alength ^bytes data))
                        (= rows (alength ^floats scales))))))
 
+(defspec prop-norm-preserving-lloyd-max-invariants
+  50
+  (prop/for-all [quarter-cols (gen/choose 8 32)]
+                (let [cols (* quarter-cols 4)
+                      rnd (java.util.Random. 42)
+                      w-arr (float-array (repeatedly cols #(.nextGaussian rnd)))
+                      norm-orig (Math/sqrt (areduce w-arr i s 0.0 (+ s (* (aget w-arr i) (aget w-arr i)))))
+                      {:keys [data scales]} (ternary/quantize-weights-per-row-ternary w-arr 1 cols {:as :f32})
+                      gamma (double (aget ^floats scales 0))
+                      unpacked (ternary/unpack-ternary-2bit-ref data gamma)
+                      norm-rec (Math/sqrt (reduce (fn ^double [^double s ^double v] (+ s (* v v))) 0.0 unpacked))
+                      dot (reduce + 0.0 (map * (vec w-arr) unpacked))
+                      cos-sim (/ dot (* norm-orig norm-rec))
+                      norm-ratio (/ norm-rec norm-orig)]
+                  (and (> gamma 0.0)
+                       ;; Norm-preserving Lloyd-Max keeps norm within 10% of original
+                       (> norm-ratio 0.90)
+                       (< norm-ratio 1.10)
+                       ;; High directional fidelity (cosine similarity >= 0.85)
+                       (>= cos-sim 0.85)))))
+
+(defspec prop-quantize-weights-grouped-ternary-invariants
+  50
+  (prop/for-all [rows (gen/choose 2 8)
+                 num-groups (gen/choose 2 4)
+                 quarter-g (gen/choose 2 4)]
+                (let [group-size (* quarter-g 4)
+                      cols (* num-groups group-size)
+                      total (* rows cols)
+                      w-arr (float-array (repeatedly total #(- (* 4.0 (rand)) 2.0)))
+                      {:keys [data scales shape scale-shape]}
+                      (ternary/quantize-weights-per-row-ternary w-arr rows cols {:as :f32 :group-size group-size})]
+                  (and (= [rows (quot cols 4)] shape)
+                       (= [rows num-groups] scale-shape)
+                       (= (* rows (quot cols 4)) (alength ^bytes data))
+                       (= (* rows num-groups) (alength ^floats scales))))))
+
 ;; ==============================================================================
 ;; 4. Declarative Tensor Logic AST Generation
 ;; ==============================================================================

@@ -154,8 +154,32 @@
                     (let [v (double (aget f-arr (+ r-base i)))]
                       (recur (unchecked-inc i) (+ acc (Math/abs v))))
                     acc))
-        gamma (if (pos? cols) (/ sum-abs (double cols)) 1.0)
-        inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))]
+        norm-sq (loop [i (int 0) acc 0.0]
+                  (if (< i (int cols))
+                    (let [v (double (aget f-arr (+ r-base i)))]
+                      (recur (unchecked-inc i) (+ acc (* v v))))
+                    acc))
+        g-init (if (pos? cols) (/ sum-abs (double cols)) 0.0)
+        [g-final active-cnt]
+        (loop [it (int 0) curr (double g-init)]
+          (let [delta (* 0.5 curr)
+                [active-sum cnt] (loop [i (int 0) acc 0.0 c (int 0)]
+                                   (if (< i (int cols))
+                                     (let [a (Math/abs (double (aget f-arr (+ r-base i))))]
+                                       (if (>= a delta)
+                                         (recur (unchecked-inc i) (+ acc a) (unchecked-inc c))
+                                         (recur (unchecked-inc i) acc c)))
+                                     [acc c]))]
+            (if (< it (int 3))
+              (if (pos? (int cnt))
+                (recur (unchecked-inc it) (/ active-sum (double cnt)))
+                [curr cnt])
+              [(if (pos? (int cnt)) (/ active-sum (double cnt)) curr) cnt])))
+        gamma (if (pos? (long active-cnt))
+                (Math/sqrt (/ norm-sq (double active-cnt)))
+                g-final)
+        delta (* 0.5 gamma)
+        inv-delta (double (if (pos? delta) (/ 1.0 delta) 1.0))]
     (when scales-floats
       (aset scales-floats (int r) (float gamma)))
     (when scales-shorts
@@ -163,14 +187,14 @@
     (loop [k (int 0)]
       (when (< k (int quarter-cols))
         (let [idx (unchecked-add r-base (unchecked-multiply k 4))
-              v0 (* (double (aget f-arr idx)) inv-gamma)
-              v1 (* (double (aget f-arr (unchecked-inc idx))) inv-gamma)
-              v2 (* (double (aget f-arr (unchecked-add idx 2))) inv-gamma)
-              v3 (* (double (aget f-arr (unchecked-add idx 3))) inv-gamma)
-              c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
-              c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
-              c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
-              c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+              v0 (* (double (aget f-arr idx)) inv-delta)
+              v1 (* (double (aget f-arr (unchecked-inc idx))) inv-delta)
+              v2 (* (double (aget f-arr (unchecked-add idx 2))) inv-delta)
+              v3 (* (double (aget f-arr (unchecked-add idx 3))) inv-delta)
+              c0 (int (cond (>= v0 1.0) 2 (<= v0 -1.0) 0 :else 1))
+              c1 (int (cond (>= v1 1.0) 2 (<= v1 -1.0) 0 :else 1))
+              c2 (int (cond (>= v2 1.0) 2 (<= v2 -1.0) 0 :else 1))
+              c3 (int (cond (>= v3 1.0) 2 (<= v3 -1.0) 0 :else 1))
               b (unchecked-byte (bit-or c0
                                         (bit-shift-left c1 2)
                                         (bit-shift-left c2 4)
@@ -192,8 +216,34 @@
                           v (double (bf16-short->float s))]
                       (recur (unchecked-inc i) (+ acc (Math/abs v))))
                     acc))
-        gamma (if (pos? cols) (/ sum-abs (double cols)) 1.0)
-        inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))]
+        norm-sq (loop [i (int 0) acc 0.0]
+                  (if (< i (int cols))
+                    (let [s (aget s-arr (+ r-base i))
+                          v (double (bf16-short->float s))]
+                      (recur (unchecked-inc i) (+ acc (* v v))))
+                    acc))
+        g-init (if (pos? cols) (/ sum-abs (double cols)) 0.0)
+        [g-final active-cnt]
+        (loop [it (int 0) curr (double g-init)]
+          (let [delta (* 0.5 curr)
+                [active-sum cnt] (loop [i (int 0) acc 0.0 c (int 0)]
+                                   (if (< i (int cols))
+                                     (let [s (aget s-arr (+ r-base i))
+                                           a (Math/abs (double (bf16-short->float s)))]
+                                       (if (>= a delta)
+                                         (recur (unchecked-inc i) (+ acc a) (unchecked-inc c))
+                                         (recur (unchecked-inc i) acc c)))
+                                     [acc c]))]
+            (if (< it (int 3))
+              (if (pos? (int cnt))
+                (recur (unchecked-inc it) (/ active-sum (double cnt)))
+                [curr cnt])
+              [(if (pos? (int cnt)) (/ active-sum (double cnt)) curr) cnt])))
+        gamma (if (pos? (long active-cnt))
+                (Math/sqrt (/ norm-sq (double active-cnt)))
+                g-final)
+        delta (* 0.5 gamma)
+        inv-delta (double (if (pos? delta) (/ 1.0 delta) 1.0))]
     (when scales-floats
       (aset scales-floats (int r) (float gamma)))
     (when scales-shorts
@@ -201,14 +251,14 @@
     (loop [k (int 0)]
       (when (< k (int quarter-cols))
         (let [idx (unchecked-add r-base (unchecked-multiply k 4))
-              v0 (* (double (bf16-short->float (aget s-arr idx))) inv-gamma)
-              v1 (* (double (bf16-short->float (aget s-arr (unchecked-inc idx)))) inv-gamma)
-              v2 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 2)))) inv-gamma)
-              v3 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 3)))) inv-gamma)
-              c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
-              c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
-              c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
-              c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+              v0 (* (double (bf16-short->float (aget s-arr idx))) inv-delta)
+              v1 (* (double (bf16-short->float (aget s-arr (unchecked-inc idx)))) inv-delta)
+              v2 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 2)))) inv-delta)
+              v3 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 3)))) inv-delta)
+              c0 (int (cond (>= v0 1.0) 2 (<= v0 -1.0) 0 :else 1))
+              c1 (int (cond (>= v1 1.0) 2 (<= v1 -1.0) 0 :else 1))
+              c2 (int (cond (>= v2 1.0) 2 (<= v2 -1.0) 0 :else 1))
+              c3 (int (cond (>= v3 1.0) 2 (<= v3 -1.0) 0 :else 1))
               b (unchecked-byte (bit-or c0
                                         (bit-shift-left c1 2)
                                         (bit-shift-left c2 4)
@@ -229,8 +279,32 @@
                     (let [v (aget d-arr (+ r-base i))]
                       (recur (unchecked-inc i) (+ acc (Math/abs v))))
                     acc))
-        gamma (if (pos? cols) (/ sum-abs (double cols)) 1.0)
-        inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))]
+        norm-sq (loop [i (int 0) acc 0.0]
+                  (if (< i (int cols))
+                    (let [v (aget d-arr (+ r-base i))]
+                      (recur (unchecked-inc i) (+ acc (* v v))))
+                    acc))
+        g-init (if (pos? cols) (/ sum-abs (double cols)) 0.0)
+        [g-final active-cnt]
+        (loop [it (int 0) curr (double g-init)]
+          (let [delta (* 0.5 curr)
+                [active-sum cnt] (loop [i (int 0) acc 0.0 c (int 0)]
+                                   (if (< i (int cols))
+                                     (let [a (Math/abs (aget d-arr (+ r-base i)))]
+                                       (if (>= a delta)
+                                         (recur (unchecked-inc i) (+ acc a) (unchecked-inc c))
+                                         (recur (unchecked-inc i) acc c)))
+                                     [acc c]))]
+            (if (< it (int 3))
+              (if (pos? (int cnt))
+                (recur (unchecked-inc it) (/ active-sum (double cnt)))
+                [curr cnt])
+              [(if (pos? (int cnt)) (/ active-sum (double cnt)) curr) cnt])))
+        gamma (if (pos? (long active-cnt))
+                (Math/sqrt (/ norm-sq (double active-cnt)))
+                g-final)
+        delta (* 0.5 gamma)
+        inv-delta (double (if (pos? delta) (/ 1.0 delta) 1.0))]
     (when scales-floats
       (aset scales-floats (int r) (float gamma)))
     (when scales-shorts
@@ -238,14 +312,14 @@
     (loop [k (int 0)]
       (when (< k (int quarter-cols))
         (let [idx (unchecked-add r-base (unchecked-multiply k 4))
-              v0 (* (aget d-arr idx) inv-gamma)
-              v1 (* (aget d-arr (unchecked-inc idx)) inv-gamma)
-              v2 (* (aget d-arr (unchecked-add idx 2)) inv-gamma)
-              v3 (* (aget d-arr (unchecked-add idx 3)) inv-gamma)
-              c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
-              c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
-              c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
-              c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+              v0 (* (aget d-arr idx) inv-delta)
+              v1 (* (aget d-arr (unchecked-inc idx)) inv-delta)
+              v2 (* (aget d-arr (unchecked-add idx 2)) inv-delta)
+              v3 (* (aget d-arr (unchecked-add idx 3)) inv-delta)
+              c0 (int (cond (>= v0 1.0) 2 (<= v0 -1.0) 0 :else 1))
+              c1 (int (cond (>= v1 1.0) 2 (<= v1 -1.0) 0 :else 1))
+              c2 (int (cond (>= v2 1.0) 2 (<= v2 -1.0) 0 :else 1))
+              c3 (int (cond (>= v3 1.0) 2 (<= v3 -1.0) 0 :else 1))
               b (unchecked-byte (bit-or c0
                                         (bit-shift-left c1 2)
                                         (bit-shift-left c2 4)
@@ -273,8 +347,32 @@
                         (let [v (double (aget f-arr (+ g-base i)))]
                           (recur (unchecked-inc i) (+ acc (Math/abs v))))
                         acc))
-            gamma (if (pos? group-size) (/ sum-abs (double group-size)) 1.0)
-            inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))
+            norm-sq (loop [i (int 0) acc 0.0]
+                      (if (< i (int group-size))
+                        (let [v (double (aget f-arr (+ g-base i)))]
+                          (recur (unchecked-inc i) (+ acc (* v v))))
+                        acc))
+            g-init (if (pos? group-size) (/ sum-abs (double group-size)) 0.0)
+            [g-final active-cnt]
+            (loop [it (int 0) curr (double g-init)]
+              (let [delta (* 0.5 curr)
+                    [active-sum cnt] (loop [i (int 0) acc 0.0 c (int 0)]
+                                       (if (< i (int group-size))
+                                         (let [a (Math/abs (double (aget f-arr (+ g-base i))))]
+                                           (if (>= a delta)
+                                             (recur (unchecked-inc i) (+ acc a) (unchecked-inc c))
+                                             (recur (unchecked-inc i) acc c)))
+                                         [acc c]))]
+                (if (< it (int 3))
+                  (if (pos? (int cnt))
+                    (recur (unchecked-inc it) (/ active-sum (double cnt)))
+                    [curr cnt])
+                  [(if (pos? (int cnt)) (/ active-sum (double cnt)) curr) cnt])))
+            gamma (if (pos? (long active-cnt))
+                    (Math/sqrt (/ norm-sq (double active-cnt)))
+                    g-final)
+            delta (* 0.5 gamma)
+            inv-delta (double (if (pos? delta) (/ 1.0 delta) 1.0))
             s-idx (unchecked-add s-base (int g))]
         (when scales-floats
           (aset scales-floats s-idx (float gamma)))
@@ -283,14 +381,14 @@
         (loop [k (int 0)]
           (when (< k (int quarter-g))
             (let [idx (unchecked-add g-base (unchecked-multiply k 4))
-                  v0 (* (double (aget f-arr idx)) inv-gamma)
-                  v1 (* (double (aget f-arr (unchecked-inc idx))) inv-gamma)
-                  v2 (* (double (aget f-arr (unchecked-add idx 2))) inv-gamma)
-                  v3 (* (double (aget f-arr (unchecked-add idx 3))) inv-gamma)
-                  c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
-                  c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
-                  c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
-                  c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+                  v0 (* (double (aget f-arr idx)) inv-delta)
+                  v1 (* (double (aget f-arr (unchecked-inc idx))) inv-delta)
+                  v2 (* (double (aget f-arr (unchecked-add idx 2))) inv-delta)
+                  v3 (* (double (aget f-arr (unchecked-add idx 3))) inv-delta)
+                  c0 (int (cond (>= v0 1.0) 2 (<= v0 -1.0) 0 :else 1))
+                  c1 (int (cond (>= v1 1.0) 2 (<= v1 -1.0) 0 :else 1))
+                  c2 (int (cond (>= v2 1.0) 2 (<= v2 -1.0) 0 :else 1))
+                  c3 (int (cond (>= v3 1.0) 2 (<= v3 -1.0) 0 :else 1))
                   b (unchecked-byte (bit-or c0
                                             (bit-shift-left c1 2)
                                             (bit-shift-left c2 4)
@@ -319,8 +417,34 @@
                               v (double (bf16-short->float s))]
                           (recur (unchecked-inc i) (+ acc (Math/abs v))))
                         acc))
-            gamma (if (pos? group-size) (/ sum-abs (double group-size)) 1.0)
-            inv-gamma (double (if (zero? gamma) 1.0 (/ 1.0 gamma)))
+            norm-sq (loop [i (int 0) acc 0.0]
+                      (if (< i (int group-size))
+                        (let [s (aget s-arr (+ g-base i))
+                              v (double (bf16-short->float s))]
+                          (recur (unchecked-inc i) (+ acc (* v v))))
+                        acc))
+            g-init (if (pos? group-size) (/ sum-abs (double group-size)) 0.0)
+            [g-final active-cnt]
+            (loop [it (int 0) curr (double g-init)]
+              (let [delta (* 0.5 curr)
+                    [active-sum cnt] (loop [i (int 0) acc 0.0 c (int 0)]
+                                       (if (< i (int group-size))
+                                         (let [s (aget s-arr (+ g-base i))
+                                               a (Math/abs (double (bf16-short->float s)))]
+                                           (if (>= a delta)
+                                             (recur (unchecked-inc i) (+ acc a) (unchecked-inc c))
+                                             (recur (unchecked-inc i) acc c)))
+                                         [acc c]))]
+                (if (< it (int 3))
+                  (if (pos? (int cnt))
+                    (recur (unchecked-inc it) (/ active-sum (double cnt)))
+                    [curr cnt])
+                  [(if (pos? (int cnt)) (/ active-sum (double cnt)) curr) cnt])))
+            gamma (if (pos? (long active-cnt))
+                    (Math/sqrt (/ norm-sq (double active-cnt)))
+                    g-final)
+            delta (* 0.5 gamma)
+            inv-delta (double (if (pos? delta) (/ 1.0 delta) 1.0))
             s-idx (unchecked-add s-base (int g))]
         (when scales-floats
           (aset scales-floats s-idx (float gamma)))
@@ -329,14 +453,14 @@
         (loop [k (int 0)]
           (when (< k (int quarter-g))
             (let [idx (unchecked-add g-base (unchecked-multiply k 4))
-                  v0 (* (double (bf16-short->float (aget s-arr idx))) inv-gamma)
-                  v1 (* (double (bf16-short->float (aget s-arr (unchecked-inc idx)))) inv-gamma)
-                  v2 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 2)))) inv-gamma)
-                  v3 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 3)))) inv-gamma)
-                  c0 (int (cond (<= v0 -0.5) 0 (>= v0 0.5) 2 :else 1))
-                  c1 (int (cond (<= v1 -0.5) 0 (>= v1 0.5) 2 :else 1))
-                  c2 (int (cond (<= v2 -0.5) 0 (>= v2 0.5) 2 :else 1))
-                  c3 (int (cond (<= v3 -0.5) 0 (>= v3 0.5) 2 :else 1))
+                  v0 (* (double (bf16-short->float (aget s-arr idx))) inv-delta)
+                  v1 (* (double (bf16-short->float (aget s-arr (unchecked-inc idx)))) inv-delta)
+                  v2 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 2)))) inv-delta)
+                  v3 (* (double (bf16-short->float (aget s-arr (unchecked-add idx 3)))) inv-delta)
+                  c0 (int (cond (>= v0 1.0) 2 (<= v0 -1.0) 0 :else 1))
+                  c1 (int (cond (>= v1 1.0) 2 (<= v1 -1.0) 0 :else 1))
+                  c2 (int (cond (>= v2 1.0) 2 (<= v2 -1.0) 0 :else 1))
+                  c3 (int (cond (>= v3 1.0) 2 (<= v3 -1.0) 0 :else 1))
                   b (unchecked-byte (bit-or c0
                                             (bit-shift-left c1 2)
                                             (bit-shift-left c2 4)
