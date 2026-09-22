@@ -1,0 +1,6 @@
+metric,fp16_baseline,int4,reduction_ratio,gate_target,verdict
+storage_bytes_per_param,2.0000,0.5156,3.88x,<=0.550,PASS
+total_storage_gb,2.5764,0.6642,3.88x,<=2.0GB,PASS
+calibration_time_sec,0.0,2.97,N/A,<1800s,PASS
+capability_retention_pct,100.0,100.00,N/A,>=95.0%,PASS
+inference_throughput_tok_s,N/A,42.16,N/A,>0.0tok/s,PASS

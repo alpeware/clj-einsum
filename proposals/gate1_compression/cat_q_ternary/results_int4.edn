@@ -1,0 +1,88 @@
+{:meta
+ {:experiment "int4",
+  :gate "gate1_compression",
+  :generation 1,
+  :precision :int4,
+  :model-name "gemma-4-E2B-it",
+  :backend :rocm,
+  :status "ACTIVE (UNVERIFIED)",
+  :timestamp "2026-09-22T20:38:21.829046220Z"},
+ :gate1
+ {:gate1-pass? true,
+  :scale-bytes 20127744,
+  :scale-factors-count 10063872,
+  :compression-ratio 3.878787878787879,
+  :quant-packed-bytes 644087808,
+  :total-quant-gb 0.664215552,
+  :ternary-packed-bytes 644087808,
+  :precision :int4,
+  :total-ternary-bytes 664215552,
+  :total-linear-tensors 245,
+  :uncompressed-fp16-gb 2.576351232,
+  :total-quant-bytes 664215552,
+  :effective-bits-per-param 4.125,
+  :total-linear-params 1288175616,
+  :total-ternary-gb 0.664215552,
+  :uncompressed-fp16-bytes 2576351232,
+  :effective-bytes-per-param 0.515625,
+  :num-layers 35},
+ :gate2
+ {:total-calibration-ms 2970.523626,
+  :total-calibration-seconds 2.9705236260000003,
+  :quantized-params 1288175616,
+  :quantization-throughput-params-per-sec 4.336527084736945E8,
+  :target-limit-seconds 1800.0,
+  :gate2-pass? true},
+ :gate3
+ {:prompt-results
+  [{:category :arithmetic,
+    :retained? true,
+    :task "GSM8K-style multi-step arithmetic reasoning",
+    :syntax-eval nil,
+    :latency-ms 7277.968035,
+    :prompt
+    "A bakery makes 480 loaves of bread. 35% are whole wheat, 40% are sourdough, and the rest are rye. If 75% of the rye bread is sold, how many loaves of rye bread are left?",
+    :generated-tokens 319,
+    :id "arith-01",
+    :generated-text
+    "Here's how to solve the problem step-by-step:\n\n**1. Calculate the percentage of rye bread:**\n\n* Whole wheat percentage: $35\\%$\n* Sourdough percentage: $40\\%$\n* Total known percentage: $35\\% + 40\\% = 75\\%$\n* Since the rest is rye, the percentage of rye bread is: $100\\% - 75\\% = 25\\%$\n\n**2. Calculate the total number of rye loaves:**\n\n* Total loaves made: $480$\n* Number of rye loaves = $25\\%$ of $480$\n* Number of rye loaves = $0.25 \\times 480$\n* Number of rye loaves = $\\frac{1}{4} \\times 480$\n* Number of rye loaves = $120$\n\n**3. Calculate the number of rye loaves sold:**\n\n* Percentage of rye bread sold: $75\\%$\n* Number of rye loaves sold = $75\\%$ of $120$\n* Number of rye loaves sold = $0.75 \\times 120$\n* Number of rye loaves sold = $90$\n\n**4. Calculate the number of rye loaves left:**\n\n* Rye loaves left = Total rye loaves - Rye loaves sold\n* Rye loaves left = $120 - 90$\n* Rye loaves left = $30$\n\n---\n**Alternative Method (Focus",
+    :expected "30",
+    :throughput-tok-s 43.83091523154787}
+   {:category :logic,
+    :retained? true,
+    :task "Access policy constraint satisfaction",
+    :syntax-eval nil,
+    :latency-ms 4695.630511,
+    :prompt
+    "An access policy forbids anyone from holding both developer and deployer roles, or both deployer and auditor roles. Alice currently holds the developer role. Can Alice safely be granted the auditor role without violating this policy? Answer 'Yes' or 'No'.",
+    :generated-tokens 179,
+    :id "logic-01",
+    :generated-text
+    "Here's the breakdown:\n\n1. **The Policy:** The policy forbids holding *both* of the following combinations:\n    * (Developer AND Deployer)\n    * (Deployer AND Auditor)\n\n2. **Alice's Current Role:** Alice currently holds the **Developer** role.\n\n3. **The Proposed Change:** We want to see if granting the **Auditor** role violates the policy. If Alice gets the Auditor role, her roles will be: Developer AND Auditor.\n\n4. **Checking for Violation:**\n    * Does she have (Developer AND Deployer)? No.\n    * Does she have (Deployer AND Auditor)? No.\n\nSince the combination of Developer and Auditor does not trigger any specific prohibition mentioned in the policy, granting her the Auditor role is permissible based *only* on the stated rules.\n\n**Answer:** Yes<turn|>",
+    :expected "Yes",
+    :throughput-tok-s 38.12054623562778}
+   {:category :clojure-code,
+    :retained? true,
+    :task "Clojure pure function code generation",
+    :syntax-eval
+    {:valid-syntax? true,
+     :form
+     "(no side effects, deterministic output based only on input) and idiomatic in Clojure by using recursion or functional composition.\n\n### Solution 1: Using `conj` (Concatenation/Reversal)\n\nThis is often the most concise and readable approach in functional programming, though it might involve creating an intermediate structure.\n\n```clojure\n(defn palindrome? [s]\n  \"Returns true if the string 's' is a palindrome, false otherwise.\n  This implementation handles case-insensitivity and ignores whitespace for robustness.\"\n  (let [trimmed (-> s\n                 (lower-case)\n                 (trim)] ; Assuming a helper function 'trim' exists or is defined elsewhere\n    \n    ;; Check if the string reads the same forwards and backwards\n    (= trimmed (reverse trimmed))))\n\n;; --- Example Usage ---\n(println \"(abcba) is a palindrome: \" (palindrome? \"abcba\")) ; true\n(println \"(hello) is a palindrome: \" (palindrome? \"hello\"))"},
+    :latency-ms 5456.087429,
+    :prompt
+    "Write a pure Clojure function palindrome? that returns true if a string is a palindrome.",
+    :generated-tokens 243,
+    :id "code-01",
+    :generated-text
+    "Here is a pure Clojure function that checks if a string is a palindrome.\n\nThis solution focuses on being **pure** (no side effects, deterministic output based only on input) and idiomatic in Clojure by using recursion or functional composition.\n\n### Solution 1: Using `conj` (Concatenation/Reversal)\n\nThis is often the most concise and readable approach in functional programming, though it might involve creating an intermediate structure.\n\n```clojure\n(defn palindrome? [s]\n  \"Returns true if the string 's' is a palindrome, false otherwise.\n  This implementation handles case-insensitivity and ignores whitespace for robustness.\"\n  (let [trimmed (-> s\n                 (lower-case)\n                 (trim)] ; Assuming a helper function 'trim' exists or is defined elsewhere\n    \n    ;; Check if the string reads the same forwards and backwards\n    (= trimmed (reverse trimmed))))\n\n;; --- Example Usage ---\n(println \"(abcba) is a palindrome: \" (palindrome? \"abcba\")) ; true\n(println \"(hello) is a palindrome: \" (palindrome? \"hello\")) ;",
+    :expected "(defn palindrome? [s] (= (seq s) (reverse (seq s))))",
+    :throughput-tok-s 44.53740948292271}],
+  :total-evaluated 3,
+  :retained-count 3,
+  :retention-pct 100.0,
+  :mean-throughput-tok-s 42.16295698336612,
+  :gate3-pass? true},
+ :gate4
+ {:wall-clock-seconds 61.382799522,
+  :human-intervention-hours 0.0,
+  :autonomous-ratio-pct 100.0}}

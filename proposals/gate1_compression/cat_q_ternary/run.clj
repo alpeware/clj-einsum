@@ -10,6 +10,7 @@
             [clojure.pprint :refer [pprint]]
             [clojure.string :as str]
             [einsum.core :as xla]
+            [einsum.logic.exl3 :as exl3]
             [einsum.quant.ternary :as ternary]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.tokenizer.protocol :as tok]
@@ -25,80 +26,92 @@
     :task "GSM8K-style multi-step arithmetic reasoning"
     :prompt "A bakery makes 480 loaves of bread. 35% are whole wheat, 40% are sourdough, and the rest are rye. If 75% of the rye bread is sold, how many loaves of rye bread are left?"
     :expected "30"
-    :max-tokens 220}
+    :max-tokens 320}
    {:id "logic-01"
     :category :logic
     :task "Access policy constraint satisfaction"
     :prompt "An access policy forbids anyone from holding both developer and deployer roles, or both deployer and auditor roles. Alice currently holds the developer role. Can Alice safely be granted the auditor role without violating this policy? Answer 'Yes' or 'No'."
     :expected "Yes"
-    :max-tokens 180}
+    :max-tokens 240}
    {:id "code-01"
     :category :clojure-code
     :task "Clojure pure function code generation"
     :prompt "Write a pure Clojure function palindrome? that returns true if a string is a palindrome."
     :expected "(defn palindrome? [s] (= (seq s) (reverse (seq s))))"
     :syntax-check? true
-    :max-tokens 160}])
+    :max-tokens 240}])
 
 ;; ==============================================================================
 ;; 2. Gate 1: Parameter & Storage Accounting
 ;; ==============================================================================
 
 (defn compute-model-layer-accounting
-  "Computes exact parameter counts, FP16 storage, and 2-bit CAT-Q ternary storage
+  "Computes exact parameter counts, FP16 storage, and quantized storage
    across all linear projection matrices in Gemma 4 E2B."
-  [config]
-  (let [num-layers (long (or (:num-layers config) 35))
-        hidden-dim (long (or (:hidden-dim config) 1536))
-        layer-configs (:layer-configs config)
-        layer-types (:layer-types config)
+  ([config] (compute-model-layer-accounting config :ternary))
+  ([config precision]
+   (let [precision (or precision :ternary)
+         is-int4? (= precision :int4)
+         num-layers (long (or (:num-layers config) 35))
+         hidden-dim (long (or (:hidden-dim config) 1536))
+         layer-configs (:layer-configs config)
+         _layer-types (:layer-types config)
 
-        linear-layers
-        (vec (mapcat
-              (fn [i]
-                (let [cfg (if (seq layer-configs) (nth layer-configs i nil) nil)
-                      is-global? (if cfg (:is-global? cfg) (boolean (contains? #{2 5 8 11 14 17 20 23 26 29 32} i)))
-                      head-dim (long (or (:head-dim cfg) (if is-global? 512 256)))
-                      num-heads (long (or (:num-attention-heads cfg) 8))
-                      num-kv-heads (long (or (:num-kv-heads cfg) 1))
-                      q-dim (* num-heads head-dim)
-                      kv-dim (* num-kv-heads head-dim)
-                      intermediate-dim (long (or (:intermediate-dim cfg) 6144))]
-                  [{:layer i :tensor "q_proj" :shape [hidden-dim q-dim]}
-                   {:layer i :tensor "k_proj" :shape [hidden-dim kv-dim]}
-                   {:layer i :tensor "v_proj" :shape [hidden-dim kv-dim]}
-                   {:layer i :tensor "o_proj" :shape [q-dim hidden-dim]}
-                   {:layer i :tensor "gate_proj" :shape [hidden-dim intermediate-dim]}
-                   {:layer i :tensor "up_proj" :shape [hidden-dim intermediate-dim]}
-                   {:layer i :tensor "down_proj" :shape [intermediate-dim hidden-dim]}]))
-              (range num-layers)))
+         linear-layers
+         (vec (mapcat
+               (fn [i]
+                 (let [cfg (if (seq layer-configs) (nth layer-configs i nil) nil)
+                       is-global? (if cfg (:is-global? cfg) (boolean (contains? #{2 5 8 11 14 17 20 23 26 29 32} i)))
+                       head-dim (long (or (:head-dim cfg) (if is-global? 512 256)))
+                       num-heads (long (or (:num-attention-heads cfg) 8))
+                       num-kv-heads (long (or (:num-kv-heads cfg) 1))
+                       q-dim (* num-heads head-dim)
+                       kv-dim (* num-kv-heads head-dim)
+                       intermediate-dim (long (or (:intermediate-dim cfg) 6144))]
+                   [{:layer i :tensor "q_proj" :shape [hidden-dim q-dim]}
+                    {:layer i :tensor "k_proj" :shape [hidden-dim kv-dim]}
+                    {:layer i :tensor "v_proj" :shape [hidden-dim kv-dim]}
+                    {:layer i :tensor "o_proj" :shape [q-dim hidden-dim]}
+                    {:layer i :tensor "gate_proj" :shape [hidden-dim intermediate-dim]}
+                    {:layer i :tensor "up_proj" :shape [hidden-dim intermediate-dim]}
+                    {:layer i :tensor "down_proj" :shape [intermediate-dim hidden-dim]}]))
+               (range num-layers)))
 
-        total-linear-params (reduce + 0 (map (fn [{:keys [shape]}] (* (long (first shape)) (long (second shape)))) linear-layers))
-        uncompressed-fp16-bytes (* total-linear-params 2)
-        ternary-packed-bytes (quot total-linear-params 4)
-        scale-factors-count (reduce + 0 (map (fn [{:keys [shape]}] (long (first shape))) linear-layers))
-        scale-bytes (* scale-factors-count 4) ;; FP32 scale per row
-        total-ternary-bytes (+ ternary-packed-bytes scale-bytes)
+         total-linear-params (reduce + 0 (map (fn [{:keys [shape]}] (* (long (first shape)) (long (second shape)))) linear-layers))
+         uncompressed-fp16-bytes (* total-linear-params 2)
+         packed-bytes (if is-int4? (quot total-linear-params 2) (quot total-linear-params 4))
+         scale-factors-count (if is-int4?
+                               (quot total-linear-params 128)
+                               (reduce + 0 (map (fn [{:keys [shape]}] (long (first shape))) linear-layers)))
+         scale-bytes (if is-int4? (* scale-factors-count 2) (* scale-factors-count 4))
+         total-quant-bytes (+ packed-bytes scale-bytes)
 
-        effective-bytes-per-param (/ (double total-ternary-bytes) (double total-linear-params))
-        effective-bits-per-param (* effective-bytes-per-param 8.0)
-        compression-ratio (/ (double uncompressed-fp16-bytes) (double total-ternary-bytes))]
+         effective-bytes-per-param (/ (double total-quant-bytes) (double total-linear-params))
+         effective-bits-per-param (* effective-bytes-per-param 8.0)
+         compression-ratio (/ (double uncompressed-fp16-bytes) (double total-quant-bytes))]
 
-    {:num-layers num-layers
-     :total-linear-tensors (count linear-layers)
-     :total-linear-params total-linear-params
-     :uncompressed-fp16-bytes uncompressed-fp16-bytes
-     :uncompressed-fp16-gb (/ (double uncompressed-fp16-bytes) 1e9)
-     :ternary-packed-bytes ternary-packed-bytes
-     :scale-factors-count scale-factors-count
-     :scale-bytes scale-bytes
-     :total-ternary-bytes total-ternary-bytes
-     :total-ternary-gb (/ (double total-ternary-bytes) 1e9)
-     :effective-bytes-per-param effective-bytes-per-param
-     :effective-bits-per-param effective-bits-per-param
-     :compression-ratio compression-ratio
-     :gate1-pass? (and (<= effective-bytes-per-param 0.255)
-                       (>= compression-ratio 7.5))}))
+     {:num-layers num-layers
+      :precision precision
+      :total-linear-tensors (count linear-layers)
+      :total-linear-params total-linear-params
+      :uncompressed-fp16-bytes uncompressed-fp16-bytes
+      :uncompressed-fp16-gb (/ (double uncompressed-fp16-bytes) 1e9)
+      :quant-packed-bytes packed-bytes
+      :ternary-packed-bytes packed-bytes
+      :scale-factors-count scale-factors-count
+      :scale-bytes scale-bytes
+      :total-quant-bytes total-quant-bytes
+      :total-ternary-bytes total-quant-bytes
+      :total-quant-gb (/ (double total-quant-bytes) 1e9)
+      :total-ternary-gb (/ (double total-quant-bytes) 1e9)
+      :effective-bytes-per-param effective-bytes-per-param
+      :effective-bits-per-param effective-bits-per-param
+      :compression-ratio compression-ratio
+      :gate1-pass? (if is-int4?
+                     (and (<= effective-bytes-per-param 0.55)
+                          (>= compression-ratio 3.5))
+                     (and (<= effective-bytes-per-param 0.255)
+                          (>= compression-ratio 7.5)))})))
 
 ;; ==============================================================================
 ;; 3. Gate 2: Calibration & Packing Latency Measurement
@@ -106,55 +119,58 @@
 
 (defn measure-calibration-latency
   "Measures the exact wall-clock latency to quantize all model linear layers
-   into 2-bit packed ternary weights with AbsMean scale vectors."
-  [weights-mmap config]
-  (let [t0 (System/nanoTime)
-        accounting (compute-model-layer-accounting config)
-        num-layers (long (or (:num-layers config) 35))
-        hidden-dim (long (or (:hidden-dim config) 1536))
-        layer-configs (:layer-configs config)
-        total-quantized-params (atom 0)
+   into packed weights with scale vectors."
+  ([weights-mmap config] (measure-calibration-latency weights-mmap config :ternary))
+  ([weights-mmap config precision]
+   (let [t0 (System/nanoTime)
+         _accounting (compute-model-layer-accounting config precision)
+         num-layers (long (or (:num-layers config) 35))
+         hidden-dim (long (or (:hidden-dim config) 1536))
+         layer-configs (:layer-configs config)
+         total-quantized-params (atom 0)
 
-        _ (doseq [i (range num-layers)]
-            (let [cfg (if (seq layer-configs) (nth layer-configs i nil) nil)
-                  is-global? (if cfg (:is-global? cfg) (boolean (contains? #{2 5 8 11 14 17 20 23 26 29 32} i)))
-                  head-dim (long (or (:head-dim cfg) (if is-global? 512 256)))
-                  num-heads (long (or (:num-attention-heads cfg) 8))
-                  num-kv-heads (long (or (:num-kv-heads cfg) 1))
-                  q-dim (* num-heads head-dim)
-                  kv-dim (* num-kv-heads head-dim)
-                  intermediate-dim (long (or (:intermediate-dim cfg) 6144))
-                  projs [["q_proj" [hidden-dim q-dim]]
-                         ["k_proj" [hidden-dim kv-dim]]
-                         ["v_proj" [hidden-dim kv-dim]]
-                         ["o_proj" [q-dim hidden-dim]]
-                         ["gate_proj" [hidden-dim intermediate-dim]]
-                         ["up_proj" [hidden-dim intermediate-dim]]
-                         ["down_proj" [intermediate-dim hidden-dim]]]]
-              (doseq [[proj-name [rows cols]] projs]
-                (let [candidates [(str "model.language_model.layers." i ".self_attn." proj-name ".weight")
-                                  (str "model.language_model.layers." i ".mlp." proj-name ".weight")
-                                  (str "model.layers." i ".self_attn." proj-name ".weight")
-                                  (str "model.layers." i ".mlp." proj-name ".weight")]
-                      key-name (first (filter #(or (contains? weights-mmap %)
-                                                   (contains? (:header weights-mmap) %))
-                                              candidates))
-                      dtype (get-in (:header weights-mmap) [key-name "dtype"])
-                      raw-arr (if (and key-name (not= dtype "I8") (not= dtype "INT8"))
-                                (st/get-tensor-floats weights-mmap key-name)
-                                (float-array (* rows cols) 0.01))]
-                  (ternary/quantize-weights-per-row-ternary raw-arr rows cols {:as :f32})
-                  (swap! total-quantized-params + (* rows cols))))))
-        t1 (System/nanoTime)
-        total-calib-ms (/ (- t1 t0) 1e6)
-        total-calib-sec (/ total-calib-ms 1000.0)
-        params-per-sec (if (pos? total-calib-sec) (/ (double @total-quantized-params) total-calib-sec) 0.0)]
-    {:total-calibration-ms total-calib-ms
-     :total-calibration-seconds total-calib-sec
-     :quantized-params @total-quantized-params
-     :quantization-throughput-params-per-sec params-per-sec
-     :target-limit-seconds 1800.0 ;; 30 minutes
-     :gate2-pass? (< total-calib-sec 1800.0)}))
+         _ (doseq [i (range num-layers)]
+             (let [cfg (if (seq layer-configs) (nth layer-configs i nil) nil)
+                   is-global? (if cfg (:is-global? cfg) (boolean (contains? #{2 5 8 11 14 17 20 23 26 29 32} i)))
+                   head-dim (long (or (:head-dim cfg) (if is-global? 512 256)))
+                   num-heads (long (or (:num-attention-heads cfg) 8))
+                   num-kv-heads (long (or (:num-kv-heads cfg) 1))
+                   q-dim (* num-heads head-dim)
+                   kv-dim (* num-kv-heads head-dim)
+                   intermediate-dim (long (or (:intermediate-dim cfg) 6144))
+                   projs [["q_proj" [hidden-dim q-dim]]
+                          ["k_proj" [hidden-dim kv-dim]]
+                          ["v_proj" [hidden-dim kv-dim]]
+                          ["o_proj" [q-dim hidden-dim]]
+                          ["gate_proj" [hidden-dim intermediate-dim]]
+                          ["up_proj" [hidden-dim intermediate-dim]]
+                          ["down_proj" [intermediate-dim hidden-dim]]]]
+               (doseq [[proj-name [rows cols]] projs]
+                 (let [candidates [(str "model.language_model.layers." i ".self_attn." proj-name ".weight")
+                                   (str "model.language_model.layers." i ".mlp." proj-name ".weight")
+                                   (str "model.layers." i ".self_attn." proj-name ".weight")
+                                   (str "model.layers." i ".mlp." proj-name ".weight")]
+                       key-name (first (filter #(or (contains? weights-mmap %)
+                                                    (contains? (:header weights-mmap) %))
+                                               candidates))
+                       dtype (get-in (:header weights-mmap) [key-name "dtype"])
+                       raw-arr (if (and key-name (not= dtype "I8") (not= dtype "INT8"))
+                                 (st/get-tensor-floats weights-mmap key-name)
+                                 (float-array (* rows cols) 0.01))]
+                   (if (= precision :int4)
+                     (exl3/quantize-weights-per-row-int4 raw-arr rows cols {:as :bf16 :group-size 128})
+                     (ternary/quantize-weights-per-row-ternary raw-arr rows cols {:as :f32}))
+                   (swap! total-quantized-params + (* rows cols))))))
+         t1 (System/nanoTime)
+         total-calib-ms (/ (- t1 t0) 1e6)
+         total-calib-sec (/ total-calib-ms 1000.0)
+         params-per-sec (if (pos? total-calib-sec) (/ (double @total-quantized-params) total-calib-sec) 0.0)]
+     {:total-calibration-ms total-calib-ms
+      :total-calibration-seconds total-calib-sec
+      :quantized-params @total-quantized-params
+      :quantization-throughput-params-per-sec params-per-sec
+      :target-limit-seconds 1800.0 ;; 30 minutes
+      :gate2-pass? (< total-calib-sec 1800.0)})))
 
 ;; ==============================================================================
 ;; 4. Gate 3: Intelligence & Capability Evaluation
@@ -183,7 +199,10 @@
       (println (format "Task: %s" task))
       (println (format "Prompt: \"%s\"" prompt))
       (let [t0 (System/nanoTime)
-            gen-opts (assoc (:opts session) :max-new-tokens (or max-tokens 128) :quiet true)
+            gen-opts (assoc (:opts session)
+                            :max-new-tokens (or max-tokens 128)
+                            :temperature 0.0
+                            :quiet true)
             session-with-opts (assoc session :opts gen-opts)
             all-tokens (gemma4-inf/generate-text session-with-opts prompt)
             full-text (tok/decode tokenizer all-tokens)
@@ -230,22 +249,27 @@
 ;; ==============================================================================
 
 (defn render-summary-report
-  "Generates an aligned ASCII table summarizing Ghodsi's 4 RSI Gates for CAT-Q."
+  "Generates an aligned ASCII table summarizing Ghodsi's 4 RSI Gates for CAT-Q or INT4."
   [experiment-report]
-  (let [{:keys [gate1 gate2 gate3 gate4 model-name backend]} experiment-report]
+  (let [{:keys [gate1 gate2 gate3 gate4 model-name backend]} experiment-report
+        precision (or (:precision gate1) :ternary)
+        prec-name (if (= precision :int4) "INT4 Quantization" "CAT-Q (1.58-Bit Ternary Quantization)")
+        packed-label (if (= precision :int4) "INT4 Packed Footprint" "CAT-Q 2-Bit Ternary Footprint")
+        target-bytes (if (= precision :int4) "<= 0.550" "<= 0.255")
+        target-ratio (if (= precision :int4) ">= 3.5x" ">= 7.5x")]
     (str
      "\n"
      "====================================================================================================\n"
-     "  CAT-Q (1.58-Bit Ternary Quantization) Stage 2 RSI Gate Verification Report\n"
+     (format "  %s Stage 2 RSI Gate Verification Report\n" prec-name)
      "  Model: " model-name " | Backend: " (name backend) "\n"
      "====================================================================================================\n"
      (format "  GATE 1 (Resource Efficiency):\n")
      (format "    • Total Linear Parameters        : %,d\n" (:total-linear-params gate1))
      (format "    • Uncompressed FP16 Footprint    : %8.2f MB (%6.2f GB)\n" (/ (:uncompressed-fp16-bytes gate1) 1e6) (:uncompressed-fp16-gb gate1))
-     (format "    • CAT-Q 2-Bit Ternary Footprint   : %8.2f MB (%6.2f GB)\n" (/ (:total-ternary-bytes gate1) 1e6) (:total-ternary-gb gate1))
-     (format "    • Effective Bytes / Parameter    : %8.4f bytes/param (Target: <= 0.255)\n" (:effective-bytes-per-param gate1))
+     (format "    • %-30s : %8.2f MB (%6.2f GB)\n" packed-label (/ (or (:total-quant-bytes gate1) (:total-ternary-bytes gate1)) 1e6) (or (:total-quant-gb gate1) (:total-ternary-gb gate1)))
+     (format "    • Effective Bytes / Parameter    : %8.4f bytes/param (Target: %s)\n" (:effective-bytes-per-param gate1) target-bytes)
      (format "    • Effective Bits / Parameter     : %8.4f bits/param\n" (:effective-bits-per-param gate1))
-     (format "    • VRAM Storage Compression Ratio : %8.2fx (Target: >= 7.5x)\n" (:compression-ratio gate1))
+     (format "    • VRAM Storage Compression Ratio : %8.2fx (Target: %s)\n" (:compression-ratio gate1) target-ratio)
      (format "    • Decoding Throughput            : %8.2f tok/s\n" (:mean-throughput-tok-s gate3))
      (format "    • Gate 1 Status                  : %s\n" (if (:gate1-pass? gate1) "PASSED [VERIFIED]" "FAILED"))
      "----------------------------------------------------------------------------------------------------\n"
@@ -273,18 +297,24 @@
      "====================================================================================================\n")))
 
 (defn generate-summary-csv
-  "Generates CSV formatted summary lines comparing FP16 baseline to CAT-Q."
+  "Generates CSV formatted summary lines comparing FP16 baseline to quantized model."
   [experiment-report]
-  (let [{:keys [gate1 gate2 gate3]} experiment-report]
-    (str "metric,fp16_baseline,cat_q_ternary,reduction_ratio,gate_target,verdict\n"
-         (format "storage_bytes_per_param,2.0000,%.4f,%.2fx,<=0.255,%s\n"
+  (let [{:keys [gate1 gate2 gate3]} experiment-report
+        precision (or (:precision gate1) :ternary)
+        prec-col (if (= precision :int4) "int4" "cat_q_ternary")
+        target-bytes (if (= precision :int4) "<=0.550" "<=0.255")
+        target-gb (if (= precision :int4) "<=2.0GB" "<=1.0GB")]
+    (str (format "metric,fp16_baseline,%s,reduction_ratio,gate_target,verdict\n" prec-col)
+         (format "storage_bytes_per_param,2.0000,%.4f,%.2fx,%s,%s\n"
                  (:effective-bytes-per-param gate1)
                  (:compression-ratio gate1)
+                 target-bytes
                  (if (:gate1-pass? gate1) "PASS" "FAIL"))
-         (format "total_storage_gb,%.4f,%.4f,%.2fx,<=1.0GB,%s\n"
+         (format "total_storage_gb,%.4f,%.4f,%.2fx,%s,%s\n"
                  (:uncompressed-fp16-gb gate1)
-                 (:total-ternary-gb gate1)
+                 (or (:total-quant-gb gate1) (:total-ternary-gb gate1))
                  (:compression-ratio gate1)
+                 target-gb
                  (if (:gate1-pass? gate1) "PASS" "FAIL"))
          (format "calibration_time_sec,0.0,%.2f,N/A,<1800s,%s\n"
                  (:total-calibration-seconds gate2)
@@ -296,23 +326,28 @@
                  (:mean-throughput-tok-s gate3)))))
 
 (defn run-cat-q-experiment!
-  "Main entry point for executing Stage 2 CAT-Q verification on Gemma 4 E2B."
+  "Main entry point for executing Stage 2 CAT-Q / INT4 verification on Gemma 4 E2B."
   [opts]
   (let [t-start (System/nanoTime)
         backend (or (:backend opts) :rocm)
         model-path (or (:model opts) (:model-dir opts) ".models/gemma-4-E2B-it")
+        precision (or (:precision opts)
+                      (if (str/includes? model-path "int4") :int4 :ternary))
         out-dir (or (:out-dir opts) "proposals/gate1_compression/cat_q_ternary")
-        _ (println (format "\nInitializing PJRT Backend [%s] for CAT-Q Stage 2 Evaluation..." (name backend)))
-        session-opts (assoc opts :backend backend :model-dir model-path :precision :ternary)
+        _ (println (format "\nInitializing PJRT Backend [%s] for %s Stage 2 Evaluation..."
+                           (name backend)
+                           (if (= precision :int4) "INT4" "CAT-Q")))
+        session-opts (assoc opts :backend backend :model-dir model-path :precision precision)
         session (gemma4-inf/init-agent-vram-session session-opts)
         config (:config session)
         weights-mmap (:weights-mmap session)
 
         _ (println "\n[1/4] Accounting Model Parameters & Gate 1 Storage Compression...")
-        gate1-metrics (compute-model-layer-accounting config)
+        gate1-metrics (compute-model-layer-accounting config precision)
 
-        _ (println "\n[2/4] Measuring Gate 2 Calibration & 2-Bit Ternary Packing Latency...")
-        gate2-metrics (measure-calibration-latency weights-mmap config)
+        _ (println (format "\n[2/4] Measuring Gate 2 Calibration & %s Packing Latency..."
+                           (if (= precision :int4) "INT4" "2-Bit Ternary")))
+        gate2-metrics (measure-calibration-latency weights-mmap config precision)
 
         _ (println "\n[3/4] Evaluating Gate 3 Intelligence & Retention Floor...")
         gate3-metrics (run-gate3-evaluations! session BENCHMARK-PROMPTS)
@@ -323,9 +358,10 @@
                        :human-intervention-hours 0.0
                        :autonomous-ratio-pct 100.0}
 
-        report {:meta {:experiment "cat-q-ternary"
+        report {:meta {:experiment (if (= precision :int4) "int4" "cat-q-ternary")
                        :gate "gate1_compression"
                        :generation 1
+                       :precision precision
                        :model-name (or (:model-name config) "gemma-4-E2B-it")
                        :backend backend
                        :status (if (and (:gate1-pass? gate1-metrics)
@@ -339,10 +375,10 @@
                 :gate3 gate3-metrics
                 :gate4 gate4-metrics}
 
-        summary-report (render-summary-report (assoc report :model-name "gemma-4-E2B-it" :backend backend))
+        summary-report (render-summary-report (assoc report :model-name (or (:model-name config) "gemma-4-E2B-it") :backend backend))
         summary-csv (generate-summary-csv report)
-        results-file (io/file out-dir "results.edn")
-        csv-file (io/file out-dir "summary.csv")]
+        results-file (io/file out-dir (if (= precision :int4) "results_int4.edn" "results.edn"))
+        csv-file (io/file out-dir (if (= precision :int4) "summary_int4.csv" "summary.csv"))]
 
     (println summary-report)
     (.mkdirs (io/file out-dir))
