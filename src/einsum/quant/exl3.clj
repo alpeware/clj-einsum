@@ -470,87 +470,104 @@
   ([w-arr rows cols]
    (quantize-weights-per-row-int4 w-arr rows cols {}))
   ([w-arr rows cols opts]
-   (let [half-cols (quot cols 2)
-         total-packed (* rows half-cols)
+   (let [rows (int rows)
+         cols (int cols)
+         half-cols (int (quot cols 2))
+         total-elem (* (long rows) (long cols))
+         total-packed (* (long rows) (long half-cols))
          data-bytes (byte-array total-packed)
          target-scale-format (get opts :as :f32)
          raw-group-size (get opts :group-size)
          group-size (when (and raw-group-size (pos? (long raw-group-size)) (zero? (mod cols (long raw-group-size))))
-                      (long raw-group-size))
-         num-groups (if group-size (quot cols group-size) 1)
-         total-scales (* rows num-groups)
+                      (int raw-group-size))
+         num-groups (int (if group-size (quot cols group-size) 1))
+         total-scales (* (long rows) (long num-groups))
          scales-floats (when (= target-scale-format :f32) (float-array total-scales))
          scales-shorts (when (= target-scale-format :bf16) (short-array total-scales))
-         is-floats? (instance? (Class/forName "[F") w-arr)
-         is-doubles? (instance? (Class/forName "[D") w-arr)
-         is-shorts? (instance? (Class/forName "[S") w-arr)
-         f-arr (when is-floats? ^floats w-arr)
-         d-arr (when is-doubles? ^doubles w-arr)
-         s-arr (when is-shorts? ^shorts w-arr)
-         get-val (fn ^double [^long idx]
-                   (cond
-                     is-floats? (double (aget f-arr idx))
-                     is-doubles? (aget d-arr idx)
-                     is-shorts? (let [s (int (aget s-arr idx))
-                                      bits (unchecked-int (bit-shift-left (long (bit-and s 0xffff)) 16))]
-                                  (double (Float/intBitsToFloat bits)))
-                     :else (double (nth w-arr idx))))]
+         f-arr ^floats (cond
+                         (instance? (Class/forName "[F") w-arr)
+                         w-arr
+
+                         (instance? (Class/forName "[S") w-arr)
+                         (let [s-arr ^shorts w-arr
+                               fa (float-array total-elem)]
+                           (dotimes [i total-elem]
+                             (let [s (int (aget s-arr i))
+                                   bits (unchecked-int (bit-shift-left (long (bit-and s 0xffff)) 16))]
+                               (aset-float fa i (Float/intBitsToFloat bits))))
+                           fa)
+
+                         (instance? (Class/forName "[D") w-arr)
+                         (let [d-arr ^doubles w-arr
+                               fa (float-array total-elem)]
+                           (dotimes [i total-elem]
+                             (aset-float fa i (float (aget d-arr i))))
+                           fa)
+
+                         :else
+                         (float-array (map float w-arr)))]
      (if group-size
        ;; Block-wise INT4 quantization with per-block optimal MSE scale search
-       (let [half-g (quot group-size 2)]
+       (let [half-g (int (quot group-size 2))
+             group-size (int group-size)]
          (-> (IntStream/range 0 rows)
              (.parallel)
              (.forEach
               (reify IntConsumer
                 (accept [_ r]
-                  (let [r-base (* r cols)
-                        out-base (* r half-cols)
-                        s-base (* r num-groups)]
+                  (let [r (int r)
+                        ^floats f-arr f-arr
+                        ^bytes data-bytes data-bytes
+                        ^shorts scales-shorts scales-shorts
+                        ^floats scales-floats scales-floats
+                        r-base (int (* r cols))
+                        out-base (int (* r half-cols))
+                        s-base (int (* r num-groups))]
                     (dotimes [g num-groups]
-                      (let [g-base (+ r-base (* g group-size))
-                            g-out-base (+ out-base (* g half-g))
+                      (let [g (int g)
+                            g-base (int (+ r-base (* g group-size)))
+                            g-out-base (int (+ out-base (* g half-g)))
                             ;; 1. Max absolute value in block
-                            max-abs (loop [i 0 m 0.0]
-                                      (if (>= i group-size)
-                                        m
-                                        (let [v (Math/abs (get-val (+ g-base i)))]
-                                          (recur (inc i) (max m v)))))
+                            max-abs (double (loop [i (int 0) m 0.0]
+                                              (if (< i group-size)
+                                                (let [v (Math/abs (double (aget f-arr (+ g-base i))))]
+                                                  (recur (unchecked-inc i) (Math/max m v)))
+                                                m)))
                             base-scale (/ max-abs 7.0)
                             ;; 2. 10-step optimal scale search (minimizing MSE against outliers)
                             opt-mult (if (zero? max-abs)
                                        1.0
-                                       (loop [step 0 best-m 1.0 best-err Double/MAX_VALUE]
-                                         (if (>= step 10)
-                                           best-m
-                                           (let [m (+ 0.65 (* step 0.035))
+                                       (loop [step (int 0) best-m 1.0 best-err Double/MAX_VALUE]
+                                         (if (< step 10)
+                                           (let [m (+ 0.65 (* (double step) 0.035))
                                                  cand-s (* base-scale m)
                                                  inv-s (/ 1.0 cand-s)
-                                                 err (loop [i 0 acc 0.0]
-                                                       (if (>= i group-size)
-                                                         acc
-                                                         (let [v (get-val (+ g-base i))
-                                                               q (+ (max -7 (min 7 (Math/round (* v inv-s)))) 8)
-                                                               rec (* (double (- q 8)) cand-s)
-                                                               diff (- v rec)]
-                                                           (recur (inc i) (+ acc (* diff diff))))))]
+                                                 err (double (loop [i (int 0) acc 0.0]
+                                                               (if (< i group-size)
+                                                                 (let [v (double (aget f-arr (+ g-base i)))
+                                                                       q (double (+ (Math/max -7 (Math/min 7 (Math/round (* v inv-s)))) 8))
+                                                                       diff (- v (* (- q 8.0) cand-s))]
+                                                                   (recur (unchecked-inc i) (+ acc (* diff diff))))
+                                                                 acc)))]
                                              (if (< err best-err)
-                                               (recur (inc step) m err)
-                                               (recur (inc step) best-m best-err))))))
+                                               (recur (unchecked-inc step) m err)
+                                               (recur (unchecked-inc step) best-m best-err)))
+                                           best-m)))
                             scale (if (zero? max-abs) (float 1.0) (float (* base-scale opt-mult)))
                             inv-scale (/ 1.0 (double scale))]
                         (if (= target-scale-format :bf16)
-                          (aset-short scales-shorts (+ s-base g) (float->bf16-short scale))
+                          (aset-short scales-shorts (+ s-base g) (float->bf16-short (double scale)))
                           (aset-float scales-floats (+ s-base g) scale))
                         ;; 3. Pack 4-bit pairs
                         (dotimes [hc half-g]
-                          (let [idx0 (+ g-base (* hc 2))
-                                idx1 (inc idx0)
-                                v0 (get-val idx0)
-                                v1 (get-val idx1)
-                                q0 (+ (max -7 (min 7 (Math/round (* v0 inv-scale)))) 8)
-                                q1 (+ (max -7 (min 7 (Math/round (* v1 inv-scale)))) 8)
-                                packed (unchecked-byte (bit-or (bit-and (int q0) 0x0F)
-                                                               (bit-shift-left (bit-and (int q1) 0x0F) 4)))]
+                          (let [hc (int hc)
+                                idx0 (+ g-base (* hc 2))
+                                v0 (double (aget f-arr idx0))
+                                v1 (double (aget f-arr (unchecked-inc idx0)))
+                                q0 (int (+ (Math/max -7 (Math/min 7 (Math/round (* v0 inv-scale)))) 8))
+                                q1 (int (+ (Math/max -7 (Math/min 7 (Math/round (* v1 inv-scale)))) 8))
+                                packed (unchecked-byte (bit-or (bit-and q0 0x0F)
+                                                               (bit-shift-left (bit-and q1 0x0F) 4)))]
                             (aset-byte data-bytes (+ g-out-base hc) packed)))))))))))
        ;; Legacy per-row INT4 quantization
        (-> (IntStream/range 0 rows)
@@ -558,27 +575,32 @@
            (.forEach
             (reify IntConsumer
               (accept [_ r]
-                (let [r-base (* r cols)
-                      out-base (* r half-cols)
-                      max-abs (loop [c 0 m 0.0]
-                                (if (>= c cols)
-                                  m
-                                  (let [v (Math/abs (get-val (+ r-base c)))]
-                                    (recur (inc c) (max m v)))))
+                (let [r (int r)
+                      ^floats f-arr f-arr
+                      ^bytes data-bytes data-bytes
+                      ^shorts scales-shorts scales-shorts
+                      ^floats scales-floats scales-floats
+                      r-base (int (* r cols))
+                      out-base (int (* r half-cols))
+                      max-abs (double (loop [c (int 0) m 0.0]
+                                        (if (< c cols)
+                                          (let [v (Math/abs (double (aget f-arr (+ r-base c))))]
+                                            (recur (unchecked-inc c) (Math/max m v)))
+                                          m)))
                       scale (if (zero? max-abs) (float 1.0) (float (/ max-abs 7.0)))
                       inv-scale (/ 1.0 (double scale))]
                   (if (= target-scale-format :bf16)
-                    (aset-short scales-shorts r (float->bf16-short scale))
+                    (aset-short scales-shorts r (float->bf16-short (double scale)))
                     (aset-float scales-floats r scale))
                   (dotimes [hc half-cols]
-                    (let [idx0 (+ r-base (* hc 2))
-                          idx1 (inc idx0)
-                          v0 (get-val idx0)
-                          v1 (get-val idx1)
-                          q0 (+ (max -7 (min 7 (Math/round (* v0 inv-scale)))) 8)
-                          q1 (+ (max -7 (min 7 (Math/round (* v1 inv-scale)))) 8)
-                          packed (unchecked-byte (bit-or (bit-and (int q0) 0x0F)
-                                                         (bit-shift-left (bit-and (int q1) 0x0F) 4)))]
+                    (let [hc (int hc)
+                          idx0 (+ r-base (* hc 2))
+                          v0 (double (aget f-arr idx0))
+                          v1 (double (aget f-arr (unchecked-inc idx0)))
+                          q0 (int (+ (Math/max -7 (Math/min 7 (Math/round (* v0 inv-scale)))) 8))
+                          q1 (int (+ (Math/max -7 (Math/min 7 (Math/round (* v1 inv-scale)))) 8))
+                          packed (unchecked-byte (bit-or (bit-and q0 0x0F)
+                                                         (bit-shift-left (bit-and q1 0x0F) 4)))]
                       (aset-byte data-bytes (+ out-base hc) packed)))))))))
      {:data data-bytes
       :scales (if (= target-scale-format :bf16) scales-shorts scales-floats)

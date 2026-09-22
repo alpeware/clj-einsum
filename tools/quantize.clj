@@ -255,8 +255,8 @@
                 (if (:quantize? spec)
                   (let [src-name (:source-name spec)
                         [rows cols] (get-in raw-header [src-name "shape"])
-                        raw-shorts (st/get-tensor-bf16-shorts mapped-weights src-name)
-                        {:keys [data scales]} (quantize-projection-weight raw-shorts rows cols selected-precision {:group-size group-size})
+                        raw-floats (st/get-tensor-floats mapped-weights src-name)
+                        {:keys [data scales]} (quantize-projection-weight raw-floats rows cols selected-precision {:group-size group-size})
                         ^bytes data-bytes data
                         ^shorts scale-shorts scales
                         num-scales (alength scale-shorts)]
