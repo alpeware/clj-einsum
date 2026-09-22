@@ -5,6 +5,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
+            [einsum.models.gemma4 :as gemma4]
             [einsum.quant.catq :as catq]))
 
 ;; ==============================================================================
@@ -116,3 +117,81 @@
       ;; Calibrated projection MSE must be strictly lower than naive ternary
       (is (< calib-mse base-mse)
           (format "Calibrated MSE (%.6f) should be lower than baseline (%.6f)" calib-mse base-mse)))))
+
+;; ==============================================================================
+;; 5. Skip-Layers Mixed Precision Invariant
+;; ==============================================================================
+
+(deftest test-skip-layers-invars
+  (testing "Gemma 4 model invars preserve unquantized BF16 tensors for skipped layers"
+    (let [cfg (merge (gemma4/gemma4-config :e2b)
+                     {:is-ternary true
+                      :group-size 128
+                      :skip-layers #{10 11 12 13 14}})
+          invars (gemma4/build-tensor-logic-invars cfg 64)
+          invar-names (into #{} (map first invars))]
+      ;; Layer 0 (not skipped) must have packed ternary weight and .scales
+      (is (contains? invar-names :q_w_0))
+      (is (contains? invar-names :q_scale_0))
+      ;; Layer 10 (skipped) must have full BF16 weight and NO .scales
+      (is (contains? invar-names :q_w_10))
+      (is (not (contains? invar-names :q_scale_10)))
+      (is (not (contains? invar-names :down_scale_10)))
+      ;; Layer 15 (not skipped) must have scale
+      (is (contains? invar-names :q_scale_15)))))
+
+;; ==============================================================================
+;; 6. Hessian-Conditioned Lloyd-Max Quantization (OBS) Invariants
+;; ==============================================================================
+
+(defspec prop-catq-quantize-matrix-obs-invariants
+  30
+  (prop/for-all [rows (gen/choose 2 6)
+                 num-groups (gen/choose 1 3)
+                 num-tokens (gen/choose 4 16)]
+                (let [cols (* num-groups 128)
+                      group-size 128
+                      rnd (java.util.Random. 42)
+                      w (float-array (repeatedly (* rows cols) #(.nextGaussian rnd)))
+                      x (float-array (repeatedly (* num-tokens cols) #(.nextGaussian rnd)))
+                      res (catq/quantize-matrix-obs x w num-tokens rows cols group-size)]
+                  (and (= [rows (quot cols 4)] (:shape res))
+                       (= [rows num-groups] (:scale-shape res))
+                       (= (* rows (quot cols 4)) (alength ^bytes (:data res)))
+                       (= (* rows num-groups) (alength ^shorts (:scales res)))
+                       (= (* rows cols) (alength ^floats (:w-deq res)))))))
+
+(deftest test-catq-obs-high-snr
+  (testing "Parallel Lloyd-Max H-conditioned quantization achieves >= 4.5 dB SNR"
+    (let [rows 8
+          cols 256
+          group-size 128
+          num-tokens 32
+          rnd (java.util.Random. 42)
+          w (float-array (repeatedly (* rows cols) #(.nextGaussian rnd)))
+          x (float-array (repeatedly (* num-tokens cols) #(.nextGaussian rnd)))
+          res (catq/quantize-matrix-obs x w num-tokens rows cols group-size)
+          ^floats deq (:w-deq res)
+          w-norm-sq (areduce w i s 0.0 (+ s (* (aget w i) (aget w i))))
+          deq-norm-sq (areduce deq i s 0.0 (+ s (* (aget deq i) (aget deq i))))
+          dot (areduce w i s 0.0 (+ s (* (aget w i) (aget deq i))))
+          diff-sq (areduce w i s 0.0 (let [d (- (aget w i) (aget deq i))] (+ s (* d d))))
+          snr (* 10.0 (Math/log10 (/ w-norm-sq diff-sq)))
+          cos-sim (/ dot (Math/sqrt (* w-norm-sq deq-norm-sq)))]
+      (is (>= snr 4.5) (format "SNR %.2f dB must be >= 4.5 dB" snr))
+      (is (>= cos-sim 0.80) (format "CosSim %.4f must be >= 0.80" cos-sim)))))
+
+(deftest test-catq-obs-roundtrip
+  (testing "Dequantizing data and scales matches w-deq from quantize-matrix-obs"
+    (let [rows 4
+          cols 256
+          group-size 128
+          num-tokens 16
+          rnd (java.util.Random. 99)
+          w (float-array (repeatedly (* rows cols) #(.nextGaussian rnd)))
+          x (float-array (repeatedly (* num-tokens cols) #(.nextGaussian rnd)))
+          res (catq/quantize-matrix-obs x w num-tokens rows cols group-size)
+          ^floats deq-reconstructed (catq/dequantize-matrix-catq (:data res) (:scales res) rows cols group-size)
+          ^floats deq-direct (:w-deq res)]
+      (dotimes [i (* rows cols)]
+        (is (< (Math/abs (- (aget deq-reconstructed i) (aget deq-direct i))) 1e-3))))))

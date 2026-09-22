@@ -66,6 +66,7 @@
         backend (keyword (or (:backend opts) :rocm))
         max-seq-len (long (or (:max-seq-len opts) 128))
         group-size (long (or (:group-size opts) 128))
+        skip-layers (set (or (:skip-layers opts) #{}))
         quiet? (boolean (:quiet opts))
 
         t0 (System/nanoTime)
@@ -144,27 +145,10 @@
 
     ;; 4. Sequential Layer-by-Layer Calibration Loop
     (dotimes [L num-layers]
-      (let [t-layer-start (System/nanoTime)
-            ;; Forward pass across all calibration prompts with weights quantized up to L-1
-            prompt-acts
-            (mapv (fn [{:keys [buf len]}]
-                    (let [outs (pjrt/execute-executable ctx (or (:handle compiled) compiled) (into [buf] @device-weights) (count targets))
-                          get-act (fn [target-key]
-                                    (let [idx (.indexOf ^java.util.List targets target-key)
-                                          sz (long (get target-sizes target-key (* max-seq-len hidden-dim)))]
-                                      (pjrt/buffer-to-host-buffer ctx (nth outs idx) sz :bf16)))]
-                      {:len (long len)
-                       :x-norm1 (get-act (keyword (str "x_norm1_" L)))
-                       :ctx-flat (get-act (keyword (str "ctx_flat_" L)))
-                       :x-norm2 (get-act (keyword (str "x_norm2_" L)))
-                       :mlp-act (get-act (keyword (str "mlp_act_" L)))}))
-                  calib-inputs)
-
-            layer-cfg (nth (:layer-configs config) L)
+      (let [layer-cfg (nth (:layer-configs config) L)
             q-dim (long (:q-dim layer-cfg))
             kv-dim (long (:kv-dim layer-cfg))
             mlp-dim (long (:mlp-dim layer-cfg))
-
             base-idx (layer-base-fn L)
             projs [["q_proj" (str "model.language_model.layers." L ".self_attn.q_proj.weight") :x-norm1 q-dim hidden-dim (+ base-idx 2) [q-dim hidden-dim]]
                    ["k_proj" (str "model.language_model.layers." L ".self_attn.k_proj.weight") :x-norm1 kv-dim hidden-dim (+ base-idx 3) [kv-dim hidden-dim]]
@@ -173,37 +157,83 @@
                    ["gate_proj" (str "model.language_model.layers." L ".mlp.gate_proj.weight") :x-norm2 mlp-dim hidden-dim (+ base-idx 11) [mlp-dim hidden-dim]]
                    ["up_proj" (str "model.language_model.layers." L ".mlp.up_proj.weight") :x-norm2 mlp-dim hidden-dim (+ base-idx 12) [mlp-dim hidden-dim]]
                    ["down_proj" (str "model.language_model.layers." L ".mlp.down_proj.weight") :mlp-act hidden-dim mlp-dim (+ base-idx 13) [hidden-dim mlp-dim]]]]
+        (if (contains? skip-layers L)
+          (do
+            (when-not quiet?
+              (println (format "  [%2d/%2d] Skipping Layer %2d (Preserving Uncompressed BF16)"
+                               (inc L) num-layers L)))
+            (doseq [[_pname tname _act-key _rows _cols _buf-idx shape] projs]
+              (let [slice (st/get-tensor-slice mmap tname)
+                    dtype (get-in header [tname "dtype"] "BF16")
+                    spec {:name tname
+                          :quantize? false
+                          :shape shape
+                          :dtype dtype
+                          :segment slice}]
+                (swap! quant-specs conj spec))))
+          (let [t-layer-start (System/nanoTime)
+                layer-metrics (atom [])
+                ;; Forward pass across all calibration prompts with weights quantized up to L-1
+                prompt-acts
+                (mapv (fn [{:keys [buf len]}]
+                        (let [outs (pjrt/execute-executable ctx (or (:handle compiled) compiled) (into [buf] @device-weights) (count targets))
+                              get-act (fn [target-key]
+                                        (let [idx (.indexOf ^java.util.List targets target-key)
+                                              sz (long (get target-sizes target-key (* max-seq-len hidden-dim)))]
+                                          (pjrt/buffer-to-host-buffer ctx (nth outs idx) sz :bf16)))
+                              act-map {:len (long len)
+                                       :x-norm1 (get-act (keyword (str "x_norm1_" L)))
+                                       :ctx-flat (get-act (keyword (str "ctx_flat_" L)))
+                                       :x-norm2 (get-act (keyword (str "x_norm2_" L)))
+                                       :mlp-act (get-act (keyword (str "mlp_act_" L)))}]
+                          (doseq [b outs]
+                            (pjrt/destroy-buffer! ctx b))
+                          act-map))
+                      calib-inputs)]
+            (doseq [[_pname tname act-key rows cols buf-idx shape] projs]
+              (let [^floats w (st/get-tensor-floats mmap tname)
+                    total-tokens (long (reduce + 0 (map :len prompt-acts)))
+                    combined-act (float-array (* total-tokens (long cols)))
+                    _ (loop [items prompt-acts dst-token-offset (long 0)]
+                        (when-let [item (first items)]
+                          (let [len (long (:len item))
+                                ^floats src-act (get item act-key)]
+                            (System/arraycopy src-act 0 combined-act (int (* dst-token-offset (long cols))) (int (* len (long cols))))
+                            (recur (rest items) (+ dst-token-offset len)))))
+                    res (catq/quantize-matrix-obs combined-act w total-tokens rows cols group-size)
+                    ^floats deq (:w-deq res)
+                    w-norm-sq (double (areduce w i s 0.0 (+ s (* (aget w i) (aget w i)))))
+                    deq-norm-sq (double (areduce deq i s 0.0 (+ s (* (aget deq i) (aget deq i)))))
+                    dot (double (areduce w i s 0.0 (+ s (* (aget w i) (aget deq i)))))
+                    diff-sq (double (areduce w i s 0.0 (let [d (- (aget w i) (aget deq i))] (+ s (* d d)))))
+                    snr (* 10.0 (Math/log10 (/ (Math/max 1e-12 w-norm-sq) (Math/max 1e-12 diff-sq))))
+                    cos-sim (/ dot (Math/sqrt (* (Math/max 1e-12 w-norm-sq) (Math/max 1e-12 deq-norm-sq))))
+                    _ (swap! layer-metrics conj {:snr snr :cos-sim cos-sim})
+                    spec {:name tname
+                          :quantize? true
+                          :shape (:shape res)
+                          :scale-name (str tname ".scales")
+                          :scale-shape (:scale-shape res)
+                          :data (:data res)
+                          :scales (:scales res)}
+                    w-shorts (catq/floats->bf16-shorts deq)
+                    old-dev-buf (nth @device-weights buf-idx)
+                    new-dev-buf (xla/buffer-from-host-buffer ctx (:client ctx) w-shorts shape 13)]
+                (swap! quant-specs conj spec)
+                (swap! total-quantized-params + (* (long rows) (long cols)))
+                (swap! factors-map assoc-in [:projections tname]
+                       {:rows rows :cols cols :zs (vec (:zs res)) :zr (vec (:zr res))})
+                (swap! device-weights assoc buf-idx new-dev-buf)
+                (when old-dev-buf
+                  (pjrt/destroy-buffer! ctx old-dev-buf))))
 
-        (doseq [[_pname tname act-key rows cols buf-idx shape] projs]
-          (let [w (st/get-tensor-floats mmap tname)
-                total-tokens (long (reduce + 0 (map :len prompt-acts)))
-                combined-act (float-array (* total-tokens (long cols)))
-                _ (loop [items prompt-acts dst-token-offset (long 0)]
-                    (when-let [item (first items)]
-                      (let [len (long (:len item))
-                            ^floats src-act (get item act-key)]
-                        (System/arraycopy src-act 0 combined-act (int (* dst-token-offset (long cols))) (int (* len (long cols))))
-                        (recur (rest items) (+ dst-token-offset len)))))
-                res (catq/quantize-matrix-obs combined-act w total-tokens rows cols group-size)
-                spec {:name tname
-                      :quantize? true
-                      :shape (:shape res)
-                      :scale-name (str tname ".scales")
-                      :scale-shape (:scale-shape res)
-                      :data (:data res)
-                      :scales (:scales res)}
-                w-shorts (catq/floats->bf16-shorts (:w-deq res))
-                new-dev-buf (xla/buffer-from-host-buffer ctx (:client ctx) w-shorts shape 13)]
-            (swap! quant-specs conj spec)
-            (swap! total-quantized-params + (* (long rows) (long cols)))
-            (swap! factors-map assoc-in [:projections tname]
-                   {:rows rows :cols cols :zs (vec (:zs res)) :zr (vec (:zr res))})
-            (swap! device-weights assoc buf-idx new-dev-buf)))
-
-        (when-not quiet?
-          (let [t-layer-end (System/nanoTime)]
-            (println (format "  [%2d/%2d] Calibrated Layer %2d in %6.2f ms (Activations Forwarded to Layer %2d)"
-                             (inc L) num-layers L (/ (- t-layer-end t-layer-start) 1e6) (inc L)))))))
+            (when-not quiet?
+              (let [t-layer-end (System/nanoTime)
+                    n-m (count @layer-metrics)
+                    avg-snr (if (pos? n-m) (/ (double (reduce + 0.0 (map :snr @layer-metrics))) (double n-m)) 0.0)
+                    avg-cos (if (pos? n-m) (/ (double (reduce + 0.0 (map :cos-sim @layer-metrics))) (double n-m)) 0.0)]
+                (println (format "  [%2d/%2d] Calibrated Layer %2d in %6.2f ms | Avg SNR: %5.2f dB, CosSim: %.4f | (Activations Forwarded to Layer %2d)"
+                                 (inc L) num-layers L (/ (- t-layer-end t-layer-start) 1e6) avg-snr avg-cos (inc L)))))))))
 
     ;; 5. Collect non-quantizable weights (embeddings, norms, biases, PLE)
     (let [quantized-names (set (map :name @quant-specs))]
@@ -222,7 +252,8 @@
     (when-not quiet?
       (println (format "\nSerializing CAT-Q factors (catq_factors.edn) and 2-bit Safetensors to [%s]..." out-dir)))
     (catq/save-catq-model! model-dir out-dir @factors-map @quant-specs)
-    (gemma4-inf/close-agent-session! session)
+    (doseq [w @device-weights]
+      (try (pjrt/destroy-buffer! ctx w) (catch Exception _ nil)))
 
     (let [t1 (System/nanoTime)
           total-sec (/ (- t1 t0) 1e9)
@@ -277,6 +308,10 @@
 
           (or (= flag "--group-size") (= flag "-g"))
           (recur (subvec remaining 2) (assoc opts :group-size (Long/parseLong (second remaining))))
+
+          (= flag "--skip-layers")
+          (let [layers (into #{} (map #(Long/parseLong (str/trim %)) (str/split (second remaining) #",")))]
+            (recur (subvec remaining 2) (assoc opts :skip-layers layers)))
 
           (= flag "--quiet")
           (recur (subvec remaining 1) (assoc opts :quiet true))

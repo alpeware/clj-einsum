@@ -140,6 +140,10 @@
           (= flag "--ternary")
           (recur (subvec remaining 1) (assoc opts :precision :ternary :is-ternary true))
 
+          (and (= flag "--skip-layers") val)
+          (let [layers (into #{} (map #(Long/parseLong (str/trim %)) (str/split val #",")))]
+            (recur (subvec remaining 2) (assoc opts :skip-layers layers)))
+
           (= flag "--quiet")
           (do (System/setProperty "clj-xla.quiet" "true")
               (recur (subvec remaining 1) (assoc opts :quiet true)))
@@ -255,9 +259,9 @@
    (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 false norm-enum weight-enum 128))
   ([ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum]
    (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum 128))
-  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 is-ternary norm-enum weight-enum group-size]
+  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 is-ternary norm-enum _weight-enum group-size]
    (if-not (or is-int8 is-int4 is-ternary)
-     [(load-weight-buffer ctx weights-mmap tensor-name shape (if (= weight-enum 11) :f32 :bf16) weight-enum 0.0)]
+     [(load-weight-buffer ctx weights-mmap tensor-name shape (if (= norm-enum 11) :f32 :bf16) norm-enum 0.0)]
      (let [header (or (:header weights-mmap) {})
            actual-tensor-name (if (or (contains? header tensor-name) (contains? (:tensors weights-mmap) tensor-name))
                                 tensor-name
@@ -461,10 +465,17 @@
                         quant-metadata (keyword quant-metadata)
                         :else :bf16)
          weight-enum (cond (or is-ternary is-int8 is-int4) 2 (= weight-dtype :f32) 11 :else 13)
-         norm-enum (if (= weight-dtype :f32) 11 13)]
+         norm-enum (if (= weight-dtype :f32) 11 13)
+         detected-skip-layers (when (or is-ternary is-int4 is-int8)
+                                (set (filter (fn [i]
+                                               (not (contains? header (str prefix-base "layers." i ".self_attn.q_proj.weight.scales"))))
+                                             (range num-layers))))
+         skip-layers (into (set (or (:skip-layers opts) #{})) (or detected-skip-layers #{}))]
 
      (when-not (:quiet opts)
-       (println (str "Loaded Gemma 4 model weights from [" resolved-model-dir "] in [" (name weight-dtype) "] precision (" num-layers " layers, " num-heads " heads, " num-kv-heads " kv-heads).")))
+       (println (str "Loaded Gemma 4 model weights from [" resolved-model-dir "] in [" (name weight-dtype) "] precision (" num-layers " layers, " num-heads " heads, " num-kv-heads " kv-heads)."))
+       (when (seq skip-layers)
+         (println (str "  ↳ Mixed-Precision Layers (Unquantized BF16): " (str/join ", " (sort skip-layers))))))
 
      {:ctx ctx
       :opts opts
@@ -492,6 +503,7 @@
                :is-ternary is-ternary
                :is-int8 is-int8
                :is-int4 is-int4
+               :skip-layers skip-layers
                :group-size group-size
                :norm-enum norm-enum}})))
 
@@ -519,16 +531,30 @@
                     [:per_layer_model_projection [:tensor [total-pl-dim hidden-dim] norm-dtype]]
                     [:per_layer_projection_norm [:tensor [pl-dim] norm-dtype]]])
                  (mapcat (fn [i]
-                           (let [cfg (nth layer-configs i)
-                                 q-dim (:q-dim cfg)
-                                 kv-dim (:kv-dim cfg)
-                                 head-dim (:head-dim cfg)
-                                 mlp-dim (:mlp-dim cfg)]
+                           (let [cfg (when (seq layer-configs) (nth layer-configs i nil))
+                                 is-global? (if cfg (:is-global? cfg) (gemma-logic/layer-is-global? (:layer-types config) i))
+                                 head-dim (long (or (:head-dim cfg)
+                                                    (if is-global?
+                                                      (or (:global-head-dim config) 512)
+                                                      (or (:head-dim config) 256))))
+                                 num-h (long (or (:num-heads cfg) (:num-heads config) 8))
+                                 num-kv (long (or (:num-kv-heads cfg)
+                                                  (if is-global?
+                                                    (or (:num-global-kv-heads config) 1)
+                                                    (:num-kv-heads config))
+                                                  1))
+                                 q-dim (long (or (:q-dim cfg) (* num-h head-dim)))
+                                 kv-dim (long (or (:kv-dim cfg) (* num-kv head-dim)))
+                                 mlp-dim (long (or (:mlp-dim cfg) (:intermediate-dim config) 6144))
+                                 skipped? (contains? (set (:skip-layers config)) i)
+                                 layer-is-ternary (and is-ternary (not skipped?))
+                                 layer-is-int4 (and is-int4 (not skipped?))
+                                 layer-is-int8 (and is-int8 (not skipped?))]
                              (concat
                               [[(keyword (str "input_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]
                                [(keyword (str "layer_scalar_" i)) [:tensor [1] norm-dtype]]]
                               (cond
-                                is-ternary
+                                layer-is-ternary
                                 [[(keyword (str "q_w_" i)) [:tensor [q-dim (quot hidden-dim 4)] :i8]]
                                  [(keyword (str "q_scale_" i)) [:tensor (scale-shape-fn q-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "k_w_" i)) [:tensor [kv-dim (quot hidden-dim 4)] :i8]]
@@ -537,7 +563,7 @@
                                  [(keyword (str "v_scale_" i)) [:tensor (scale-shape-fn kv-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "o_w_" i)) [:tensor [hidden-dim (quot q-dim 4)] :i8]]
                                  [(keyword (str "o_scale_" i)) [:tensor (scale-shape-fn hidden-dim q-dim) norm-dtype]]]
-                                is-int4
+                                layer-is-int4
                                 [[(keyword (str "q_w_" i)) [:tensor [q-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "q_scale_" i)) [:tensor (scale-shape-fn q-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "k_w_" i)) [:tensor [kv-dim (quot hidden-dim 2)] :i8]]
@@ -546,7 +572,7 @@
                                  [(keyword (str "v_scale_" i)) [:tensor (scale-shape-fn kv-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "o_w_" i)) [:tensor [hidden-dim (quot q-dim 2)] :i8]]
                                  [(keyword (str "o_scale_" i)) [:tensor (scale-shape-fn hidden-dim q-dim) norm-dtype]]]
-                                is-int8
+                                layer-is-int8
                                 [[(keyword (str "q_w_" i)) [:tensor [q-dim hidden-dim] :i8]]
                                  [(keyword (str "q_scale_" i)) [:tensor [q-dim] norm-dtype]]
                                  [(keyword (str "k_w_" i)) [:tensor [kv-dim hidden-dim] :i8]]
@@ -556,31 +582,31 @@
                                  [(keyword (str "o_w_" i)) [:tensor [hidden-dim q-dim] :i8]]
                                  [(keyword (str "o_scale_" i)) [:tensor [hidden-dim] norm-dtype]]]
                                 :else
-                                [[(keyword (str "q_w_" i)) [:tensor [q-dim hidden-dim] weight-dtype]]
-                                 [(keyword (str "k_w_" i)) [:tensor [kv-dim hidden-dim] weight-dtype]]
-                                 [(keyword (str "v_w_" i)) [:tensor [kv-dim hidden-dim] weight-dtype]]
-                                 [(keyword (str "o_w_" i)) [:tensor [hidden-dim q-dim] weight-dtype]]])
+                                [[(keyword (str "q_w_" i)) [:tensor [q-dim hidden-dim] norm-dtype]]
+                                 [(keyword (str "k_w_" i)) [:tensor [kv-dim hidden-dim] norm-dtype]]
+                                 [(keyword (str "v_w_" i)) [:tensor [kv-dim hidden-dim] norm-dtype]]
+                                 [(keyword (str "o_w_" i)) [:tensor [hidden-dim q-dim] norm-dtype]]])
                               [[(keyword (str "q_norm_w_" i)) [:tensor [head-dim] norm-dtype]]
                                [(keyword (str "k_norm_w_" i)) [:tensor [head-dim] norm-dtype]]
                                [(keyword (str "post_attn_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]
                                [(keyword (str "pre_mlp_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]
                                [(keyword (str "post_mlp_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]]
                               (cond
-                                is-ternary
+                                layer-is-ternary
                                 [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim (quot hidden-dim 4)] :i8]]
                                  [(keyword (str "gate_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "up_w_" i)) [:tensor [mlp-dim (quot hidden-dim 4)] :i8]]
                                  [(keyword (str "up_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "down_w_" i)) [:tensor [hidden-dim (quot mlp-dim 4)] :i8]]
                                  [(keyword (str "down_scale_" i)) [:tensor (scale-shape-fn hidden-dim mlp-dim) norm-dtype]]]
-                                is-int4
+                                layer-is-int4
                                 [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "gate_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "up_w_" i)) [:tensor [mlp-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "up_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "down_w_" i)) [:tensor [hidden-dim (quot mlp-dim 2)] :i8]]
                                  [(keyword (str "down_scale_" i)) [:tensor (scale-shape-fn hidden-dim mlp-dim) norm-dtype]]]
-                                is-int8
+                                layer-is-int8
                                 [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim hidden-dim] :i8]]
                                  [(keyword (str "gate_scale_" i)) [:tensor [mlp-dim] norm-dtype]]
                                  [(keyword (str "up_w_" i)) [:tensor [mlp-dim hidden-dim] :i8]]
@@ -588,9 +614,9 @@
                                  [(keyword (str "down_w_" i)) [:tensor [hidden-dim mlp-dim] :i8]]
                                  [(keyword (str "down_scale_" i)) [:tensor [hidden-dim] norm-dtype]]]
                                 :else
-                                [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim hidden-dim] weight-dtype]]
-                                 [(keyword (str "up_w_" i)) [:tensor [mlp-dim hidden-dim] weight-dtype]]
-                                 [(keyword (str "down_w_" i)) [:tensor [hidden-dim mlp-dim] weight-dtype]]])
+                                [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim hidden-dim] norm-dtype]]
+                                 [(keyword (str "up_w_" i)) [:tensor [mlp-dim hidden-dim] norm-dtype]]
+                                 [(keyword (str "down_w_" i)) [:tensor [hidden-dim mlp-dim] norm-dtype]]])
                               (when has-ple?
                                 [[(keyword (str "per_layer_gate_w_" i)) [:tensor [pl-dim hidden-dim] norm-dtype]]
                                  [(keyword (str "per_layer_proj_w_" i)) [:tensor [hidden-dim pl-dim] norm-dtype]]
@@ -615,8 +641,6 @@
         load-fn (fn
                   ([name shape enum] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum 0.0))
                   ([name shape enum default-val] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum default-val)))
-        load-linear-fn (fn [name shape]
-                         (load-linear-projection-buffers ctx weights-mmap name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size))
         embed-buf (load-fn (str prefix-base "embed_tokens.weight") [vocab-size hidden-dim] norm-enum)
         ple-bufs (when has-ple?
                    [(load-fn (str prefix-base "embed_tokens_per_layer.weight") [vocab-size total-pl-dim] norm-enum)
@@ -628,7 +652,13 @@
                                    q-dim (:q-dim cfg)
                                    kv-dim (:kv-dim cfg)
                                    head-dim (:head-dim cfg)
-                                   mlp-dim (:mlp-dim cfg)]
+                                   mlp-dim (:mlp-dim cfg)
+                                   skipped? (contains? (set (:skip-layers config)) i)
+                                   layer-is-ternary (and is-ternary (not skipped?))
+                                   layer-is-int8 (and is-int8 (not skipped?))
+                                   layer-is-int4 (and is-int4 (not skipped?))
+                                   load-linear-fn (fn [name shape]
+                                                    (load-linear-projection-buffers ctx weights-mmap name shape layer-is-int8 layer-is-int4 layer-is-ternary norm-enum weight-enum group-size))]
                                (concat
                                 [(load-fn (:input-ln-w kmap) [hidden-dim] norm-enum 0.0)
                                  (load-fn (:layer-scalar-w kmap) [1] norm-enum 1.0)]

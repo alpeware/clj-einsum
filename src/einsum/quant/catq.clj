@@ -282,175 +282,255 @@
 
 (defn quantize-matrix-obs
   "Quantizes weight matrix [rows cols] using block-diagonal Hessian (group size 128)
-   and OBS error compensation with least-squares scale and learnable modulation factors.
+   and Hessian-conditioned least-squares scale with learnable modulation factors.
+   Parallelized across all CPU cores with zero-boxing primitive arrays.
    Returns:
      {:data ^bytes :scales ^shorts :w-deq ^floats :shape [rows quarter-cols]
       :scale-shape [rows num-groups] :zs ^doubles :zr ^doubles}."
   ([x-act w-floats num-tokens rows cols group-size]
    (quantize-matrix-obs x-act w-floats num-tokens rows cols group-size nil))
   ([x-act w-floats num-tokens rows cols group-size opts]
-   (let [x-act ^floats (if (instance? (Class/forName "[F") x-act) x-act (float-array (map float x-act)))
-         w-floats ^floats (if (instance? (Class/forName "[F") w-floats) w-floats (float-array (map float w-floats)))
+   (let [w-arr ^floats (if (instance? (Class/forName "[F") w-floats) w-floats (float-array (map float w-floats)))
          rows (int rows)
          cols (int cols)
-         num-tokens (int num-tokens)
+         num-tokens (int (or num-tokens 0))
          group-size (int group-size)
          num-groups (int (quot cols group-size))
          quarter-cols (int (quot cols 4))
+         quarter-g (int (quot group-size 4))
          data ^bytes (byte-array (* rows quarter-cols))
          scales ^shorts (short-array (* rows num-groups))
          w-deq ^floats (float-array (* rows cols))
          zs-arr ^doubles (double-array (* rows num-groups))
          zr-arr ^doubles (double-array (* rows num-groups))
-         gamma-cands (or (:gamma-candidates opts) [0.40 0.50 0.60])
-         damping (double (or (:damping opts) 0.01))
+         gamma-cands-raw (or (:gamma-candidates opts) [0.25 0.30 0.35 0.40 0.45 0.50 0.55 0.60 0.65 0.70])
+         ^doubles gamma-cands (if (instance? (Class/forName "[D") gamma-cands-raw)
+                                ^doubles gamma-cands-raw
+                                (double-array (map double gamma-cands-raw)))
+         num-cands (alength gamma-cands)
+         has-acts? (and (some? x-act) (pos? num-tokens))
+         ^floats x-arr (when has-acts?
+                         (if (instance? (Class/forName "[F") x-act) x-act (float-array (map float x-act))))]
 
-         ;; 1. Precompute H and H_inv for each group g
-         H-mats (object-array num-groups)
-         H-invs (object-array num-groups)
-         ^floats x-arr x-act]
-     (dotimes [g num-groups]
-       (let [g-col-base (* (int g) group-size)
-             H ^doubles (double-array (* group-size group-size))]
-         (dotimes [i group-size]
-           (dotimes [j group-size]
-             (let [ci (+ g-col-base (int i))
-                   cj (+ g-col-base (int j))
-                   sum (loop [t (int 0) acc 0.0]
-                         (if (< t num-tokens)
-                           (let [t-base (* t cols)
-                                 vi (double (aget x-arr (+ t-base ci)))
-                                 vj (double (aget x-arr (+ t-base cj)))]
-                             (recur (unchecked-inc t) (+ acc (* vi vj))))
-                           acc))]
-               (aset-double H (+ (* (int i) group-size) (int j)) sum))))
-         ;; Diagonal damping (1% of mean diagonal)
-         (let [trace (loop [i (int 0) acc 0.0]
-                       (if (< i group-size)
-                         (recur (unchecked-inc i) (+ acc (aget H (+ (* (int i) group-size) (int i)))))
-                         acc))
-               damp (* damping (/ trace (double group-size)))]
-           (dotimes [i group-size]
-             (aset-double H (+ (* (int i) group-size) (int i))
-                          (+ (aget H (+ (* (int i) group-size) (int i))) (double (max 1e-6 damp))))))
-         (aset H-mats g H)
-         (aset H-invs g (invert-spd-128 H group-size))))
-
-     ;; 2. Parallel quantization across rows
-     (-> (IntStream/range 0 rows)
-         (.parallel)
-         (.forEach (reify IntConsumer
-                     (accept [_ r]
-                       (let [r (int r)
-                             r-base (* r cols)
-                             r-data-base (* r quarter-cols)
-                             r-scale-base (* r num-groups)
-                             ^floats w-arr w-floats
-                             ^shorts scales-arr scales
-                             ^bytes data-arr data
-                             ^floats deq-arr w-deq
-                             ^doubles zs-out zs-arr
-                             ^doubles zr-out zr-arr
-                             w-row ^doubles (double-array cols)]
-                         (dotimes [c cols]
-                           (aset-double w-row (int c) (double (aget w-arr (+ r-base (int c))))))
-
-                         (dotimes [g num-groups]
-                           (let [g (int g)
-                                 g-base (* g group-size)
-                                 g-w-base (+ r-base g-base)
-                                 g-out-base (+ r-data-base (* g (quot group-size 4)))
-                                 s-idx (+ r-scale-base g)
-                                 ^doubles H (aget H-mats g)
-                                 ^doubles Hinv (aget H-invs g)
-
-                                 sum-abs (loop [i (int 0) acc 0.0]
-                                           (if (< i group-size)
-                                             (recur (unchecked-inc i) (+ acc (Math/abs (aget w-row (+ g-base i)))))
-                                             acc))
-                                 s-base (double (/ sum-abs (double group-size)))
-
-                                 ;; Best gamma search
-                                 best-t ^doubles (double-array group-size)
-                                 best-s (atom s-base)
-                                 best-gamma (atom 0.5)
-                                 best-err (atom Double/MAX_VALUE)]
-
-                             (doseq [gamma gamma-cands]
-                               (let [w-cur ^doubles (double-array group-size)
-                                     _ (dotimes [i group-size] (aset-double w-cur i (aget w-row (+ g-base i))))
-                                     t-cur ^doubles (double-array group-size)
-                                     delta (* (double gamma) s-base)]
-                                 (dotimes [i group-size]
-                                   (let [wi (aget w-cur i)
-                                         ti (cond (>= wi delta) 1.0 (<= wi (- delta)) -1.0 :else 0.0)
-                                         q-val (* ti s-base)
-                                         err (- wi q-val)
-                                         hii (aget Hinv (+ (* i group-size) i))]
-                                     (aset-double t-cur i ti)
-                                     (when (> (Math/abs hii) 1e-12)
-                                       (loop [j (unchecked-inc i)]
-                                         (when (< j group-size)
-                                           (let [hij (aget Hinv (+ (* i group-size) j))
-                                                 step (* (/ err hii) hij)]
-                                             (aset-double w-cur j (- (aget w-cur j) step)))
-                                           (recur (unchecked-inc j)))))))
-
-                                 ;; Optimal scale s* = (w^T H t) / (t^T H t)
-                                 (let [wt-dot (loop [i (int 0) acc 0.0]
-                                                (if (< i group-size)
-                                                  (let [wi (aget w-arr (+ g-w-base i))
-                                                        sum-ht (loop [j (int 0) sum 0.0]
-                                                                 (if (< j group-size)
-                                                                   (recur (unchecked-inc j) (+ sum (* (aget H (+ (* i group-size) j)) (aget t-cur j))))
-                                                                   sum))]
-                                                    (recur (unchecked-inc i) (+ acc (* wi sum-ht))))
-                                                  acc))
-                                       tt-dot (loop [i (int 0) acc 0.0]
-                                                (if (< i group-size)
-                                                  (let [ti (aget t-cur i)
-                                                        sum-ht (loop [j (int 0) sum 0.0]
-                                                                 (if (< j group-size)
-                                                                   (recur (unchecked-inc j) (+ sum (* (aget H (+ (* i group-size) j)) (aget t-cur j))))
-                                                                   sum))]
-                                                    (recur (unchecked-inc i) (+ acc (* ti sum-ht))))
-                                                  acc))
-                                       s-opt (if (> tt-dot 1e-12)
-                                               (Math/max (* 0.5 s-base) (Math/min (* 2.0 s-base) (double (/ wt-dot tt-dot))))
-                                               s-base)
-                                       ;; Reconstruction error
-                                       err (loop [i (int 0) acc 0.0]
+     (if-not has-acts?
+       ;; 1. Weight-space analytic least-squares quantization (Parallelized across rows)
+       (-> (IntStream/range 0 rows)
+           (.parallel)
+           (.forEach (reify IntConsumer
+                       (accept [_ r]
+                         (let [r (int r)
+                               ^floats w-arr w-arr
+                               ^doubles gamma-cands gamma-cands
+                               r-base (* r cols)
+                               r-data-base (* r quarter-cols)
+                               r-scale-base (* r num-groups)
+                               best-t ^doubles (double-array group-size)
+                               t-cur ^doubles (double-array group-size)
+                               t-ref ^doubles (double-array group-size)]
+                           (dotimes [g num-groups]
+                             (let [g (int g)
+                                   g-base (+ r-base (* g group-size))
+                                   g-out-base (+ r-data-base (* g quarter-g))
+                                   s-idx (+ r-scale-base g)
+                                   sum-abs (loop [i (int 0) acc 0.0]
                                              (if (< i group-size)
-                                               (let [diff (- (aget w-arr (+ g-w-base i)) (* s-opt (aget t-cur i)))
-                                                     sum-hdiff (loop [j (int 0) sum 0.0]
-                                                                 (if (< j group-size)
-                                                                   (let [diff-j (- (aget w-arr (+ g-w-base j)) (* s-opt (aget t-cur j)))]
-                                                                     (recur (unchecked-inc j) (+ sum (* (aget H (+ (* i group-size) j)) diff-j))))
-                                                                   sum))]
-                                                 (recur (unchecked-inc i) (+ acc (* diff sum-hdiff))))
-                                               acc))]
-                                   (when (< err @best-err)
-                                     (reset! best-err err)
-                                     (reset! best-s s-opt)
-                                     (reset! best-gamma (double gamma))
-                                     (System/arraycopy t-cur 0 best-t 0 group-size)))))
+                                               (recur (unchecked-inc i) (+ acc (Math/abs (double (aget w-arr (+ g-base i))))))
+                                               acc))
+                                   s-base (if (pos? group-size) (/ sum-abs (double group-size)) 0.0)]
+                               (loop [cand-idx (int 0)
+                                      best-gamma 0.5
+                                      best-s (double s-base)
+                                      best-score Double/NEGATIVE_INFINITY]
+                                 (if (< cand-idx num-cands)
+                                   (let [gamma (double (aget gamma-cands cand-idx))
+                                         delta (* gamma s-base)]
+                                     (dotimes [i group-size]
+                                       (let [wi (double (aget w-arr (+ g-base i)))]
+                                         (aset-double t-cur i (cond (>= wi delta) 1.0 (<= wi (- delta)) -1.0 :else 0.0))))
+                                     (let [[wt-dot tt-dot]
+                                           (loop [i (int 0) w-dot 0.0 t-dot 0.0]
+                                             (if (< i group-size)
+                                               (let [wi (double (aget w-arr (+ g-base i)))
+                                                     ti (double (aget t-cur i))]
+                                                 (recur (unchecked-inc i) (+ w-dot (* wi ti)) (+ t-dot (* ti ti))))
+                                               [w-dot t-dot]))
+                                           s-opt (double (if (> (double tt-dot) 1e-12)
+                                                           (Math/max (* 0.5 s-base) (Math/min (* 2.0 s-base) (/ (double wt-dot) (double tt-dot))))
+                                                           s-base))
+                                           mid (* 0.5 s-opt)]
+                                       (dotimes [i group-size]
+                                         (let [wi (double (aget w-arr (+ g-base i)))]
+                                           (aset-double t-ref i (cond (>= wi mid) 1.0 (<= wi (- mid)) -1.0 :else 0.0))))
+                                       (let [[wt2 tt2]
+                                             (loop [i (int 0) w-dot 0.0 t-dot 0.0]
+                                               (if (< i group-size)
+                                                 (let [wi (double (aget w-arr (+ g-base i)))
+                                                       ti (double (aget t-ref i))]
+                                                   (recur (unchecked-inc i) (+ w-dot (* wi ti)) (+ t-dot (* ti ti))))
+                                                 [w-dot t-dot]))
+                                             s2 (double (if (> (double tt2) 1e-12)
+                                                          (Math/max (* 0.5 s-base) (Math/min (* 2.0 s-base) (/ (double wt2) (double tt2))))
+                                                          s-opt))
+                                             score (- (* 2.0 s2 (double wt2)) (* s2 s2 (double tt2)))]
+                                         (if (> score best-score)
+                                           (do
+                                             (System/arraycopy t-ref 0 best-t 0 group-size)
+                                             (recur (unchecked-inc cand-idx) gamma s2 score))
+                                           (recur (unchecked-inc cand-idx) best-gamma best-s best-score)))))
+                                   ;; Final write
+                                   (let [s-short (short (float->bf16-short (float best-s)))
+                                         deq-s (float (bf16-short->float s-short))
+                                         final-gamma (double best-gamma)]
+                                     (dotimes [i group-size]
+                                       (aset-float w-deq (+ g-base i) (* (float (aget best-t i)) deq-s)))
+                                     (aset-short scales s-idx s-short)
+                                     (aset-double zs-arr s-idx (logit (/ (double deq-s) (* 2.0 (Math/max 1e-6 s-base)))))
+                                     (aset-double zr-arr s-idx (logit final-gamma))
+                                     (dotimes [k quarter-g]
+                                       (let [idx (* (int k) 4)
+                                             c0 (int (+ (aget best-t idx) 1.0))
+                                             c1 (int (+ (aget best-t (+ idx 1)) 1.0))
+                                             c2 (int (+ (aget best-t (+ idx 2)) 1.0))
+                                             c3 (int (+ (aget best-t (+ idx 3)) 1.0))
+                                             b (unchecked-byte (bit-or c0 (bit-shift-left c1 2) (bit-shift-left c2 4) (bit-shift-left c3 6)))]
+                                         (aset-byte data (+ g-out-base (int k)) b)))))))))))))
 
-                             ;; Write dequantized, scales, modulation factors, and packed bytes
-                             (let [final-s (double @best-s)
-                                   final-gamma (double @best-gamma)]
-                               (dotimes [i group-size]
-                                 (aset-float deq-arr (+ g-w-base i) (float (* (aget best-t i) final-s))))
-                               (aset-short scales-arr s-idx (short (float->bf16-short (float final-s))))
-                               (aset-double zs-out s-idx (logit (/ final-s (* 2.0 (Math/max 1e-6 s-base)))))
-                               (aset-double zr-out s-idx (logit final-gamma))
-                               (dotimes [k (quot group-size 4)]
-                                 (let [idx (* (int k) 4)
-                                       c0 (int (+ (aget best-t idx) 1.0))
-                                       c1 (int (+ (aget best-t (+ idx 1)) 1.0))
-                                       c2 (int (+ (aget best-t (+ idx 2)) 1.0))
-                                       c3 (int (+ (aget best-t (+ idx 3)) 1.0))
-                                       b (unchecked-byte (bit-or c0 (bit-shift-left c1 2) (bit-shift-left c2 4) (bit-shift-left c3 6)))]
-                                   (aset-byte data-arr (+ g-out-base (int k)) b)))))))))))
+       ;; 2. Hessian-conditioned quantization on input activations X (Parallelized across groups and rows)
+       (let [H-mats ^"[[D" (make-array (Class/forName "[D") num-groups)]
+         ;; 2a. Precompute H per group in parallel
+         (-> (IntStream/range 0 num-groups)
+             (.parallel)
+             (.forEach (reify IntConsumer
+                         (accept [_ g]
+                           (let [g (int g)
+                                 ^floats x-arr x-arr
+                                 g-col-base (* g group-size)
+                                 H ^doubles (double-array (* group-size group-size))]
+                             (dotimes [i group-size]
+                               (dotimes [j group-size]
+                                 (let [ci (+ g-col-base (int i))
+                                       cj (+ g-col-base (int j))
+                                       sum (loop [t (int 0) acc 0.0]
+                                             (if (< t num-tokens)
+                                               (let [t-base (* t cols)]
+                                                 (recur (unchecked-inc t)
+                                                        (+ acc (* (double (aget x-arr (+ t-base ci)))
+                                                                  (double (aget x-arr (+ t-base cj)))))))
+                                               acc))]
+                                   (aset-double H (+ (* (int i) group-size) (int j)) sum))))
+                             (let [trace (loop [i (int 0) acc 0.0]
+                                           (if (< i group-size)
+                                             (recur (unchecked-inc i) (+ acc (aget H (+ (* (int i) group-size) (int i)))))
+                                             acc))
+                                   scale-H (/ (double group-size) (Math/max 1e-8 (double trace)))]
+                               (dotimes [k (* group-size group-size)]
+                                 (aset-double H (int k) (* (aget H (int k)) scale-H))))
+                             (aset H-mats g H))))))
+
+         ;; 2b. Quantize each row in parallel
+         (-> (IntStream/range 0 rows)
+             (.parallel)
+             (.forEach (reify IntConsumer
+                         (accept [_ r]
+                           (let [r (int r)
+                                 ^floats w-arr w-arr
+                                 ^doubles gamma-cands gamma-cands
+                                 ^"[[D" H-mats H-mats
+                                 r-base (* r cols)
+                                 r-data-base (* r quarter-cols)
+                                 r-scale-base (* r num-groups)
+                                 best-t ^doubles (double-array group-size)
+                                 t-cur ^doubles (double-array group-size)
+                                 t-ref ^doubles (double-array group-size)
+                                 Ht ^doubles (double-array group-size)]
+                             (dotimes [g num-groups]
+                               (let [g (int g)
+                                     g-base (+ r-base (* g group-size))
+                                     g-out-base (+ r-data-base (* g quarter-g))
+                                     s-idx (+ r-scale-base g)
+                                     ^doubles H (aget H-mats g)
+                                     sum-abs (loop [i (int 0) acc 0.0]
+                                               (if (< i group-size)
+                                                 (recur (unchecked-inc i) (+ acc (Math/abs (double (aget w-arr (+ g-base i))))))
+                                                 acc))
+                                     s-base (if (pos? group-size) (/ sum-abs (double group-size)) 0.0)]
+                                 (loop [cand-idx (int 0)
+                                        best-gamma 0.5
+                                        best-s (double s-base)
+                                        best-score Double/NEGATIVE_INFINITY]
+                                   (if (< cand-idx num-cands)
+                                     (let [gamma (double (aget gamma-cands cand-idx))
+                                           delta (* gamma s-base)]
+                                       (dotimes [i group-size]
+                                         (let [wi (double (aget w-arr (+ g-base i)))]
+                                           (aset-double t-cur (int i) (cond (>= wi delta) 1.0 (<= wi (- delta)) -1.0 :else 0.0))))
+                                       ;; H * t_cur
+                                       (dotimes [i group-size]
+                                         (let [row-idx (* (int i) group-size)
+                                               sum (loop [j (int 0) acc 0.0]
+                                                     (if (< j group-size)
+                                                       (recur (unchecked-inc j) (+ acc (* (aget H (+ row-idx j)) (aget t-cur j))))
+                                                       acc))]
+                                           (aset-double Ht (int i) sum)))
+                                       (let [wt-dot (double (loop [i (int 0) acc 0.0]
+                                                              (if (< i group-size)
+                                                                (recur (unchecked-inc i) (+ acc (* (double (aget w-arr (+ g-base i))) (aget Ht i))))
+                                                                acc)))
+                                             tt-dot (double (loop [i (int 0) acc 0.0]
+                                                              (if (< i group-size)
+                                                                (recur (unchecked-inc i) (+ acc (* (aget t-cur i) (aget Ht i))))
+                                                                acc)))
+                                             s-opt (double (if (> tt-dot 1e-12)
+                                                             (Math/max (* 0.5 s-base) (Math/min (* 2.0 s-base) (/ wt-dot tt-dot)))
+                                                             s-base))
+                                             mid (* 0.5 s-opt)]
+                                         ;; Refinement with midpoint threshold
+                                         (dotimes [i group-size]
+                                           (let [wi (double (aget w-arr (+ g-base i)))]
+                                             (aset-double t-ref (int i) (cond (>= wi mid) 1.0 (<= wi (- mid)) -1.0 :else 0.0))))
+                                         ;; H * t_ref
+                                         (dotimes [i group-size]
+                                           (let [row-idx (* (int i) group-size)
+                                                 sum (loop [j (int 0) acc 0.0]
+                                                       (if (< j group-size)
+                                                         (recur (unchecked-inc j) (+ acc (* (aget H (+ row-idx j)) (aget t-ref j))))
+                                                         acc))]
+                                             (aset-double Ht (int i) sum)))
+                                         (let [wt2 (double (loop [i (int 0) acc 0.0]
+                                                             (if (< i group-size)
+                                                               (recur (unchecked-inc i) (+ acc (* (double (aget w-arr (+ g-base i))) (aget Ht i))))
+                                                               acc)))
+                                               tt2 (double (loop [i (int 0) acc 0.0]
+                                                             (if (< i group-size)
+                                                               (recur (unchecked-inc i) (+ acc (* (aget t-ref i) (aget Ht i))))
+                                                               acc)))
+                                               s2 (double (if (> tt2 1e-12)
+                                                            (Math/max (* 0.5 s-base) (Math/min (* 2.0 s-base) (/ wt2 tt2)))
+                                                            s-opt))
+                                               score (- (* 2.0 s2 wt2) (* s2 s2 tt2))]
+                                           (if (> score best-score)
+                                             (do
+                                               (System/arraycopy t-ref 0 best-t 0 group-size)
+                                               (recur (unchecked-inc cand-idx) gamma s2 score))
+                                             (recur (unchecked-inc cand-idx) best-gamma best-s best-score)))))
+                                     ;; Final write
+                                     (let [s-short (short (float->bf16-short (float best-s)))
+                                           deq-s (float (bf16-short->float s-short))
+                                           final-gamma (double best-gamma)]
+                                       (dotimes [i group-size]
+                                         (aset-float w-deq (+ g-base i) (* (float (aget best-t i)) deq-s)))
+                                       (aset-short scales s-idx s-short)
+                                       (aset-double zs-arr s-idx (logit (/ (double deq-s) (* 2.0 (Math/max 1e-6 s-base)))))
+                                       (aset-double zr-arr s-idx (logit final-gamma))
+                                       (dotimes [k quarter-g]
+                                         (let [idx (* (int k) 4)
+                                               c0 (int (+ (aget best-t idx) 1.0))
+                                               c1 (int (+ (aget best-t (+ idx 1)) 1.0))
+                                               c2 (int (+ (aget best-t (+ idx 2)) 1.0))
+                                               c3 (int (+ (aget best-t (+ idx 3)) 1.0))
+                                               b (unchecked-byte (bit-or c0 (bit-shift-left c1 2) (bit-shift-left c2 4) (bit-shift-left c3 6)))]
+                                           (aset-byte data (+ g-out-base (int k)) b)))))))))))))))
+
      {:data data
       :scales scales
       :w-deq w-deq
@@ -518,7 +598,7 @@
         w-arr ^floats (if (instance? (Class/forName "[F") w) w (float-array (map float w)))
         zs ^doubles (double-array total-scales 0.0)
         zr ^doubles (double-array total-scales 0.0)
-        gamma-candidates ^doubles (double-array [0.35 0.40 0.45 0.50 0.55 0.60 0.65])
+        gamma-candidates ^doubles (double-array [0.25 0.30 0.35 0.40 0.45 0.50 0.55 0.60 0.65 0.70])
         num-cands (alength gamma-candidates)]
     ;; 1. Analytic least-squares scale and optimal threshold search per group (Parallelized across rows!)
     (-> (IntStream/range 0 rows)
@@ -539,11 +619,6 @@
                                             (recur (unchecked-inc i) (+ acc (Math/abs (double (aget w-arr (+ g-base i))))))
                                             acc))
                                 base-scale (if (pos? group-size) (/ sum-abs (double group-size)) 0.0)
-                                w-norm-sq (loop [i (int 0) acc 0.0]
-                                            (if (< i group-size)
-                                              (let [wi (double (aget w-arr (+ g-base i)))]
-                                                (recur (unchecked-inc i) (+ acc (* wi wi))))
-                                              acc))
                                 [best-gamma best-scale _best-err]
                                 (loop [cand-idx (int 0)
                                        b-gamma 0.5
@@ -551,9 +626,9 @@
                                        b-err Double/MAX_VALUE]
                                   (if (< cand-idx num-cands)
                                     (let [gamma (aget gamma-candidates cand-idx)
-                                          thd (* gamma base-scale)
-                                          inv-thd (if (pos? thd) (/ 1.0 thd) 1.0)
-                                          [_w-dot-t t-dot-t]
+                                          delta (* gamma base-scale)
+                                          inv-thd (if (pos? delta) (/ 1.0 delta) 1.0)
+                                          [w-dot-t t-dot-t]
                                           (loop [i (int 0) dot 0.0 cnt 0.0]
                                             (if (< i group-size)
                                               (let [wi (double (aget w-arr (+ g-base i)))
@@ -562,7 +637,7 @@
                                                 (recur (unchecked-inc i) (+ dot (* wi ti)) (+ cnt (* ti ti))))
                                               [dot cnt]))
                                           opt-s (if (pos? (double t-dot-t))
-                                                  (Math/sqrt (/ w-norm-sq (double t-dot-t)))
+                                                  (/ (double w-dot-t) (double t-dot-t))
                                                   base-scale)
                                           err (loop [i (int 0) acc 0.0]
                                                 (if (< i group-size)
