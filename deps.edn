@@ -6,15 +6,15 @@
  :jvm-opts ["--enable-native-access=ALL-UNNAMED"]
  :aliases
  {:tools
-  {:extra-paths ["tools" "catalog" "proposals"]
+  {:extra-paths ["." "catalog" "proposals"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx16g"]}
   :test
-  {:extra-paths ["test" "tools"]
+  {:extra-paths ["test" "."]
    :extra-deps {org.clojure/test.check {:mvn/version "1.1.1"}}
    :main-opts ["-m" "einsum.test-runner"]
    :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx8g"]}
   :repl
-  {:extra-paths ["test" "tools"]
+  {:extra-paths ["test" "."]
    :jvm-opts ["-Dclojure.server.repl={:port 5555 :accept clojure.core.server/repl}"
               "--enable-native-access=ALL-UNNAMED"
               "-Xmx8g"]}
