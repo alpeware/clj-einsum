@@ -7,8 +7,6 @@ pom.xml.asc
 /classes/
 /target/
 /checkouts/
-data/*
-!data/*.edn
 backtests/
 logs/
 bin/
@@ -34,7 +32,7 @@ snapshot*.edn
 *.pid
 *.log
 hs_err_*
-catalog/**/dumps/
+resources/catalog/**/dumps/
 
 # Verification dumps
 verification/torch_detailed/

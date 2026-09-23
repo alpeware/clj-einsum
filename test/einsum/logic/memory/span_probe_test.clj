@@ -86,8 +86,8 @@
 (deftest test-locate-head-span-all-triples-roundtrip
   (testing "For each of the 7 heads in wiki_recent_triples.edn, the located span decodes back to the head name"
     (let [model-dir ".models/gemma-4-E2B-it"
-          triples-file "data/wiki_recent_triples.edn"]
-      (when (.exists (io/file model-dir))
+          triples-file (io/resource "data/wiki_recent_triples.edn")]
+      (when (and (.exists (io/file model-dir)) triples-file)
         (let [tokenizer (tok/from-file model-dir)
               kb-data (edn/read-string (slurp triples-file))
               triples (:triples kb-data)]

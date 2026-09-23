@@ -1,0 +1,41 @@
+;; ==============================================================================
+;; resources/catalog/registry.edn — Master Machine-Readable Registry of Verified Experiments
+;; ==============================================================================
+;; Tracks model generations, Ali Ghodsi's 4 RSI Gates on consumer silicon,
+;; and the derivative of judgment.
+;; Paths are ephemeral; IDs in this registry are immutable.
+;; Papers cite IDs directly from this registry.
+;; ==============================================================================
+
+{:version 2
+
+ :gates
+ {:gate1-compression {:name "Gate 1: Resource Efficiency & Compression"
+                      :metric "bytes/param & achieved GFLOPs/watt"
+                      :target "< 0.5 bytes/param"}
+  :gate2-velocity    {:name "Gate 2: Low-Latency Velocity & Adaptation"
+                      :metric "calibration & adaptation wall-clock"
+                      :target "< 2 hours on 24GB VRAM"}
+  :gate3-evals       {:name "Gate 3: Intelligence & Capability Floor"
+                      :metric "retention floor (>=95%) & absolute benchmark score"
+                      :target "zero catastrophic drop"}
+  :gate4-recursion   {:name "Gate 4: Continuous Recursion & Compound Derivative"
+                      :metric "judgment-cost per verified catalog entry"
+                      :target "declining human intervention hours"}}
+
+ :generations
+ {0 {:name "Base Infrastructure & Gemma 4 E2B Vehicle"
+     :hardware "AMD Radeon RX 7900 XTX (24GB)"
+     :bytes-per-param 2.0
+     :benchmarks {:gsm8k 0.56 :swe-mini 0.22}
+     :judgment-cost-hours 12.0
+     :status :active}
+  1 {:name "Ternary Compressed Backbone (Target)"
+     :parent-generation 0
+     :bytes-per-param 0.25
+     :target-hardware "AMD Radeon RX 7900 XTX (24GB)"
+     :retention-floor-target 0.95
+     :judgment-cost-target "< 6.0 hours per verified RFC"
+     :status :staged}}
+
+ :experiments {}}

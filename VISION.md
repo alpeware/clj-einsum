@@ -54,7 +54,7 @@ Explicit, because coding agents and peer reviewers must know the boundaries befo
 **Not covered — and not claimed:**
 - Full first-order logic with function symbols, modal logic, or unconstrained probabilistic programming.
 - *Absolute* soundness in continuous embedding space. Continuous representations yield PAC-style margins, not symbolic certainty.
-- Gradient-discovered discrete predicates. The E14–E20 empirical trajectory proved that gradients learn geometric rankings, not discrete selection. Predicate invention requires exact discrete priors and verified commit machinery living *around* the tensor core.
+- Gradient-discovered discrete predicates. Foundational negative result (synthesized in Paper 2): continuous gradients learn geometric rankings, not discrete selection. Predicate invention requires exact discrete priors and verified commit machinery living *around* the tensor core.
 
 ---
 
@@ -102,7 +102,7 @@ The meta-research loop elevates the coding agent from executing predefined tasks
 2. **Homoiconic Reification:** Proposals are translated into declarative Clojure Hiccup ASTs. Because every component speaks the exact same representation, disparate techniques (e.g. in-graph dispatch, state reduction, prefix cache handover) compose cleanly without glue code.
 3. **Hardware as the Incorruptible Verifier:** Executables compile to StableHLO and run on physical consumer GPUs. Claims must survive contact with silicon.
 4. **Adversarial Critique & Verification:** Automated checks verify floor retention ($\ge 95\%$), test for confounded baselines, and measure achieved memory and throughput.
-5. **The Immutable Catalog:** Verified pods commit to `catalog/registry.edn` and `catalog/gate*/<pod>/`. Subsequent generations read the catalog to avoid refuted lines and build on verified components.
+5. **The Immutable Catalog:** Verified pods commit to `resources/catalog/registry.edn` and `resources/catalog/gate*/<pod>/`. Subsequent generations read the catalog to avoid refuted lines and build on verified components.
 
 ---
 
@@ -110,5 +110,5 @@ The meta-research loop elevates the coding agent from executing predefined tasks
 
 - **Ground Every Number:** Reference simulation, unquantized baseline, and on-device measurements must be explicitly labeled. No claims without reproducible metrics.
 - **Verify on Silicon:** A claim about performance, latency, or accuracy is unverified until executed on physical accelerator hardware via PJRT.
-- **Respect Mechanical Sympathy:** Place dense continuous math in device VRAM; place sparse discrete lookups and schema verifications in host CPU memory (justified by E22's $16.4\times$ host advantage).
+- **Respect Mechanical Sympathy:** Place dense continuous math in device VRAM; place sparse discrete lookups and schema verifications in host CPU memory (justified by the host discrete lookup advantage: $16.4\times$ faster than device lookup).
 - **The Derivative of Judgment:** The ultimate test of Gate 4 is whether the wall-clock time from proposal to verified merge and the ratio of human intervention decline across generations.

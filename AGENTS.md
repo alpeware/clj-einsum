@@ -2,8 +2,33 @@
 
 * **Rule 1: Strict TDD.** Write generative tests (`clojure.test.check`) for invariants *before* implementing core logic.
 * **Rule 2: Pure Functions.** The core must remain pure (Sans-IO). Side effects are strictly isolated to boundary shells.
-* **Rule 3: Clean CI.** PRs must run `clojure -M:format`, `clojure -M:lint`, and tests (`clojure -M:test -m einsum.test-runner`) successfully before submission. Do not ignore linter warnings.
+* **Rule 3: Clean Local Commits.** Agents must run format (`clojure -M:format`), lint (`clojure -M:lint`), and tests (`clojure -M:test fast` or `clojure -M:test all`) successfully before committing to git. Zero errors and zero linter warnings allowed.
 * **Rule 4: Zero Java Escape Hatches (Pure XLA Execution).** All tensor math, neural network layers, and full model forward passes MUST be written in pure Clojure using Pedro Domingos' Declarative Tensor Logic (`einsum.logic.*`) and compiled into StableHLO MLIR for OpenXLA execution via PJRT. Under NO circumstances should custom `.java` classes, host-side primitive float array loops (`float[][]`), or manual CPU matrix math engines be created to bypass XLA compilation.
+
+---
+
+## Multi-Agent Direct-Commit Protocol
+
+We do not use a GitHub Pull Request workflow. Multiple agents work concurrently in this local repository and commit directly to `main`:
+
+1. **Commit Message Format**:
+   `[<gate>/<slug>] <stage>: <brief description>`
+   - Examples:
+     - `[gate1/cat-q] stage1-spec: pre-register ternary unpack falsification criteria`
+     - `[gate1/cat-q] stage2-impl: implement stablehlo unpack and run benchmarks`
+     - `[gate1/cat-q] stage3-verify: replicate throughput on rx 7900 xtx, mint e01`
+     - `[core/engine] fix: resolve panama off-heap arena leak in dynamic slice`
+2. **Atomic Commits & Verification Invariant**:
+   Never commit broken code or untested features. Every commit MUST pass `clojure -M:format`, `clojure -M:lint`, and `clojure -M:test fast`.
+3. **Directory Ownership**:
+   - `src/einsum/` — Core engine, tensor logic, PJRT Panama bindings, promoted neural models.
+   - `src/tools/` — CLI entrypoints and model inference drivers (`tools.*` namespaces).
+   - `src/experiments/<gate>/<slug>/` — Executable research code for active experiments.
+   - `resources/` — Non-code artifacts:
+     - `resources/proposals/<gate>/<slug>/` — RFC specs (`spec.md`), raw metrics (`results.edn`), summaries (`summary.csv`).
+     - `resources/catalog/` — Master registry (`registry.edn`), gate summaries, and verified research pods.
+     - `resources/data/` — Static corpora and test fixtures (loaded via `clojure.java.io/resource`).
+   - `tools/` — Shell wrapper scripts ONLY (`gemma4.sh`, `benchmark.sh`, `quantize.sh`).
 
 ---
 

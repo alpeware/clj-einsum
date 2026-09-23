@@ -3,6 +3,7 @@
    Verifies model configuration, pure AST construction, shape preservation, deductive gating,
    joint LM + InfoNCE loss finiteness, and autodiff gradient descent."
   (:require [einsum.models.tl-nano :as nano]
+            [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
@@ -237,7 +238,7 @@
 
 (deftest test-real-data-corpus-structure-and-batching
   (testing "Wikifacts corpus EDN file is well-formed with required entity, relation, triple, and prompt keys"
-    (let [corpus (read-string (slurp "data/wikifacts_corpus.edn"))]
+    (let [corpus (read-string (slurp (io/resource "data/wikifacts_corpus.edn")))]
       (is (vector? (:entities corpus)))
       (is (vector? (:relations corpus)))
       (is (vector? (:triples corpus)))

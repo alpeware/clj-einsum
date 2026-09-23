@@ -100,8 +100,8 @@
 (deftest test-span-round-trip-all-14-entities
   (testing "All 14 entity names in wiki_recent_triples.edn decode back from their token spans"
     (let [model-dir ".models/gemma-4-E2B-it"
-          triples-file "data/wiki_recent_triples.edn"]
-      (when (.exists (io/file model-dir))
+          triples-file (io/resource "data/wiki_recent_triples.edn")]
+      (when (and (.exists (io/file model-dir)) triples-file)
         (let [tokenizer (tok/from-file model-dir)
               kb-data (edn/read-string (slurp triples-file))
               entities (:entities kb-data)]

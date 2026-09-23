@@ -1,6 +1,9 @@
 # Strategic Research & Experimental Roadmap for Long-Horizon Agents
 
-This document defines the forward-looking research program and experimental roadmap for **Declarative Tensor Logic & In-Tensor Relational Memory** in `clj-einsum`.
+This document defines the research trajectory for **Declarative Tensor Logic & In-Tensor Relational Memory** in `clj-einsum`.
+
+> [!NOTE]
+> The Phase 1–3 sequence below outlines the foundational research milestones synthesized in Paper 1 (*Executable Tensor Logic*) and Paper 2 (*The Limits of Trainable Tensor Logic*). Active and future experiments follow the RFC lifecycle pre-registered under `resources/proposals/` and cataloged in `resources/catalog/registry.edn`.
 
 The overarching objective is to resolve the **Autonomous Agent Triad Crisis** (Hallucinations, Online Learning, Long-Horizon Context Explosion) on **consumer-grade hardware** (24GB VRAM, AMD Radeon RX 7900 XTX / NVIDIA RTX 4090) through compiled neuro-symbolic tensor architectures.
 
