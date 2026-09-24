@@ -8,7 +8,8 @@
             [einsum.models.gemma4.runtime :as rt]
             [einsum.models.gemma4.weights :as gemma-weights]
             [einsum.runtime.profile :as profile]
-            [einsum.runtime.tokenizer.protocol :refer [bos-id decode encode]]))
+            [einsum.runtime.tokenizer.protocol :refer [bos-id decode encode]]
+            [tools.cli :as cli]))
 
 ;; ==============================================================================
 ;; CLI Defaults & Argument Parsing
@@ -30,86 +31,12 @@
    :profile-out "scratch/gemma4_profile.edn"
    :chrome-trace-out "scratch/gemma4_chrome_trace.json"})
 
-(defn- normalize-args
-  [args]
-  (mapcat (fn [arg]
-            (if (and (str/starts-with? arg "--") (str/includes? arg "="))
-              (str/split arg #"=" 2)
-              [arg]))
-          args))
+(def normalize-args cli/normalize-args)
 
 (defn parse-cli-args
   "Parses command-line flags (--prompt, --model/--model-dir, --max-new-tokens, --temperature, --top-k, --backend, --precision, --verbose, --quiet)."
   [args]
-  (loop [remaining (vec (normalize-args args))
-         opts DEFAULT_CLI_OPTS]
-    (if (empty? remaining)
-      opts
-      (let [flag (first remaining)
-            val (second remaining)]
-        (cond
-          (and (= flag "--prompt") val)
-          (recur (subvec remaining 2) (assoc opts :prompt val))
-
-          (and (= flag "--prompt-file") val)
-          (recur (subvec remaining 2) (assoc opts :prompt (slurp val)))
-
-          (and (or (= flag "--model-dir") (= flag "--model") (= flag "--model-name") (= flag "-m")) val)
-          (let [dir (if (str/starts-with? val ".models/") val (str ".models/" (last (str/split val #"/"))))]
-            (recur (subvec remaining 2) (assoc opts :model-dir dir)))
-
-          (and (= flag "--max-new-tokens") val)
-          (recur (subvec remaining 2) (assoc opts :max-new-tokens (Long/parseLong val)))
-
-          (and (or (= flag "--temperature") (= flag "--temp")) val)
-          (recur (subvec remaining 2) (assoc opts :temperature (Double/parseDouble val)))
-
-          (and (= flag "--top-k") val)
-          (recur (subvec remaining 2) (assoc opts :top-k (Long/parseLong val)))
-
-          (and (= flag "--backend") val)
-          (recur (subvec remaining 2) (assoc opts :backend (keyword (str/replace val #"^:+" ""))))
-
-          (and (= flag "--precision") val)
-          (recur (subvec remaining 2) (assoc opts :precision (keyword (str/replace val #"^:+" ""))))
-
-          (and (= flag "--out") val)
-          (recur (subvec remaining 2) (assoc opts :out val))
-
-          (and (= flag "--method") val)
-          (recur (subvec remaining 2) (assoc opts :method (keyword (str/replace val #"^:+" ""))))
-
-          (and (= flag "--max-seq-len") val)
-          (recur (subvec remaining 2) (assoc opts :max-seq-len (Long/parseLong val)))
-
-          (and (= flag "--mode") val)
-          (recur (subvec remaining 2) (assoc opts :mode (keyword (str/replace val #"^:+" ""))))
-
-          (and (= flag "--compare") val)
-          (recur (subvec remaining 2) (assoc opts :compare (Boolean/parseBoolean val)))
-
-          (and (or (= flag "--group-size") (= flag "-g")) val)
-          (recur (subvec remaining 2) (assoc opts :group-size (Long/parseLong val)))
-
-          (= flag "--verbose")
-          (recur (subvec remaining 1) (assoc opts :verbose true))
-
-          (or (= flag "--thinking") (= flag "--think"))
-          (recur (subvec remaining 1) (assoc opts :thinking true))
-
-          (= flag "--ternary")
-          (recur (subvec remaining 1) (assoc opts :precision :ternary :is-ternary true))
-
-          (and (= flag "--skip-layers") val)
-          (let [layers (into #{} (map #(Long/parseLong (str/trim %)) (str/split val #",")))]
-            (recur (subvec remaining 2) (assoc opts :skip-layers layers)))
-
-          (= flag "--quiet")
-          (do (System/setProperty "clj-xla.quiet" "true")
-              (recur (subvec remaining 1) (assoc opts :quiet true)))
-
-          :else
-          (recur (subvec remaining 1) opts))))))
+  (cli/parse-cli-args args DEFAULT_CLI_OPTS))
 
 ;; ==============================================================================
 ;; High-Level Text Generation

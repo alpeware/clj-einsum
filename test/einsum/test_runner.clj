@@ -76,6 +76,7 @@
             [einsum.test-helpers.parity-test]
             [einsum.test-helpers.telemetry :as telemetry]
             [einsum.test-helpers.telemetry-test]
+            [einsum.tools.cli-test]
             [einsum.tools.download-hf-test]
             [einsum.tools.fetch-pjrt-test]
             [clojure.string :as str]
@@ -101,6 +102,7 @@
    'einsum.runtime.sampling-test
    'einsum.runtime.tokenizer-test
    'einsum.runtime.generation-test
+   'einsum.tools.cli-test
    'einsum.tools.download-hf-test
    'einsum.tools.fetch-pjrt-test
    'einsum.runtime.profile-test

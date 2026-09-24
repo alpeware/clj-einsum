@@ -1,89 +1,42 @@
 (ns tools.smollm-inference
   "End-to-End SmolLM-135M Autoregressive Generation Loop using clj-xla PJRT backend."
-  (:require [clojure.java.io :as io]
-            [einsum.core :as xla]
+  (:require [einsum.core :as xla]
             [einsum.models.smollm :as smollm-logic]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.sampling :as sampling]
             [einsum.runtime.tokenizer.core :as tok]
-            [einsum.runtime.tokenizer.protocol :as proto])
+            [einsum.runtime.tokenizer.protocol :as proto]
+            [tools.cli :as cli])
   (:import [java.lang.foreign Arena]))
 
 (def DEFAULT_CLI_OPTS
-  {:prompt "The capital of France is"
-   :max-new-tokens 8
-   :temperature 0.70
-   :top-k 10
-   :backend :cpu
-   :precision :f32
-   :verbose false})
+  (assoc cli/DEFAULT_INFERENCE_OPTS
+         :max-new-tokens 8
+         :precision :f32))
 
 (def DEFAULT_MODEL_DIRS
-  [".models/smollm-135m" ".models/smollm"])
+  (cli/STANDARD_MODEL_CANDIDATES :smollm))
 
 (defn parse-cli-args
-  "Parses command-line flags (--prompt, --max-new-tokens, --temperature, --top-k, --backend, --precision, --model-dir, --verbose)."
+  "Parses CLI arguments for SmolLM inference."
   [args]
-  (loop [cli-args args
-         opts DEFAULT_CLI_OPTS]
-    (if (seq cli-args)
-      (let [arg (first cli-args)]
-        (cond
-          (= arg "--prompt")
-          (recur (drop 2 cli-args) (assoc opts :prompt (second cli-args)))
-
-          (= arg "--max-new-tokens")
-          (recur (drop 2 cli-args) (assoc opts :max-new-tokens (Integer/parseInt (second cli-args))))
-
-          (= arg "--temperature")
-          (recur (drop 2 cli-args) (assoc opts :temperature (Double/parseDouble (second cli-args))))
-
-          (= arg "--top-k")
-          (recur (drop 2 cli-args) (assoc opts :top-k (Integer/parseInt (second cli-args))))
-
-          (= arg "--backend")
-          (recur (drop 2 cli-args) (assoc opts :backend (keyword (second cli-args))))
-
-          (= arg "--precision")
-          (recur (drop 2 cli-args) (assoc opts :precision (keyword (second cli-args))))
-
-          (= arg "--model-dir")
-          (recur (drop 2 cli-args) (assoc opts :model-dir (second cli-args)))
-
-          (= arg "--verbose")
-          (recur (rest cli-args) (assoc opts :verbose true))
-
-          :else
-          (recur (rest cli-args) opts)))
-      opts)))
+  (cli/parse-cli-args args DEFAULT_CLI_OPTS))
 
 (defn find-model-dir
-  "Searches `model-dirs` for an existing directory containing `.safetensors` files.
-   Throws an ExceptionInfo if no model files are found."
-  [model-dirs]
-  (let [existing (first (filter (fn [d]
-                                  (let [f (io/file d)]
-                                    (and (.exists f)
-                                         (or (.exists (io/file f "model.safetensors"))
-                                             (.exists (io/file f "model-00001-of-00002.safetensors"))))))
-                                model-dirs))]
-    (if existing
-      existing
-      (throw (ex-info (str "Model directory with safetensors not found in candidates: " (vec model-dirs))
-                      {:searched-dirs model-dirs})))))
+  "Resolves SmolLM model directory from explicit path or candidates."
+  ([model-dirs]
+   (cli/find-model-dir model-dirs))
+  ([]
+   (cli/find-model-dir :smollm)))
 
-(defn- prepare-input-tensor
-  "Pads token IDs sequence to `max-len` with zero padding."
-  [tokens max-len]
-  (let [padded (take max-len (concat tokens (repeat 0)))]
-    (int-array (vec padded))))
+(def prepare-input-tensor cli/prepare-input-tensor)
 
 (defn generate-text
   "Runs full end-to-end text generation on an initialized or discovered SmolLM model."
   ([opts]
    (let [{:keys [prompt max-new-tokens temperature top-k backend precision model-dir]} (merge DEFAULT_CLI_OPTS opts)
          ctx (xla/init-backend! (or backend :cpu))
-         resolved-dir (or model-dir (find-model-dir DEFAULT_MODEL_DIRS))
+         resolved-dir (cli/find-model-dir model-dir :smollm)
          tokenizer (tok/from-file resolved-dir)
          prompt-ids (proto/encode tokenizer prompt)
          prompt-len (count prompt-ids)
@@ -153,7 +106,7 @@
   ([opts]
    (let [opts (merge DEFAULT_CLI_OPTS opts)
          ctx (xla/init-backend! (or (:backend opts) :cpu))
-         resolved-dir (or (:model-dir opts) (find-model-dir DEFAULT_MODEL_DIRS))
+         resolved-dir (cli/find-model-dir (:model-dir opts) :smollm)
          tokenizer (tok/from-file resolved-dir)]
      {:ctx ctx
       :opts opts

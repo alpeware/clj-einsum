@@ -2,6 +2,7 @@
   "Autonomous software architecture agent loop powered by Gemma 4, XLA execution, and SCI Clojure tool calling."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
+            [tools.cli :as cli]
             [tools.gemma4-inference :as gemma4-inf]
             [sci.core :as sci]))
 
@@ -127,34 +128,7 @@ Clojure syntax rules:
 (defn parse-agent-cli-args
   "Parses CLI flags for gemma4_agent."
   [args]
-  (loop [remaining args
-         opts DEFAULT_AGENT_OPTS]
-    (if (empty? remaining)
-      opts
-      (let [arg (first remaining)
-            more (rest remaining)]
-        (cond
-          (= arg "--prompt") (recur (rest more) (assoc opts :prompt (first more)))
-          (= arg "--prompt-file") (recur (rest more) (assoc opts :prompt (slurp (first more))))
-          (= arg "--system") (recur (rest more) (assoc opts :system (first more)))
-          (= arg "--system-file") (recur (rest more) (assoc opts :system (slurp (first more))))
-          (= arg "--max-turns") (recur (rest more) (assoc opts :max-turns (Integer/parseInt (first more))))
-          (= arg "--max-new-tokens") (recur (rest more) (assoc opts :max-new-tokens (Integer/parseInt (first more))))
-          (= arg "--temperature") (recur (rest more) (assoc opts :temperature (Double/parseDouble (first more))))
-          (= arg "--top-k") (recur (rest more) (assoc opts :top-k (Long/parseLong (first more))))
-          (= arg "--repetition-penalty") (recur (rest more) (assoc opts :repetition-penalty (Double/parseDouble (first more))))
-          (= arg "--backend") (recur (rest more) (assoc opts :backend (keyword (first more))))
-          (= arg "--precision") (recur (rest more) (assoc opts :precision (keyword (first more))))
-          (= arg "--out") (recur (rest more) (assoc opts :out (first more)))
-          (= arg "--profile-out") (recur (rest more) (assoc opts :profile-out (first more)))
-          (= arg "--chrome-trace-out") (recur (rest more) (assoc opts :chrome-trace-out (first more)))
-          (= arg "--max-seq-len") (recur (rest more) (assoc opts :max-seq-len (Integer/parseInt (first more))))
-          (or (= arg "--model") (= arg "--model-dir"))
-          (let [m (first more)]
-            (recur (rest more) (assoc opts :model m :model-dir m)))
-          (= arg "--method") (recur (rest more) (assoc opts :method (keyword (first more))))
-          (= arg "--quiet") (recur more (assoc opts :quiet true))
-          :else (recur more opts))))))
+  (cli/parse-cli-args args DEFAULT_AGENT_OPTS))
 
 (defn format-agent-chat-prompt
   "Formats conversation history into Gemma 4 Turn syntax, placing system instructions in a native system turn.
@@ -282,11 +256,7 @@ Clojure syntax rules:
     (let [opts (parse-agent-cli-args args)]
       (when (gemma4-inf/needs-libjsig-reexec? opts)
         (gemma4-inf/reexec-with-libjsig! args "tools.gemma4-agent"))
-      (let [model-dir (or (:model-dir opts) (:model opts)
-                          (first (filter #(.exists (io/file %)) gemma4-inf/DEFAULT_MODEL_DIRS)))
-            _ (when-not (and model-dir (.exists (io/file model-dir)))
-                (println "Error: Gemma 4 model directory not found:" model-dir)
-                (System/exit 1))
+      (let [model-dir (cli/find-model-dir (or (:model-dir opts) (:model opts)) :gemma-4)
             max-seq-len (long (or (:max-seq-len opts) 1024))
             opts (assoc opts :model-dir model-dir :model model-dir :mode :agent :max-seq-len max-seq-len)
             metrics-atom (atom {})
