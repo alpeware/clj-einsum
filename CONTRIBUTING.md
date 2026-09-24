@@ -1,103 +1,53 @@
 # CONTRIBUTING.md
 
-**If you are a coding agent, start here. You are the primary contributor this project is built for.**
+> **Start with [`PROCESS.md`](PROCESS.md).** It is the definitive guide for our Staircase roadmap, the 4 RSI gates, and our 8 operating rules.
 
-Humans are welcome too — the same bar applies to everyone, and human judgment is still the backstop where the loop can't reach yet (design review, the open composable-evaluation problem). But if a task can be specified precisely enough for an agent, it should be done by an agent. That is the point of this repo: programs are data, verification is automatic, and research arcs in this project are designed, implemented, measured, and verified on silicon by coding agents.
-
-## Before you write code
-
-Read these first — they are short, and they will save you from re-running failed research lines:
-
-1. **[VISION.md](VISION.md)** — what the representation covers, the deflationary framing on Ali Ghodsi's 4 RSI conditions, arithmetic vs hypothesis on consumer silicon, and what it doesn't cover.
-2. **[AGENTS.md](AGENTS.md)** — the repo's coding rules (TDD, pure functions, clean local commits, pure-XLA execution, direct-commit protocol). Non-negotiable.
-3. **[docs/architecture/rsi_gates.md](docs/architecture/rsi_gates.md)** — formal specification of the 4 RSI gates, generation lineage, and consumer hardware constraints.
-4. **[docs/tensor_logic/empirical_journey.md](docs/tensor_logic/empirical_journey.md)** — the catalog of foundational results. Check whether your idea is a closed line before you spend GPU time on it. Gradient predicate invention is a closed line: continuous gradient relaxation learns rankings, not discrete selection; discrete commit machinery is required.
-5. **[docs/architecture/agent_loop.md](docs/architecture/agent_loop.md)** — the three-tier agent loop, propose $\to$ dispose contract, and verified snapshot commits.
+Coding agents are the primary contributors to this repository. All research follows a **3-Stage Direct-Commit Protocol** sharded by RSI Gate and identified by descriptive `<slug>`s. There are no Pull Requests and no artificial sequential `eNN` numbers—parallel exploration tracks commit directly to `main`.
 
 ---
 
-## The 3-Stage Research Protocol (Direct-Commit RFC Model)
-
-To scale decentralized research across coding agents and human contributors without claim collisions or ungrounded speculation, all proposals follow a 3-stage lifecycle sharded by **RSI Gate**:
+## The 3-Stage Research Protocol (Direct-Commit Model)
 
 ```
-[Stage 1: Proposal Commit]  ──>  [Stage 2: Implementation Commit]  ──>  [Stage 3: Verification Commit]
-(resources/proposals/<gate>/<slug>/)  (src/experiments/ & results.edn)     (Independent Replication)
+[Stage 1: Proposal Spec]     ──>  [Stage 2: Implementation]    ──>  [Stage 3: Independent Verification]
+(resources/proposals/<gate>/<slug>/)  (src/experiments/ & results.edn)     (Independent Replication on Silicon)
           │                                      │                                      │
-   Pre-Registered Spec                   Committed as UNVERIFIED               eNN Minted -> catalog/
+   Pre-Registered Spec                   Committed as UNVERIFIED               Cataloged -> resources/catalog/
 ```
 
-### Stage 1: Proposal Commit (Descriptive Slugs, Gate-Partitioned)
-- Propose new experiments under `resources/proposals/<gate>/<slug>/spec.md` (e.g. `resources/proposals/gate1_compression/cat_q_ternary/spec.md`).
-- **No `eNN` numbers are assigned at proposal time.** Numbers are only minted upon Stage 3 independent verification.
-- **Required RFC Metadata Headers**:
-  - `Experiment: <slug>`
-  - `Gate: <gate1_compression | gate2_velocity | gate3_evals | gate4_recursion>`
-  - `Generation: <target-generation-number>`
-  - `Literature: [<formal paper citations in the DAG>]`
-  - `Hardware-Target: {Reference: "...", Claim-Shape: "..."}`
-  - `Extends:`, `Refutes:`, `Supersedes:`, `Reopens:`
-- Commit message: `[<gate>/<slug>] stage1-spec: <brief description>`.
+### Stage 1: Proposal Spec
+- Commit RFC spec to `resources/proposals/<gate>/<slug>/spec.md` (use [`TEMPLATE.md`](resources/proposals/TEMPLATE.md)).
+- Must pre-register falsification criteria across the 4 gates before writing code (see `PROCESS.md` §3).
+- Commit format: `[<gate>/<slug>] stage1-spec: <brief description>`.
+
+### Stage 2: Implementation & Empirical Measurement
+- Commit runnable code under `src/experiments/<gate>/<slug>/` (namespace: `experiments.<gate>.<slug>...`).
+- Commit raw machine-readable metrics to `resources/proposals/<gate>/<slug>/results.edn` and `summary.csv`.
+- Status in catalog registry: marked `:unverified`.
+- Commit format: `[<gate>/<slug>] stage2-impl: <brief description>`.
+
+### Stage 3: Independent Silicon Verification & Cataloging
+- An independent contributor (or peer agent) replicates the claims on independent silicon.
+- Verifies claim shape (e.g., storage reduction achieved, retention floor $\ge 95\%$ held, throughput verified).
+- Move non-code pod to `resources/catalog/<gate>/<slug>/` and register under `:slug` in [`resources/catalog/registry.edn`](resources/catalog/registry.edn).
+- Commit format: `[<gate>/<slug>] stage3-verify: <replicate claim and catalog pod>`.
 
 ---
 
-## Falsification Criteria for RSI Gates 1–4
+## Promotion to the Core Engine (`src/einsum/`)
 
-Every proposal must explicitly pre-register target criteria across Ghodsi's 4 RSI Gates:
-
-### 1. Gate 1 Criterion: Resource Efficiency ($C_{n+1} \ll C_n$)
-Proposals must measure both dimensions of resource consumption:
-- **Storage / Memory (Arithmetic):** Measured `bytes/param` and total peak VRAM footprint reduction (e.g., target $\le 0.25\text{ bytes/param}$ for ternary weights, $\ge 7.5\times$ reduction vs FP16).
-- **Compute / Throughput (Hypothesis):** Measured generation throughput ($\text{tok/s}$) and achieved GFLOPs/watt against uncompressed FP16 and INT4 baselines on reference hardware. Compute speedups must be proven on silicon, not assumed.
-
-### 2. Gate 2 Criterion: Time Efficiency ($T_{n+1} \ll T_n$)
-- Wall-clock calibration, adaptation, or distillation time on reference consumer hardware (AMD Radeon RX 7900 XTX 24GB or NVIDIA RTX 4090).
-- Standard: zero-backpropagation calibration must complete in $< 30\text{ minutes}$; parameter-efficient adaptation must converge in $< 2\text{ hours}$.
-
-### 3. Gate 3 Criterion: Capability & Intelligence ($A_{n+1} > A_n$)
-Two distinct numbers are strictly required:
-1. **Floor Retention ($\ge 95\%$):** Retention percentage relative to the uncompressed base model on identical evaluation suites (e.g., perplexity, GSM8K, or HumanEval/Clojure). Any compression dropping retention below $95\%$ is considered degraded.
-2. **Absolute Score:** Absolute capability score on standardized benchmark suites across successive generations ($G_0 \to G_1 \dots$).
-
-### 4. Gate 4 Criterion: Continuous Recursion & The Derivative of Judgment
-Verification must track the **derivative of judgment**:
-- **Wall-clock cycle latency:** Total elapsed time from initial RFC proposal to verified catalog commit.
-- **Autonomous Execution Ratio:** Ratio of machine-executed generation/verification time versus human intervention hours required for peer review and bug remediation.
-- Success is measured by declining human intervention hours per verified catalog entry across generations.
+Code in experiment pods remains isolated. It is promoted into `src/einsum/` only under **Mechanical-Sympathy Placement**:
+- **Dense Contractions & Autoregressive Decoding**: Placed 100% in OpenXLA StableHLO MLIR in accelerator VRAM. Zero host round-trips.
+- **Discrete Lookups & Schema Verification**: Placed on CPU host memory in pure Clojure persistent data structures (host discrete lookups have a $16.4\times$ speed advantage over device VRAM lookups).
 
 ---
 
-### Stage 2: Implementation & Claim Commit
-- Contributor commits scaffolding code under `src/experiments/<gate>/<slug>/` and raw output metrics (`results.edn`) into `resources/proposals/<gate>/<slug>/`.
-- **Status in Registry**: Marked **`:unverified`**.
-- **Taint Propagation**: Any downstream experiment declaring this unverified pod as a dependency inherits the `:unverified` status until the parent is verified.
-- **Draft Expiry**: Proposals inactive for 90 days are marked `:stale` and archived without consuming an `eNN` number.
-- Commit message: `[<gate>/<slug>] stage2-impl: <brief description>`.
+## Pre-Commit Verification Invariants
 
-### Stage 3: Independent Peer Verification Commit (Minting the `eNN` ID)
-- An independent contributor (human or peer agent) replicates the claim on independent silicon.
-- **Hardware-Relative Claim-Shape**: Verification tests do not need identical milliseconds on different GPUs. They verify **claim shape**: e.g., was prefill eliminated ($\ge 50\text{ ms}$ saved)? Was handover negligible ($< 2\text{ ms}$)? Did retention floor hold ($\ge 95\%$)?
-- **Number Minting**: Only upon successful Stage 3 replication is the next sequential `eNN` ID permanently minted. The non-code pod moves to `resources/catalog/<gate>/eNN_<slug>/` and is registered in `resources/catalog/registry.edn`.
-- *Verification is an independent, credited contribution.* Both the proposer and the verifier receive provenance in the registry.
-- Commit message: `[<gate>/<slug>] stage3-verify: <replicate claim and mint eNN>`.
-
----
-
-## Promotion to the Core Library (`src/einsum/`)
-
-Code in experiment pods (`src/experiments/`) remains isolated. It is promoted into the core library (`src/einsum/`) only under **Mechanical-Sympathy Placement**:
-- **Dense Contractions & Autoregressive Decoding**: Placed 100% in OpenXLA StableHLO MLIR on accelerator device memory (GPU VRAM). Zero host round-trips.
-- **Discrete Index Lookups, Tries & Schema Validation**: Placed on CPU host memory in pure Clojure persistent data structures. Foundational finding: host discrete lookups achieved a $16.4\times$ speed advantage over device VRAM lookups ($42.20\ \mu\text{s}$ host vs $691.94\ \mu\text{s}$ device).
-- **Core Library Layout**:
-  - `src/einsum/logic/`: Tensor logic DSL, relational expansions, lowering, autodiff.
-  - `src/einsum/compiler/`: Project Panama PJRT C API bindings, StableHLO text generation, caching.
-  - `src/einsum/quant/`: EXL3, QuIP, and ternary (CAT-Q) unpacking routines.
-  - `src/einsum/models/`: Canonical vehicle model architectures (Gemma 4, Gemma 3, SmolLM, GPT-2).
-
----
-
-## Testing & Pre-Commit Invariants
-
-- `clojure -M:format`, `clojure -M:lint`, and `clojure -M:test fast` (or `clojure -M:test all`) must all pass with zero warnings or errors before committing to git.
-- New behaviors require generative property tests (`clojure.test.check`).
-- Staged commits must be narrow and single-purpose.
+Before every commit, agents must run and pass:
+```bash
+clojure -M:format
+clojure -M:lint
+clojure -M:test fast
+```
+Zero errors and zero linter warnings allowed.

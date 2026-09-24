@@ -5,10 +5,10 @@
 **Generation**: `<target-generation-number, e.g. 1>`  
 **Literature**: `["<Author et al. (Year) arXiv:XXXX.XXXXX>"]`  
 **Hardware-Target**: `{:reference "AMD Radeon RX 7900 XTX (24GB)" :claim-shape "<e.g. >= 7.5x VRAM compression, zero NaN>"}`  
-**Extends**: `"<prior-eNN-or-nil>"`  
+**Extends**: `"<prior-slug-or-nil>"`  
 **Refutes**: `"<refuted-claim-or-nil>"`  
-**Supersedes**: `"<superseded-eNN-or-nil>"`  
-**Reopens**: `"<closed-arc-if-applicable>"`  
+**Supersedes**: `"<superseded-slug-or-nil>"`  
+**Reopens**: `"<reopened-slug-or-nil>"`  
 
 ---
 
@@ -69,6 +69,6 @@ Declare the proposed transformation purely as Pedro Domingos' Declarative Tensor
 
 ## 4. Execution Harness & Silicon Verification Plan
 
-- **Harness Namespace**: `tools.<slug>` or `einsum.experiments.<slug>.run`
+- **Harness Namespace**: `experiments.<gate>.<slug>.run`
 - **Output Artifacts**: `results.edn`, `summary.csv`
 - **Differential Parity**: Output must match reference Clojure CPU interpreter within epsilon $\le 10^{-3}$.

@@ -197,12 +197,12 @@ intelligence depends on it, because it does.
 
 This document states the *why*. The *how* lives where it's enforced:
 
-- `resources/proposals/` — RFC lifecycle. Slug at proposal, numbers at
-  verification (`TEMPLATE.md`). A proposal without kill criteria is
-  returned unread.
-- `resources/catalog/` — the four gate directories plus `registry.edn`: lineage
-  per entry (bytes/param, calibration minutes, eval scores, hardware,
-  judgment cost). Score the snapshot, not the model.
+- `resources/proposals/` — RFC lifecycle. Tracked by descriptive `<slug>`
+  across parallel exploration tracks (`TEMPLATE.md`). A proposal without
+  pre-registered kill criteria is returned unread.
+- `resources/catalog/` — the four gate directories (`<gate>/<slug>/`) plus
+  `registry.edn`: lineage per entry (bytes/param, calibration minutes, eval
+  scores, hardware, judgment cost). Score the snapshot, not the model.
 - `docs/architecture/agent_loop.md` — the loop design: tiers, the
   committed store, the contraction reflex.
 - `CONTRIBUTING.md` — the contributor contract (coding agents as primary

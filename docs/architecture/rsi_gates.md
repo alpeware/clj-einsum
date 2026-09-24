@@ -76,48 +76,20 @@ Every claim in `clj-einsum` is measured directly against this hardware apparatus
 
 ---
 
-## 4. Generation Lineage: From $G_0$ to $G_4$
+## 4. Generation Lineage: The Staircase Roadmap
 
-The research trajectory of `clj-einsum` is sharded into five discrete generations:
+The research trajectory of `clj-einsum` maps directly to the Staircase roadmap defined in [`PROCESS.md`](../../PROCESS.md):
 
 ```
-[G0: Dense Unbounded] ──> [G1: Relational Subspaces] ──> [G2: Trainable Limits]
-    (Black-box LLM)             (E01 - E10)                   (E11 - E20)
-                                                                   │
-                                                                   ▼ (Falsified Continuous Invention)
-[G4: Meta-Research Substrate] <── [G3: In-VRAM Deliberation & Handover]
-    (E25+: Datalog Compilers)         (E21 - E24: Hardware Gate Proofs)
+[1. Base Language Models] ──> [2. Chain of Thought] ──> [3. Coding Agents] ──> [4. Continuous Learning] ──> [5. Self-Iteration]
+    (Open Weights Vehicle)        (Reasoning Ceiling)       (Current Arena)         (Memory + Commit Gates)     (Compounding Loop)
 ```
 
-### Generation 0 ($G_0$): Dense Autoregressive Baseline
-- **Characteristics:** Monolithic transformer forward passes, quadratic context accumulation, external host Python runtime (PyTorch/HuggingFace), ungrounded hallucinations, zero verified invariants.
-- **Gate Evaluation:** Fails Gates 1, 2, 3, and 4.
-
-### Generation 1 ($G_1$): Relational Foundations & Contraction Primitives (E01–E10)
-- **Characteristics:** Datalog-as-contraction mapped to OpenXLA PJRT. Cross-Attention Memory Probing (CAMP, E01), KG-masked attention (E02), Datalog fixpoint state tracking (E04), and native TL-Nano models (E09, E10).
-- **Gate Evaluation:**
-  - Gate 1: Cleared (O(1) memory state tracking in E04/E07).
-  - Gate 2: Cleared (< 2ms PJRT execution).
-  - Gate 3: Partially cleared (+0.8900 deductive boost, but limited to toy relations).
-  - Gate 4: Cleared on synthetic horizons.
-
-### Generation 2 ($G_2$): Trainable Limits & The Refutation of Gradient Invention (E11–E20)
-- **Characteristics:** WebNLG scaling (348 relations, E11/E12), distractor diagnostics (E14), grafting onto frozen 2.3B Gemma 4 (E15), and the exhaustive 2x2 factorial refutation of gradient predicate invention (E16–E20).
-- **Gate Evaluation:**
-  - **Falsification of Pure Continuous RSI:** Proved that continuous relaxations fail discrete unidentifiability. Gradients optimize ranking manifolds, not discrete boolean logic.
-  - Gate 3: **Refuted for continuous-only predicate invention**. Established that discrete commitment gates must live *around* the tensor core.
-
-### Generation 3 ($G_3$): In-VRAM Deliberation & Handover Apparatus (E21–E24)
-- **Characteristics:** Coupling dense accelerator execution with host-side schema commitment. Schema-constrained KB write path (E21), in-graph query dispatch (E22), verified adversarial state reduce (E23), and zero-copy prefix-cache handover (E24).
-- **Gate Evaluation:**
-  - Gate 1: **Cleared on physical silicon** (0 duplicate weights allocated across 493 buffers).
-  - Gate 2: **Cleared on physical silicon** (74.46 ms prefill eliminated, 42.20 µs host dispatch).
-  - Gate 3: **Cleared on physical silicon** (0 RBAC violations over adversarial horizon, +3.3% self-correction).
-  - Gate 4: **Cleared on physical silicon** (homogeneous multi-instance handover without degradation).
-
-### Generation 4 ($G_4$): Self-Compiling Meta-Research Substrate (E25+)
-- **Characteristics:** Direct compilation of external literature (e.g. Takemura & Inoue differentiable Datalog) into StableHLO MLIR, automated proposal generation, adversarial verification, and closed-loop catalog compounding.
-- **Gate Evaluation:** Active development.
+1. **Stage 1 (Base Models)**: We ride open weights (Gemma 4, SmolLM, GPT-2). We do not train foundation models.
+2. **Stage 2 (Chain of Thought)**: Raises the reasoning ceiling. Evaluated on Gate 3 retention.
+3. **Stage 3 (Agents — Current Arena)**: The proving ground. Multi-step reasoning and verification against compilers and test suites. All gates (G1–G4) active.
+4. **Stage 4 (Continuous Learning — The Lottery Ticket)**: Knowledge updates without retraining. Memory module + schema-constrained commit path. Evaluated on G2 (adaptation velocity) and G4 (declining judgment cost).
+5. **Stage 5 (Self-Iteration)**: The loop improving the loop. Measured by the compound derivative of verified catalog output per unit human judgment.
 
 ---
 
@@ -162,6 +134,6 @@ The meta-research loop elevates the agent loop from executing tasks to executing
 2. **Einsum as Lingua Franca:** The proposal is rewritten into pure Clojure Hiccup AST. Because every component speaks the exact same homoiconic language, architectures from different papers (e.g. E22 dispatch + E23 reduce + E24 cache handover) compose without impedance mismatches.
 3. **Hardware as the Incorruptible Verifier:** Executables compile to StableHLO and run on discrete accelerator hardware. Claims must survive physical execution on the device.
 4. **Adversarial Critique:** The reference interpreter verifies mathematical parity; rigorous generative tests (`clojure.test.check`) test corner cases; automated review checks for confounded baselines or overclaimed ratios.
-5. **Catalog as Cumulative Memory:** Validated outputs commit to `catalog/registry.edn` and `catalog/<arc>/<pod>/results.edn`. Subsequent iterations read the catalog to avoid closed lines and remix verified components.
+5. **Catalog as Cumulative Memory:** Validated outputs commit to `resources/catalog/registry.edn` and `resources/catalog/<gate>/<slug>/`. Subsequent iterations read the catalog to avoid closed lines and remix verified components.
 
 Through this discipline, `clj-einsum` converts speculative claims of recursive self-improvement into an empirical science grounded in hardware measurement.

@@ -53,31 +53,17 @@ Detailed mathematical formulation of Pedro Domingos' Declarative Tensor Logic:
 - Datalog fixpoints, stratified negation, and compiled transitive closures.
 - Associative relational superposition memory, unbinding contractions, and capacity bounds.
 
-### 2. 🔬 [Empirical Experiments & Diagnostic Journey](empirical_journey.md)
-Comprehensive record of all experimental runs conducted on **Gemma 4 E2B** using **AMD Radeon RX 7900 XTX (24GB VRAM)**:
-- **Baseline (Stage 1)**: Fixed random projection & random entity table ($D=256 \to 0/7$, chance $7.1\%$).
-- **Task A (Span-Pooled Probe Ablation)**: Investigating syntactic template dominance vs. isolated head token spans.
-- **Task B (Learned Linear Probe via Autodiff)**: $7/7$ training memorization vs. $0/7$ Leave-One-Out generalization (6-shot sample efficiency wall).
-- **Task C (LLM-Anchored Token Embeddings)**: Naive $W=I$ zero-shot bridge refuted ($0/7$); discovery of representation anisotropy and 66% margin compression (pairwise cosine $0.2715$).
-- **Task D (QR-Orthonormalized Anchored Table)**: Modified Gram-Schmidt in $f64 \to f32$; surgical elimination of cross-talk (off-diagonal cosine exact $0.000000$); causal isolation of **probe-side distribution shift** as the true bottleneck.
-
-### 3. 🌐 [Related Work & Comparative Analysis](related_work.md)
+### 2. 🌐 [Related Work & Comparative Analysis](related_work.md)
 Detailed technical comparison with contemporary neuro-symbolic research and open-source implementations:
 - Deep-dive into `waylandzhang/tensorlogic` (`transformer_reasoning_demo.py`, `EmbeddingSpace`, attention heads as relation discovery, KG-masked attention).
 - Comparison with `pedronahum/tl-pjrt` (Python/JAX surface DSL vs bare-metal Clojure/PJRT systems compiler).
 - Connections to Fast Weights, Modern Hopfield Networks, and Memory-Augmented Neural Networks.
 - 6-dimensional architectural comparison matrix.
 
-### 4. 🚀 [Strategic Roadmap & Consumer Hardware Experiments](future_experiments.md)
-Actionable research program and proposed architectures explicitly designed for **consumer GPUs** (24GB VRAM, AMD RDNA3 / NVIDIA Ada Lovelace):
-- **Experiments E1–E5**: Core memory primitives (CAMP, KG masking, contrastive subspace, Datalog state tracking, fast weights).
-- **Experiments E6–E9**: Unified TL-block, SWE agent benchmark, in-VRAM relation induction, and native TL-Nano pre-training.
-- **Experiment E10**: Real-world knowledge pre-training (`data/wikifacts_corpus.edn`) with real GPT-2 BPE tokenizer and zero-shot cloze QA evaluation.
-
-### 5. 🏛️ [The Two Pillars of Neuro-Symbolic Transformers & Novelty Assessment](architectural_pillars_and_novelty.md)
+### 3. 🏛️ [The Two Pillars of Neuro-Symbolic Transformers & Novelty Assessment](architectural_pillars_and_novelty.md)
 Comprehensive architectural breakdown, commercial enterprise positioning, and global literature novelty assessment:
-- **Pillar 1 (Ecosystem Leverage)**: Grafting In-VRAM Datalog state tracking and ephemeral memory onto frozen open-weights models (Gemma 4), achieving $100\%$ deductive accuracy across 100 turns with $> 60\times$ VRAM savings.
-- **Pillar 2 (Groundbreaking Native Foundation Architecture — TL-Nano)**: Decoupling factual memorization from semantic routing, enabling a **$50\%$ reduction in feed-forward MLP parameters** ($D_{\text{ff}} = 2D$) and fitting full 1B-class pre-training within 24GB consumer VRAM.
+- **Pillar 1 (Ecosystem Leverage)**: Grafting In-VRAM Datalog state tracking and ephemeral memory onto frozen open-weights models (Gemma 4).
+- **Pillar 2 (Groundbreaking Native Foundation Architecture — TL-Nano)**: Decoupling factual memorization from semantic routing, enabling a **$50\%$ reduction in feed-forward MLP parameters** ($D_{\text{ff}} = 2D$).
 - **Industry Novelty Analysis**: Comparative positioning against Pedro Domingos (2025), Fast Weight Programmers, Knowledge-Enhanced Transformers, and Mixture of Experts.
 
 ---
@@ -92,7 +78,5 @@ Comprehensive architectural breakdown, commercial enterprise positioning, and gl
 | **Symbolic Logic & Datalog Fixpoints** | [`einsum.logic.symbolic`](../../src/einsum/logic/symbolic.clj) | [`einsum.logic.symbolic-test`](../../test/einsum/logic/symbolic_test.clj) |
 | **Value-Carrying Semirings** | [`einsum.logic.semiring`](../../src/einsum/logic/semiring.clj) | [`einsum.logic.semiring-test`](../../test/einsum/logic/semiring_test.clj) |
 | **Autodiff Adjoints for Probes** | [`einsum.logic.autodiff`](../../src/einsum/logic/autodiff.clj) | [`einsum.logic.autodiff-test`](../../test/einsum/logic/autodiff_test.clj) |
-| **LLM-Anchored Memory & QR** | [`tools.poc-anchored-memory`](../../archive/pocs/poc_anchored_memory.clj) | [`einsum.logic.memory.anchored-memory-test`](../../test/einsum/logic/memory/anchored_memory_test.clj) |
 | **Gemma 4 Grounding AST Block** | [`einsum.models.gemma`](../../src/einsum/models/gemma.clj) | [`einsum.integration.rocm-e2e-test`](../../test/einsum/integration/rocm_e2e_test.clj) |
-| **TL-Nano Real-Data Pre-training** | [`tools.poc-tl-nano-real-data`](../../archive/pocs/poc_tl_nano_real_data.clj) | [`einsum.models.tl-nano-test`](../../test/einsum/models/tl_nano_test.clj) |
 

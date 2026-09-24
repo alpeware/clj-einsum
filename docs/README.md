@@ -1,73 +1,57 @@
 # clj-einsum Architectural Documentation & LLM Knowledge Base
 
-Welcome to the **`clj-einsum` Architectural Documentation & LLM Knowledge Base**.
+Welcome to the **`clj-einsum` Architectural Documentation & Knowledge Base**.
 
-`clj-einsum` is a high-performance, pure Clojure numerical computing and deep learning framework built on **OpenXLA** and **StableHLO MLIR** via the Java Panama Foreign Function & Memory (FFM) API. It provides pure functional tensor abstractions, graph tracing, automatic differentiation, and hardware acceleration across CPU, Intel SYCL, AMD ROCm, and NVIDIA CUDA devices—with **Zero Java Escape Hatches** (Pure XLA compilation).
+`clj-einsum` is a high-performance numerical computing and deep learning framework for Clojure targeting **Java 25** and **OpenXLA PJRT C API** via the Foreign Function & Memory (FFM) API. It provides pure functional tensor abstractions, graph tracing, automatic differentiation, and hardware acceleration across CPU, Intel SYCL, AMD ROCm, and NVIDIA CUDA devices—with **Zero Java Escape Hatches** (pure XLA compilation).
 
----
-
-## 💡 Why OpenXLA & `clj-einsum`?
-
-1. **Pedro Domingos' Declarative Tensor Logic**: Neural network architectures are defined as homoiconic, relational AST data structures using [`einsum.logic.*`](../src/einsum/logic/core.clj) and lowered directly into StableHLO SSA graphs.
-2. **StableHLO MLIR Codegen**: Graphs are serialized into standard StableHLO MLIR text representation via [`einsum.compiler.stablehlo`](../src/einsum/compiler/stablehlo.clj#L20).
-3. **Multi-Backend Portability**: A single Clojure model definition compiles seamlessly to native CPU binaries (`libpjrt_cpu.so`), Intel GPU Level-Zero (`libpjrt_sycl.so`), AMD ROCm (`libpjrt_rocm.so`), and NVIDIA CUDA (`libcudart.so`) via [`einsum.core/init-backend!`](../src/einsum/core.clj#L45).
-4. **Kernel Fusion & Hardware Acceleration**: OpenXLA automatically fuses elementwise operations, normalizations, and GEMM matrix multiplications into hardware tensor-core kernels (Intel XMX, AMD Matrix Cores, NVIDIA Tensor Cores).
+> For the operational process, milestones (The Staircase), 4 RSI gates, and research protocol, consult [**`PROCESS.md`**](../PROCESS.md).
 
 ---
 
-## 🏛️ Architecture, RSI Gates & The Experiment Catalog
+## 🏛️ System Design & Architecture ([`architecture/`](architecture/DESIGN.md))
 
-- 🔬 **[Ali Ghodsi's 4 RSI Gates on Consumer Silicon](architecture/rsi_gates.md)**: Formal apparatus for measuring Resource Efficiency, Time Efficiency, Capability Improvement, and Closed-Loop Repeatability across Generation Lineage ($G_0 \to G_4$).
-- 🧪 **[Master Experiment Catalog](../resources/catalog/README.md)**: Hardware-grounded experimental catalog and master machine-readable registry ([`resources/catalog/registry.edn`](../resources/catalog/registry.edn)).
+Core compiler architecture, memory boundaries, and deliberation loops:
 - 📐 **[System Design & Architecture](architecture/DESIGN.md)**: Panama FFM bindings, SSA EDN IR, StableHLO codegen, and SHA-256 caching.
-- 🔁 **[Tensor-Native Agent Loop](architecture/agent_loop.md)**: Three-tier agent deliberation (reflex, deliberation, synthesis), prefix-cache handover, and verified schema commits.
+- 🔁 **[Tensor-Native Agent Deliberation Loop](architecture/agent_loop.md)**: Three-tier deliberation (reflex contractions, deliberation, discrete synthesis) and verified schema commits.
+- 💾 **[Memory Layout, VRAM & LDS Limits](architecture/memory_and_vram.md)**: Host vs. device placement rules, RDNA3 64KB LDS constraints, and `libjsig.so` signal chaining.
+- 🔌 **[OpenXLA PJRT C API](architecture/pjrt_c_api.md)**: Panama FFM dynamic symbol resolution and off-heap arena lifecycles.
+- 🔬 **[Ali Ghodsi's 4 RSI Gates on Consumer Silicon](architecture/rsi_gates.md)**: Formal apparatus for measuring Resource Efficiency, Time Efficiency, Capability Improvement, and Closed-Loop Repeatability.
 
 ---
 
-## 🧠 Declarative Tensor Logic & In-Tensor Relational Memory ([`tensor_logic/`](tensor_logic/README.md))
+## 🧠 Declarative Tensor Logic Foundations ([`tensor_logic/`](tensor_logic/README.md))
 
-Comprehensive theoretical foundations, empirical results, related work analysis, and consumer-hardware experimental roadmap for unifying LLMs with symbolic Knowledge Bases via Pedro Domingos' Declarative Tensor Logic:
-
-- 📖 **[Tensor Logic Overview & The Agent Triad Crisis](tensor_logic/README.md)**: Resolving hallucinations, online learning (zero backprop), and long-horizon context explosion in OpenXLA VRAM.
-- 📐 **[Theoretical Foundations](tensor_logic/theory.md)**: Logic as tensor contraction (Einstein summation as conjunction/quantification), value-carrying semirings (Boolean, Continuous, Tropical, Softmax), Datalog fixpoints, and outer-product superposition memory algebra.
-- 🔬 **[Empirical Experiments & Diagnostic Journey](tensor_logic/empirical_journey.md)**: Complete chronicle of experiments with Gemma 4 E2B on AMD ROCm (RX 7900 XTX), detailing the progression from de-oracled baseline to span-pooling, learned linear probes, LLM-anchored token embeddings, and QR-orthonormalization.
-- 🌐 **[Related Work & Comparative Analysis](tensor_logic/related_work.md)**: Deep technical comparison with `waylandzhang/tensorlogic`, `pedronahum/tl-pjrt`, Modern Continuous Hopfield Networks, Fast Weights, and RAG pipelines.
-- 🚀 **[Strategic Research Roadmap for Consumer Hardware](tensor_logic/future_experiments.md)**: Concrete proposals for Cross-Attention Memory Probes (E1), KG-Masked Attention (E2), Contrastive Subspace Pre-training (E3), In-VRAM Datalog Fixpoint State Trackers (E4), Zero-Gradient Fast Weights (E5), and the TL-Transformer architecture.
+Theoretical foundations for Pedro Domingos' Declarative Tensor Logic:
+- 📖 **[Tensor Logic Overview](tensor_logic/README.md)**: Resolving the autonomous agent triad (hallucinations, online learning, context explosion) in OpenXLA VRAM.
+- 📐 **[Theoretical Foundations](tensor_logic/theory.md)**: Logic as tensor contraction (Einstein summation as conjunction/quantification), value-carrying semirings, Datalog fixpoints, and outer-product superposition memory algebra.
+- 🌐 **[Related Work & Comparative Analysis](tensor_logic/related_work.md)**: Deep technical comparison with contemporary neuro-symbolic research and open-source implementations.
+- 🏛️ **[Pillars & Novelty Assessment](tensor_logic/architectural_pillars_and_novelty.md)**: Structural separation of factual memory and semantic routing.
 
 ---
 
-Empirical benchmark metrics for specific hardware and driver combinations are recorded in the dedicated **[`benchmarks/`](benchmarks/README.md)** directory:
+## 🏛️ Model Specifications & Execution Graphs ([`models/`](models/README.md))
 
-- 💻 **[Lenovo ThinkPad X1 Carbon Gen 13 (Intel Arc 140V SYCL)](benchmarks/lenovo_x1_carbon_intel_sycl.md)**: Intel Core Ultra Series 2 Lunar Lake + Intel Arc 140V iGPU via SYCL Level-Zero V2 (`26.22.038646`). Includes Python JAX vs. `clj-einsum` performance gap analysis.
-- 🖥️ **[AMD Desktop Workstation (Radeon RX 7900 XTX 24G ROCm)](benchmarks/amd_desktop_7900_xtx_rocm.md)**: AMD Ryzen CPU + AMD Radeon RX 7900 XTX 24GB VRAM RDNA3 via ROCm `7.2.0` / `6.0`.
-
----
-
----
-
-## ⚙️ OpenXLA & PJRT Hardware Knowledge Base ([`xla/`](xla/README.md))
-
-Technical specifications for long-running autonomous AI agent loops, OpenXLA hardware limits, and VRAM memory optimization algorithms:
-
-- ⚙️ **[OpenXLA & PJRT Hardware Limitations](xla/pjrt_limitations.md)**: FFM struct layout ABI (`PJRT_ExecuteOptions`), signal chaining (`libjsig.so`), 128-byte hardware memory alignment, and 32-bit `dynamic_update_slice` compiler lowerings.
-- 🔁 **[In-VRAM Autonomous Agent Execution Loop](xla/agent_vram_loop.md)**: Single-fused `stablehlo.while` execution graph, state tuple representation, in-graph sampling, and zero-copy direct device memory transfers.
-- 🧩 **[Paged KV-Cache & Long-Context VRAM Allocation](xla/paged_attention_vram.md)**: VRAM math for 256K contexts, PagedAttention block tables in StableHLO, sliding-window eviction, and FP8/INT8 in-graph quantized KV-caches.
+Every supported model family includes architectural details, hyperparameter specifications, and StableHLO execution graphs:
+- 🟢 **[Gemma 4 (E2B / E4B)](models/gemma4_e2b_e4b.md)** *(Resident VRAM inference & agent loop)*
+- 🟢 **[Gemma 3 (1B / 4B / 12B / 27B)](models/gemma3.md)**
+- 🟢 **[Gemma 2 (2B / 9B / 27B)](models/gemma2.md)**
+- 🟢 **[SmolLM (135M / 360M / 1.7B)](models/smollm.md)**
+- 🟢 **[GPT-2 (Small / Medium / Large / XL)](models/gpt2.md)**
 
 ---
 
-## 🏛️ Model Specifications Index & Execution Graphs
+## ⚙️ OpenXLA & PJRT Knowledge Base ([`xla/`](xla/README.md))
 
-Every supported model family includes architectural details, hyperparameter specifications, and visual Mermaid diagrams of its StableHLO execution graph:
-
-- 🟢 **[GPT-2 (Small / Medium / Large / XL)](models/gpt2.md)** *(Supported)*
-- 🟢 **[SmolLM (135M / 360M / 1.7B)](models/smollm.md)** *(Supported)*
-- 🟢 **[Gemma 2 (2B / 9B / 27B)](models/gemma2.md)** *(Supported)*
-- 🟢 **[Gemma 3 (1B / 4B / 12B / 27B)](models/gemma3.md)** *(Supported)*
-- 🟢 **[Gemma 4 (E2B / E4B)](models/gemma4_e2b_e4b.md)** *(Supported)*
+Hardware optimization, execution loops, and low-level PJRT compilation:
+- ⚙️ **[OpenXLA & PJRT Hardware Limitations](xla/pjrt_limitations.md)**: FFM struct layout ABI (`PJRT_ExecuteOptions`), signal chaining (`libjsig.so`), and 128-byte memory alignment.
+- 🔁 **[In-VRAM Autonomous Agent Loop](xla/agent_vram_loop.md)**: Single-fused `stablehlo.while` execution graph, state tuple representation, and zero-copy transfers.
+- 🧩 **[Paged KV-Cache & Long-Context VRAM Allocation](xla/paged_attention_vram.md)**: VRAM math for 256K contexts, PagedAttention block tables in StableHLO, and sliding-window eviction.
+- 🔍 **[Debugging, Profiling & Tracing](xla/debugging_profiling_tracing.md)**: Chrome trace generation and performance profiling.
 
 ---
 
-## 🗺️ Backlog & Full-Stack Roadmap
+## 📊 Hardware Benchmarks ([`benchmarks/`](benchmarks/README.md))
 
-- 📋 **[Model & Feature Backlog](roadmap/model_backlog.md)**: Matrix differentiating supported vs planned models and features.
-- 🚀 **[Full-Stack Consumer Hardware Roadmap](roadmap/full_stack_roadmap.md)**: Vision spanning Inference $\to$ Distillation & Evals $\to$ SFT/LoRA Fine-tuning $\to$ Pre-training.
+Hardware and driver baseline performance reports:
+- 🖥️ **[AMD Desktop Workstation (Radeon RX 7900 XTX 24GB ROCm)](benchmarks/amd_desktop_7900_xtx_rocm.md)**
+- 💻 **[Lenovo ThinkPad X1 Carbon Gen 13 (Intel Arc 140V SYCL)](benchmarks/lenovo_x1_carbon_intel_sycl.md)**
