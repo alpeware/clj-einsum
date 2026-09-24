@@ -2,7 +2,7 @@
   "Backward-chaining dead-code elimination and implicit accumulation grouping for Tensor Logic."
   (:require [einsum.logic.ast :as ast]))
 
-(defn- eqn-head-names [eqn]
+(defn eqn-head-names [eqn]
   (let [h (ast/head eqn)]
     (cond
       (= (first eqn) :while)
@@ -25,7 +25,7 @@
       :else
       [])))
 
-(defn- eqn-body-names [eqn]
+(defn eqn-body-names [eqn]
   (cond
     (= (first eqn) :while)
     (let [in-spec (nth eqn 2)

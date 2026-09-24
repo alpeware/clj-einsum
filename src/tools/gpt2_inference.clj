@@ -1,7 +1,6 @@
 (ns tools.gpt2-inference
   "End-to-End GPT-2 Autoregressive Generation Loop using clj-xla PJRT backend."
   (:require [einsum.core :as xla]
-            [einsum.logic.lower :as lower]
             [einsum.models.gpt2 :as gpt2-logic]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.tokenizer.bpe :as bpe]
@@ -157,42 +156,42 @@
                            (count header) num-layers))
 
           (println "Lowering & JIT Compiling full GPT-2 via Tensor Logic Hiccup AST...")
-          (let [ast (gpt2-logic/gpt2-model-ast {:num-layers num-layers :max-seq-len max-seq-len})
-                graph (lower/ast->graph "full_gpt2_model_logic" invars ast #{:logits})
-                exec (xla/compile-graph ctx graph)
-                pos-array (int-array (range max-seq-len))
-                pos-buf (xla/buffer-from-host-buffer ctx (:client ctx) pos-array [1 max-seq-len] 4)
-                ln-f-g-buf (xla/buffer-from-host-buffer ctx (:client ctx) ln-f-g [768] 11)
-                ln-f-b-buf (xla/buffer-from-host-buffer ctx (:client ctx) ln-f-b [768] 11)
-                wte-buf (xla/buffer-from-host-buffer ctx (:client ctx) wte-floats [50257 768] 11)
-                wpe-buf (xla/buffer-from-host-buffer ctx (:client ctx) wpe-floats [1024 768] 11)
-                weight-bufs (mapv (fn [idx w]
-                                    (let [[_var-name [_kw shape dtype]] (nth invars (+ 6 idx))
-                                          dtype-enum (if (= dtype :i32) 4 11)]
-                                      (xla/buffer-from-host-buffer ctx (:client ctx) w shape dtype-enum)))
-                                  (range (count flat-layer-weights))
-                                  flat-layer-weights)
-                flat-device-weights (into [pos-buf ln-f-g-buf ln-f-b-buf wte-buf wpe-buf] weight-bufs)]
+          (with-open [session-arena (xla/create-arena ctx)]
+            (let [ast (gpt2-logic/gpt2-model-ast {:num-layers num-layers :max-seq-len max-seq-len})
+                  gpt2-kernel (xla/compile-kernel ctx "full_gpt2_model_logic" ast {:in invars :out [:logits]})
+                  pos-array (int-array (range max-seq-len))
+                  pos-buf (xla/device-buffer session-arena pos-array [1 max-seq-len] :i32)
+                  ln-f-g-buf (xla/device-buffer session-arena ln-f-g [768] :f32)
+                  ln-f-b-buf (xla/device-buffer session-arena ln-f-b [768] :f32)
+                  wte-buf (xla/device-buffer session-arena wte-floats [50257 768] :f32)
+                  wpe-buf (xla/device-buffer session-arena wpe-floats [1024 768] :f32)
+                  weight-bufs (mapv (fn [idx w]
+                                      (let [[_var-name [_kw shape dtype]] (nth invars (+ 6 idx))]
+                                        (xla/device-buffer session-arena w shape dtype)))
+                                    (range (count flat-layer-weights))
+                                    flat-layer-weights)
+                  flat-device-weights (into [pos-buf ln-f-g-buf ln-f-b-buf wte-buf wpe-buf] weight-bufs)]
 
-            (println "Successfully compiled model to native XLA PjRtLoadedExecutable handle.")
-            (println "\nGenerating tokens autoregressively...")
-            (print prompt)
-            (flush)
-            (let [cur-tokens (atom encoded-tokens)]
-              (dotimes [_ max-new-tokens]
-                (let [seq-len (count @cur-tokens)
-                      input-tensor (prepare-input-tensor @cur-tokens max-seq-len)
-                      input-args (into [input-tensor] flat-device-weights)
-                      out (xla/execute exec input-args)
-                      logits (xla/to-host-slice out (dec seq-len) 50257 (* max-seq-len 50257))
-                      next-id (sample-logits logits temperature top-k)]
-                  (swap! cur-tokens conj next-id)
-                  (print (bpe-token->str (get id->tok next-id next-id)))
-                  (flush)))
-              (println "\n\n==================================================================")
-              (println "Final Generated Sequence:")
-              (println (proto/decode tokenizer @cur-tokens))
-              (println "=================================================================="))))))))
+              (println "Successfully compiled model to native XLA PjRtLoadedExecutable handle.")
+              (println "\nGenerating tokens autoregressively...")
+              (print prompt)
+              (flush)
+              (let [cur-tokens (atom encoded-tokens)]
+                (dotimes [_ max-new-tokens]
+                  (xla/with-device-arena [_step-arena session-arena]
+                    (let [seq-len (count @cur-tokens)
+                          input-tensor (prepare-input-tensor @cur-tokens max-seq-len)
+                          input-args (into [input-tensor] flat-device-weights)
+                          out (gpt2-kernel input-args)
+                          logits (xla/to-host-slice out (dec seq-len) 50257 (* max-seq-len 50257))
+                          next-id (sample-logits logits temperature top-k)]
+                      (swap! cur-tokens conj next-id)
+                      (print (bpe-token->str (get id->tok next-id next-id)))
+                      (flush))))
+                (println "\n\n==================================================================")
+                (println "Final Generated Sequence:")
+                (println (proto/decode tokenizer @cur-tokens))
+                (println "==================================================================")))))))))
 
 (defn -main-wrapper [& args]
   (apply -main args))

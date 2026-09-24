@@ -1,8 +1,11 @@
 (ns einsum.core
   "High-level Public Clojure API for OpenXLA PJRT backend initialization, compilation, and execution."
   (:require [einsum.compiler.compile :as compile]
+            [einsum.compiler.kernel :as kernel]
             [einsum.compiler.pjrt :as pjrt]
             [einsum.compiler.pjrt.version :as v]
+            [einsum.runtime.arena :as arena]
+            [einsum.runtime.weights :as weights]
             [clojure.java.io :as io]
             [clojure.string :as str]))
 
@@ -286,3 +289,37 @@
    (pjrt/destroy-buffer! (get-context) buffer-handle))
   ([ctx buffer-handle]
    (pjrt/destroy-buffer! ctx buffer-handle)))
+
+;; -----------------------------------------------------------------------------
+;; Scoped Device Arenas & Memory Management (Proposal 1)
+;; -----------------------------------------------------------------------------
+
+(def create-arena arena/create-arena)
+(def arena? arena/arena?)
+(def track! arena/track!)
+(def disown! arena/disown!)
+(def promote! arena/promote!)
+(def close-arena! arena/close!)
+(def device-buffer arena/device-buffer)
+(defmacro with-device-arena
+  "Executes `body` in a scoped DeviceArena. Automatically destroys all tracked
+   device buffers when the block exits (even on unhandled exception)."
+  [& args]
+  `(arena/with-device-arena ~@args))
+
+;; -----------------------------------------------------------------------------
+;; WeightStore & Automated Invar Inference (Proposal 2)
+;; -----------------------------------------------------------------------------
+
+(def create-weight-store weights/create-weight-store)
+(def infer-invars weights/infer-invars)
+
+;; -----------------------------------------------------------------------------
+;; Callable Compiled Kernels (Proposal 3)
+;; -----------------------------------------------------------------------------
+
+(def compile-kernel kernel/compile-kernel)
+(defmacro defkernel
+  "Defines a var bound to a compiled kernel function."
+  [& args]
+  `(kernel/defkernel ~@args))

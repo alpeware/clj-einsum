@@ -3,6 +3,7 @@
   (:require [einsum.agent-test]
             [einsum.compiler.autodiff-test]
             [einsum.compiler.compile-test]
+            [einsum.compiler.kernel-test]
             [einsum.compiler.pjrt-test]
             [einsum.compiler.pjrt-version-test]
             [einsum.compiler.stablehlo-test]
@@ -58,6 +59,8 @@
             [einsum.quantize-test]
             [einsum.runtime.benchmark.core-test]
             [einsum.runtime.benchmark.runner-test]
+            [einsum.runtime.arena-test]
+            [einsum.runtime.weights-test]
             [einsum.runtime.benchmark.workloads-test]
             [einsum.runtime.c2c-test]
             [einsum.runtime.generation-test]
@@ -84,10 +87,13 @@
 (def fast-namespaces
   "Pure, fast unit and generative property tests with zero hardware dependencies (<3s)."
   ['einsum.compiler.stablehlo-test
+   'einsum.compiler.kernel-test
    'einsum.compiler.pjrt-version-test
    'einsum.test-helpers.generators-test
    'einsum.test-helpers.parity-test
    'einsum.test-helpers.telemetry-test
+   'einsum.runtime.arena-test
+   'einsum.runtime.weights-test
    'einsum.runtime.benchmark.core-test
    'einsum.runtime.opt-test
    'einsum.runtime.safetensors-test

@@ -6,6 +6,7 @@
             [einsum.logic.index :as idx]
             [einsum.logic.shape :as shape]
             [einsum.compiler.stablehlo :as shlo]
+            [einsum.runtime.weights :as weights]
             [clojure.set :as set]))
 
 (defn- gen-id [prefix counter]
@@ -1419,173 +1420,151 @@
 
 (defn ast->graph
   "Compiles a Tensor Logic Hiccup AST into a validated EDN SSA graph for OpenXLA compilation.
-   Pipeline: expand -> prune (DCE) -> unify shapes -> lower to dot_general & StableHLO ops."
-  [graph-name invars ast target-heads]
-  (let [targets (if (set? target-heads) target-heads (set target-heads))
+   Pipeline: expand -> prune (DCE) -> unify shapes -> lower to dot_general & StableHLO ops.
+   Supports:
+     (ast->graph graph-name invars ast target-heads)
+     (ast->graph graph-name ast opts) where opts specifies :targets and either :invars or (:inputs + :weights)."
+  ([graph-name ast opts]
+   (let [targets (or (:targets opts) (:target-heads opts))
+         invars (or (:invars opts)
+                    (weights/infer-invars ast (or (:inputs opts) []) (or (:weights opts) {})))]
+     (ast->graph graph-name invars ast targets)))
+  ([graph-name invars ast target-heads]
+   (let [targets (if (set? target-heads) target-heads (set target-heads))
         ;; 1. Expand containers & decompose multi-term contractions
-        expanded (expand/expand-ast {} ast)
+         expanded (expand/expand-ast {} ast)
         ;; 2. Backward-chaining DCE
-        pruned (dce/prune-ast expanded targets)
+         pruned (dce/prune-ast expanded targets)
         ;; 3. Shape unification
-        in-shapes (into {} (map (fn [[v [_ shape _]]] [v (vec shape)]) invars))
-        in-dtypes (into {} (map (fn [[v [_ _ dt]]] [v dt]) invars))
-        default-dtype (or (get in-dtypes :embed_tokens) (get in-dtypes :final_norm_w) :f32)
-        const-dtypes (into {} (keep (fn [eqn]
-                                      (when (= (first eqn) :constant)
-                                        (let [h (second eqn)
-                                              h-name (if (vector? h) (first h) h)
-                                              attrs (ast/attrs eqn)
-                                              val (get attrs :value false)
-                                              t (or (:type attrs) (if (boolean? val) [:tensor [] :i1] [:tensor [] :f32]))]
-                                          [h-name (last t)])))
-                                    pruned))
-        known-dtypes (merge in-dtypes const-dtypes)
-        known-shapes (shape/unify-shapes in-shapes pruned)
+         in-shapes (into {} (map (fn [[v [_ shape _]]] [v (vec shape)]) invars))
+         in-dtypes (into {} (map (fn [[v [_ _ dt]]] [v dt]) invars))
+         default-dtype (or (get in-dtypes :embed_tokens) (get in-dtypes :final_norm_w) :f32)
+         const-dtypes (into {} (keep (fn [eqn]
+                                       (when (= (first eqn) :constant)
+                                         (let [h (second eqn)
+                                               h-name (if (vector? h) (first h) h)
+                                               attrs (ast/attrs eqn)
+                                               val (get attrs :value false)
+                                               t (or (:type attrs) (if (boolean? val) [:tensor [] :i1] [:tensor [] :f32]))]
+                                           [h-name (last t)])))
+                                     pruned))
+         known-dtypes (merge in-dtypes const-dtypes)
+         known-shapes (shape/unify-shapes in-shapes pruned)
 
-        eqns-atom (atom [])
-        counter (atom 0)
+         eqns-atom (atom [])
+         counter (atom 0)
 
         ;; 4. Track occurrences of heads for inline implicit accumulation
-        head-total-counts (frequencies (map ast/head pruned))
-        accum-state (atom {})]
+         head-total-counts (frequencies (map ast/head pruned))
+         accum-state (atom {})]
 
     ;; Lower equations in topological order
-    (doseq [eqn pruned]
-      (let [op (first eqn)
-            head (ast/head eqn)
-            h-name (first head)
-            attrs (ast/attrs eqn)
-            body (ast/body-terms eqn)
-            total (get head-total-counts head 1)
-            seen (get-in @accum-state [head :seen] 0)
-            idx (inc seen)
-            is-accum? (> total 1)
-            term-var (if is-accum?
-                       (gen-id (str (name h-name) "_term" idx) counter)
-                       h-name)
-            final-var term-var]
+     (doseq [eqn pruned]
+       (let [op (first eqn)
+             head (ast/head eqn)
+             h-name (first head)
+             attrs (ast/attrs eqn)
+             body (ast/body-terms eqn)
+             total (get head-total-counts head 1)
+             seen (get-in @accum-state [head :seen] 0)
+             idx (inc seen)
+             is-accum? (> total 1)
+             term-var (if is-accum?
+                        (gen-id (str (name h-name) "_term" idx) counter)
+                        h-name)
+             final-var term-var]
         ;; Lower the underlying equation to write into final-var
-        (cond
-          (ast/eqn? eqn)
-          (cond
-            (= (count body) 2)
-            (lower-binary-contraction! eqns-atom counter head attrs (first body) (second body)
-                                       known-shapes in-dtypes final-var)
+         (cond
+           (ast/eqn? eqn)
+           (cond
+             (= (count body) 2)
+             (lower-binary-contraction! eqns-atom counter head attrs (first body) (second body)
+                                        known-shapes in-dtypes final-var)
 
-            (= (count body) 1)
-            (lower-unary-equation! eqns-atom counter head attrs (first body)
-                                   known-shapes in-dtypes final-var)
+             (= (count body) 1)
+             (lower-unary-equation! eqns-atom counter head attrs (first body)
+                                    known-shapes in-dtypes final-var)
 
-            :else
-            (throw (ex-info "Unsupported contraction body arity after expansion" {:equation eqn})))
+             :else
+             (throw (ex-info "Unsupported contraction body arity after expansion" {:equation eqn})))
 
-          (= op :gather)
-          (lower-gather! eqns-atom counter head (first body) (second body) final-var known-shapes)
+           (= op :gather)
+           (lower-gather! eqns-atom counter head (first body) (second body) final-var known-shapes)
 
-          (= op :slice)
-          (lower-slice! eqns-atom head (first body) attrs final-var)
+           (= op :slice)
+           (lower-slice! eqns-atom head (first body) attrs final-var)
 
-          (= op :dynamic-slice)
-          (lower-dynamic-slice! eqns-atom head (first body) (second body) attrs final-var)
+           (= op :dynamic-slice)
+           (lower-dynamic-slice! eqns-atom head (first body) (second body) attrs final-var)
 
-          (= op :dynamic-update-slice)
-          (lower-dynamic-update-slice! eqns-atom counter head (first body) (second body) attrs final-var)
+           (= op :dynamic-update-slice)
+           (lower-dynamic-update-slice! eqns-atom counter head (first body) (second body) attrs final-var)
 
-          (= op :reshape)
-          (lower-reshape! eqns-atom head (first body) attrs final-var)
+           (= op :reshape)
+           (lower-reshape! eqns-atom head (first body) attrs final-var)
 
-          (= op :layer-norm)
-          (lower-layer-norm! eqns-atom counter head (first body) (second body) (nth body 2) attrs final-var)
+           (= op :layer-norm)
+           (lower-layer-norm! eqns-atom counter head (first body) (second body) (nth body 2) attrs final-var)
 
-          (= op :causal-softmax)
-          (lower-causal-softmax! eqns-atom counter (first body) attrs final-var known-shapes default-dtype)
+           (= op :causal-softmax)
+           (lower-causal-softmax! eqns-atom counter (first body) attrs final-var known-shapes default-dtype)
 
-          (= op :softmax)
-          (lower-softmax! eqns-atom counter head (first body) attrs final-var known-shapes default-dtype)
+           (= op :softmax)
+           (lower-softmax! eqns-atom counter head (first body) attrs final-var known-shapes default-dtype)
 
-          (= op :chunked-attention)
-          (lower-chunked-attention! eqns-atom counter head (first body) (second body) (nth body 2) attrs final-var known-shapes default-dtype)
+           (= op :chunked-attention)
+           (lower-chunked-attention! eqns-atom counter head (first body) (second body) (nth body 2) attrs final-var known-shapes default-dtype)
 
-          (or (= op :rms-norm) (= op :gemma-rms-norm))
-          (lower-rms-norm! eqns-atom counter head (first body) (second body)
-                           (if (= op :gemma-rms-norm) (assoc attrs :gemma? true) attrs)
-                           final-var known-shapes)
+           (or (= op :rms-norm) (= op :gemma-rms-norm))
+           (lower-rms-norm! eqns-atom counter head (first body) (second body)
+                            (if (= op :gemma-rms-norm) (assoc attrs :gemma? true) attrs)
+                            final-var known-shapes)
 
-          (= op :rope)
-          (lower-rope! eqns-atom counter head (first body) attrs final-var known-shapes default-dtype)
+           (= op :rope)
+           (lower-rope! eqns-atom counter head (first body) attrs final-var known-shapes default-dtype)
 
-          (= op :fwht)
-          (lower-fwht! eqns-atom counter head (first body) attrs final-var known-shapes)
+           (= op :fwht)
+           (lower-fwht! eqns-atom counter head (first body) attrs final-var known-shapes)
 
-          (= op :rht)
-          (lower-rht! eqns-atom counter head (first body) (second body) attrs final-var known-shapes)
+           (= op :rht)
+           (lower-rht! eqns-atom counter head (first body) (second body) attrs final-var known-shapes)
 
-          (= op :hadamard-block-128)
-          (lower-hadamard-block-128! eqns-atom counter head (first body) (second body) attrs final-var known-shapes)
+           (= op :hadamard-block-128)
+           (lower-hadamard-block-128! eqns-atom counter head (first body) (second body) attrs final-var known-shapes)
 
-          (= op :quip-dequant)
-          (lower-quip-dequant! eqns-atom counter head (first body) (second body) (nth body 2 nil) attrs final-var known-shapes)
+           (= op :quip-dequant)
+           (lower-quip-dequant! eqns-atom counter head (first body) (second body) (nth body 2 nil) attrs final-var known-shapes)
 
-          (= op :exl3-dequant)
-          (lower-exl3-dequant! eqns-atom counter head (first body) (second body) attrs final-var known-shapes)
+           (= op :exl3-dequant)
+           (lower-exl3-dequant! eqns-atom counter head (first body) (second body) attrs final-var known-shapes)
 
-          (= op :int4-unpack)
-          (lower-int4-unpack! eqns-atom counter head (first body) (second body) attrs final-var known-shapes default-dtype)
+           (= op :int4-unpack)
+           (lower-int4-unpack! eqns-atom counter head (first body) (second body) attrs final-var known-shapes default-dtype)
 
-          (or (= op :ternary-unpack)
-              (= op :ternary-dequant))
-          (lower-ternary-unpack! eqns-atom counter head (first body) (second body) attrs final-var known-shapes default-dtype)
+           (or (= op :ternary-unpack)
+               (= op :ternary-dequant))
+           (lower-ternary-unpack! eqns-atom counter head (first body) (second body) attrs final-var known-shapes default-dtype)
 
-          (= op :while)
-          (let [out-spec (second eqn)
-                in-spec (nth eqn 2)
-                out-vars (mapv #(if (vector? %) (first %) %) (if (vector? out-spec) out-spec [out-spec]))
-                in-vars (mapv #(if (vector? %) (first %) %) (if (vector? in-spec) in-spec [in-spec]))
-                cond-node (or (get attrs :cond)
-                              (get attrs :cond-node)
-                              (get attrs :cond-ast)
-                              (first (filter #(and (vector? %) (= (first %) :cond)) (drop 3 eqn))))
-                cond-graph (when cond-node
-                             (let [cond-head (second cond-node)
-                                   cond-out (if (vector? cond-head) (first cond-head) cond-head)
-                                   cond-children (filter vector?
-                                                         (if (map? (nth cond-node 2 nil))
-                                                           (drop 3 cond-node)
-                                                           (drop 2 cond-node)))
-                                   cond-arg-names (or (:cond-args attrs)
-                                                      (:args (ast/attrs cond-node))
-                                                      in-vars)
-                                   cond-invars (mapv (fn [arg-name in-var]
-                                                       (let [sh (or (get in-shapes in-var)
-                                                                    (get known-shapes in-var)
-                                                                    [])
-                                                             dt (or (get known-dtypes in-var)
-                                                                    (get in-dtypes in-var)
-                                                                    (when (re-find #"(?:step|pos|count|max)" (name in-var)) :i32)
-                                                                    (when (re-find #"(?:stopped|bool|flag|false|true)" (name in-var)) :i1)
-                                                                    :i32)]
-                                                         [arg-name [:tensor sh dt]]))
-                                                     cond-arg-names
-                                                     in-vars)
-                                   cond-ast (vec (into [:block {}] cond-children))]
-                               (ast->graph "cond" cond-invars cond-ast [cond-out])))
-                body-node (or (get attrs :body)
-                              (get attrs :body-node)
-                              (get attrs :body-ast)
-                              (first (filter #(and (vector? %) (= (first %) :body)) (drop 3 eqn))))
-                body-graph (when body-node
-                             (let [body-head (second body-node)
-                                   body-outs (if (vector? body-head)
-                                               (mapv #(if (vector? %) (first %) %) body-head)
-                                               [body-head])
-                                   body-children (filter vector?
-                                                         (if (map? (nth body-node 2 nil))
-                                                           (drop 3 body-node)
-                                                           (drop 2 body-node)))
-                                   body-arg-names (or (:body-args attrs)
-                                                      (:args (ast/attrs body-node))
-                                                      in-vars)
-                                   carry-invars (mapv (fn [arg-name in-var]
+           (= op :while)
+           (let [out-spec (second eqn)
+                 in-spec (nth eqn 2)
+                 out-vars (mapv #(if (vector? %) (first %) %) (if (vector? out-spec) out-spec [out-spec]))
+                 in-vars (mapv #(if (vector? %) (first %) %) (if (vector? in-spec) in-spec [in-spec]))
+                 cond-node (or (get attrs :cond)
+                               (get attrs :cond-node)
+                               (get attrs :cond-ast)
+                               (first (filter #(and (vector? %) (= (first %) :cond)) (drop 3 eqn))))
+                 cond-graph (when cond-node
+                              (let [cond-head (second cond-node)
+                                    cond-out (if (vector? cond-head) (first cond-head) cond-head)
+                                    cond-children (filter vector?
+                                                          (if (map? (nth cond-node 2 nil))
+                                                            (drop 3 cond-node)
+                                                            (drop 2 cond-node)))
+                                    cond-arg-names (or (:cond-args attrs)
+                                                       (:args (ast/attrs cond-node))
+                                                       in-vars)
+                                    cond-invars (mapv (fn [arg-name in-var]
                                                         (let [sh (or (get in-shapes in-var)
                                                                      (get known-shapes in-var)
                                                                      [])
@@ -1595,182 +1574,212 @@
                                                                      (when (re-find #"(?:stopped|bool|flag|false|true)" (name in-var)) :i1)
                                                                      :i32)]
                                                           [arg-name [:tensor sh dt]]))
-                                                      body-arg-names
+                                                      cond-arg-names
                                                       in-vars)
-                                   all-body-invars (into carry-invars invars)
-                                   body-ast (vec (into [:block {}] body-children))
-                                   bg (ast->graph "body" all-body-invars body-ast body-outs)]
-                               (assoc bg :carry-invars carry-invars)))
-                attrs (cond-> attrs
-                        cond-graph (assoc :cond-graph cond-graph)
-                        body-graph (assoc :body-graph body-graph))]
-            (swap! eqns-atom conj {:op :stablehlo/while
-                                   :invars in-vars
-                                   :outvars out-vars
-                                   :attrs attrs}))
+                                    cond-ast (vec (into [:block {}] cond-children))]
+                                (ast->graph "cond" cond-invars cond-ast [cond-out])))
+                 body-node (or (get attrs :body)
+                               (get attrs :body-node)
+                               (get attrs :body-ast)
+                               (first (filter #(and (vector? %) (= (first %) :body)) (drop 3 eqn))))
+                 body-graph (when body-node
+                              (let [body-head (second body-node)
+                                    body-outs (if (vector? body-head)
+                                                (mapv #(if (vector? %) (first %) %) body-head)
+                                                [body-head])
+                                    body-children (filter vector?
+                                                          (if (map? (nth body-node 2 nil))
+                                                            (drop 3 body-node)
+                                                            (drop 2 body-node)))
+                                    body-arg-names (or (:body-args attrs)
+                                                       (:args (ast/attrs body-node))
+                                                       in-vars)
+                                    carry-invars (mapv (fn [arg-name in-var]
+                                                         (let [sh (or (get in-shapes in-var)
+                                                                      (get known-shapes in-var)
+                                                                      [])
+                                                               dt (or (get known-dtypes in-var)
+                                                                      (get in-dtypes in-var)
+                                                                      (when (re-find #"(?:step|pos|count|max)" (name in-var)) :i32)
+                                                                      (when (re-find #"(?:stopped|bool|flag|false|true)" (name in-var)) :i1)
+                                                                      :i32)]
+                                                           [arg-name [:tensor sh dt]]))
+                                                       body-arg-names
+                                                       in-vars)
+                                    all-body-invars (into carry-invars invars)
+                                    body-ast (vec (into [:block {}] body-children))
+                                    bg (ast->graph "body" all-body-invars body-ast body-outs)]
+                                (assoc bg :carry-invars carry-invars)))
+                 attrs (cond-> attrs
+                         cond-graph (assoc :cond-graph cond-graph)
+                         body-graph (assoc :body-graph body-graph))]
+             (swap! eqns-atom conj {:op :stablehlo/while
+                                    :invars in-vars
+                                    :outvars out-vars
+                                    :attrs attrs}))
 
-          (or (= op :+) (= op :add))
-          (let [h-name (if (vector? head) (first head) head)]
-            (swap! eqns-atom conj {:op :stablehlo/add
-                                   :invars [(first (first body)) (first (second body))]
-                                   :outvars [h-name]}))
+           (or (= op :+) (= op :add))
+           (let [h-name (if (vector? head) (first head) head)]
+             (swap! eqns-atom conj {:op :stablehlo/add
+                                    :invars [(first (first body)) (first (second body))]
+                                    :outvars [h-name]}))
 
-          (or (= op :-) (= op :subtract))
-          (let [h-name (if (vector? head) (first head) head)]
-            (swap! eqns-atom conj {:op :stablehlo/subtract
-                                   :invars [(first (first body)) (first (second body))]
-                                   :outvars [h-name]}))
+           (or (= op :-) (= op :subtract))
+           (let [h-name (if (vector? head) (first head) head)]
+             (swap! eqns-atom conj {:op :stablehlo/subtract
+                                    :invars [(first (first body)) (first (second body))]
+                                    :outvars [h-name]}))
 
-          (or (= op :*) (= op :multiply))
-          (let [h-name (if (vector? head) (first head) head)]
-            (swap! eqns-atom conj {:op :stablehlo/multiply
-                                   :invars [(first (first body)) (first (second body))]
-                                   :outvars [h-name]}))
+           (or (= op :*) (= op :multiply))
+           (let [h-name (if (vector? head) (first head) head)]
+             (swap! eqns-atom conj {:op :stablehlo/multiply
+                                    :invars [(first (first body)) (first (second body))]
+                                    :outvars [h-name]}))
 
-          (or (= op :/) (= op :divide))
-          (let [h-name (if (vector? head) (first head) head)]
-            (swap! eqns-atom conj {:op :stablehlo/divide
-                                   :invars [(first (first body)) (first (second body))]
-                                   :outvars [h-name]}))
+           (or (= op :/) (= op :divide))
+           (let [h-name (if (vector? head) (first head) head)]
+             (swap! eqns-atom conj {:op :stablehlo/divide
+                                    :invars [(first (first body)) (first (second body))]
+                                    :outvars [h-name]}))
 
-          (or (= op :min) (= op :minimum))
-          (let [h-name (if (vector? head) (first head) head)]
-            (swap! eqns-atom conj {:op :stablehlo/minimum
-                                   :invars [(first (first body)) (first (second body))]
-                                   :outvars [h-name]}))
+           (or (= op :min) (= op :minimum))
+           (let [h-name (if (vector? head) (first head) head)]
+             (swap! eqns-atom conj {:op :stablehlo/minimum
+                                    :invars [(first (first body)) (first (second body))]
+                                    :outvars [h-name]}))
 
-          (or (= op :max) (= op :maximum))
-          (let [h-name (if (vector? head) (first head) head)]
-            (swap! eqns-atom conj {:op :stablehlo/maximum
-                                   :invars [(first (first body)) (first (second body))]
-                                   :outvars [h-name]}))
+           (or (= op :max) (= op :maximum))
+           (let [h-name (if (vector? head) (first head) head)]
+             (swap! eqns-atom conj {:op :stablehlo/maximum
+                                    :invars [(first (first body)) (first (second body))]
+                                    :outvars [h-name]}))
 
-          (= op :convert)
-          (let [h-name (if (vector? head) (first head) head)
-                target-dtype (or (:target-dtype attrs) (:target_dtype attrs) :f32)]
-            (swap! eqns-atom conj {:op :stablehlo/convert
-                                   :invars [(first (first body))]
-                                   :outvars [h-name]
-                                   :attrs {:target_dtype target-dtype}}))
+           (= op :convert)
+           (let [h-name (if (vector? head) (first head) head)
+                 target-dtype (or (:target-dtype attrs) (:target_dtype attrs) :f32)]
+             (swap! eqns-atom conj {:op :stablehlo/convert
+                                    :invars [(first (first body))]
+                                    :outvars [h-name]
+                                    :attrs {:target_dtype target-dtype}}))
 
-          (= op :argmax)
-          (let [h-name (if (vector? head) (first head) head)
-                axis (or (:axis attrs) (:dimension attrs) 1)]
-            (swap! eqns-atom conj {:op :stablehlo/argmax
-                                   :invars [(first (first body))]
-                                   :outvars [h-name]
-                                   :attrs {:axis axis}}))
+           (= op :argmax)
+           (let [h-name (if (vector? head) (first head) head)
+                 axis (or (:axis attrs) (:dimension attrs) 1)]
+             (swap! eqns-atom conj {:op :stablehlo/argmax
+                                    :invars [(first (first body))]
+                                    :outvars [h-name]
+                                    :attrs {:axis axis}}))
 
-          (= op :compare)
-          (let [h-name (if (vector? head) (first head) head)
-                in0 (first (first body))
-                in1 (first (second body))
-                in0-shape (get known-shapes in0)
-                in1-shape (get known-shapes in1)
-                dir (or (:direction attrs) (:comparison_direction attrs) "LT")
-                dir-str (if (keyword? dir) (name dir) (str dir))]
-            (if (and in0-shape in1-shape (not= in0-shape in1-shape))
-              (let [[target-shape bcast-var other-var other-is-first?]
-                    (if (>= (count in0-shape) (count in1-shape))
-                      [in0-shape in1 in0 true]
-                      [in1-shape in0 in1 false])
-                    bcast-shape (get known-shapes bcast-var [])
-                    bcast-dims (if (empty? bcast-shape)
-                                 []
-                                 (vec (range (- (count target-shape) (count bcast-shape))
-                                             (count target-shape))))
-                    out-b (gen-id "t_cmp_bcast" counter)
-                    bcast-eqn {:op :stablehlo/broadcast_in_dim
-                               :invars [bcast-var]
-                               :outvars [out-b]
-                               :attrs {:broadcast_dimensions bcast-dims :target_shape target-shape}}
-                    invars (if other-is-first? [other-var out-b] [out-b other-var])]
-                (swap! eqns-atom conj bcast-eqn {:op :stablehlo/compare
-                                                 :invars invars
-                                                 :outvars [h-name]
-                                                 :attrs {:comparison_direction dir-str}}))
-              (swap! eqns-atom conj {:op :stablehlo/compare
-                                     :invars [in0 in1]
-                                     :outvars [h-name]
-                                     :attrs {:comparison_direction dir-str}})))
+           (= op :compare)
+           (let [h-name (if (vector? head) (first head) head)
+                 in0 (first (first body))
+                 in1 (first (second body))
+                 in0-shape (get known-shapes in0)
+                 in1-shape (get known-shapes in1)
+                 dir (or (:direction attrs) (:comparison_direction attrs) "LT")
+                 dir-str (if (keyword? dir) (name dir) (str dir))]
+             (if (and in0-shape in1-shape (not= in0-shape in1-shape))
+               (let [[target-shape bcast-var other-var other-is-first?]
+                     (if (>= (count in0-shape) (count in1-shape))
+                       [in0-shape in1 in0 true]
+                       [in1-shape in0 in1 false])
+                     bcast-shape (get known-shapes bcast-var [])
+                     bcast-dims (if (empty? bcast-shape)
+                                  []
+                                  (vec (range (- (count target-shape) (count bcast-shape))
+                                              (count target-shape))))
+                     out-b (gen-id "t_cmp_bcast" counter)
+                     bcast-eqn {:op :stablehlo/broadcast_in_dim
+                                :invars [bcast-var]
+                                :outvars [out-b]
+                                :attrs {:broadcast_dimensions bcast-dims :target_shape target-shape}}
+                     invars (if other-is-first? [other-var out-b] [out-b other-var])]
+                 (swap! eqns-atom conj bcast-eqn {:op :stablehlo/compare
+                                                  :invars invars
+                                                  :outvars [h-name]
+                                                  :attrs {:comparison_direction dir-str}}))
+               (swap! eqns-atom conj {:op :stablehlo/compare
+                                      :invars [in0 in1]
+                                      :outvars [h-name]
+                                      :attrs {:comparison_direction dir-str}})))
 
-          (= op :not)
-          (let [h-name (if (vector? head) (first head) head)]
-            (swap! eqns-atom conj {:op :stablehlo/not
-                                   :invars [(first (first body))]
-                                   :outvars [h-name]}))
+           (= op :not)
+           (let [h-name (if (vector? head) (first head) head)]
+             (swap! eqns-atom conj {:op :stablehlo/not
+                                    :invars [(first (first body))]
+                                    :outvars [h-name]}))
 
-          (or (= op :and) (= op :or))
-          (let [h-name (if (vector? head) (first head) head)
-                op-kw (if (= op :and) :stablehlo/and :stablehlo/or)]
-            (swap! eqns-atom conj {:op op-kw
-                                   :invars [(first (first body)) (first (second body))]
-                                   :outvars [h-name]}))
+           (or (= op :and) (= op :or))
+           (let [h-name (if (vector? head) (first head) head)
+                 op-kw (if (= op :and) :stablehlo/and :stablehlo/or)]
+             (swap! eqns-atom conj {:op op-kw
+                                    :invars [(first (first body)) (first (second body))]
+                                    :outvars [h-name]}))
 
-          (= op :cond)
-          (let [cond-children (filter vector?
-                                      (if (map? (nth eqn 2 nil))
-                                        (drop 3 eqn)
-                                        (drop 2 eqn)))]
-            (doseq [child cond-children]
-              (let [c-op (first child)
-                    c-head (second child)
-                    c-body (ast/body-terms child)
-                    c-attrs (ast/attrs child)]
-                (case c-op
-                  :compare
-                  (let [h (if (vector? c-head) (first c-head) c-head)
-                        dir (or (:direction c-attrs) (:comparison_direction c-attrs) "LT")
-                        dir-str (if (keyword? dir) (name dir) (str dir))]
-                    (swap! eqns-atom conj {:op :stablehlo/compare
-                                           :invars [(first (first c-body)) (first (second c-body))]
-                                           :outvars [h]
-                                           :attrs {:comparison_direction dir-str}}))
-                  :not
-                  (let [h (if (vector? c-head) (first c-head) c-head)]
-                    (swap! eqns-atom conj {:op :stablehlo/not
-                                           :invars [(first (first c-body))]
-                                           :outvars [h]}))
-                  :and
-                  (let [h (if (vector? c-head) (first c-head) c-head)]
-                    (swap! eqns-atom conj {:op :stablehlo/and
-                                           :invars [(first (first c-body)) (first (second c-body))]
-                                           :outvars [h]}))
-                  :or
-                  (let [h (if (vector? c-head) (first c-head) c-head)]
-                    (swap! eqns-atom conj {:op :stablehlo/or
-                                           :invars [(first (first c-body)) (first (second c-body))]
-                                           :outvars [h]}))
-                  nil))))
+           (= op :cond)
+           (let [cond-children (filter vector?
+                                       (if (map? (nth eqn 2 nil))
+                                         (drop 3 eqn)
+                                         (drop 2 eqn)))]
+             (doseq [child cond-children]
+               (let [c-op (first child)
+                     c-head (second child)
+                     c-body (ast/body-terms child)
+                     c-attrs (ast/attrs child)]
+                 (case c-op
+                   :compare
+                   (let [h (if (vector? c-head) (first c-head) c-head)
+                         dir (or (:direction c-attrs) (:comparison_direction c-attrs) "LT")
+                         dir-str (if (keyword? dir) (name dir) (str dir))]
+                     (swap! eqns-atom conj {:op :stablehlo/compare
+                                            :invars [(first (first c-body)) (first (second c-body))]
+                                            :outvars [h]
+                                            :attrs {:comparison_direction dir-str}}))
+                   :not
+                   (let [h (if (vector? c-head) (first c-head) c-head)]
+                     (swap! eqns-atom conj {:op :stablehlo/not
+                                            :invars [(first (first c-body))]
+                                            :outvars [h]}))
+                   :and
+                   (let [h (if (vector? c-head) (first c-head) c-head)]
+                     (swap! eqns-atom conj {:op :stablehlo/and
+                                            :invars [(first (first c-body)) (first (second c-body))]
+                                            :outvars [h]}))
+                   :or
+                   (let [h (if (vector? c-head) (first c-head) c-head)]
+                     (swap! eqns-atom conj {:op :stablehlo/or
+                                            :invars [(first (first c-body)) (first (second c-body))]
+                                            :outvars [h]}))
+                   nil))))
 
-          (= op :constant)
-          (let [h (second eqn)
-                h-name (if (vector? h) (first h) h)
-                val (get attrs :value false)
-                val-t (or (:type attrs) (if (boolean? val) [:tensor [] :i1] [:tensor [] :f32]))]
-            (swap! eqns-atom conj {:op :stablehlo/constant
-                                   :value val
-                                   :type val-t
-                                   :outvars [h-name]}))
+           (= op :constant)
+           (let [h (second eqn)
+                 h-name (if (vector? h) (first h) h)
+                 val (get attrs :value false)
+                 val-t (or (:type attrs) (if (boolean? val) [:tensor [] :i1] [:tensor [] :f32]))]
+             (swap! eqns-atom conj {:op :stablehlo/constant
+                                    :value val
+                                    :type val-t
+                                    :outvars [h-name]}))
 
-          :else
-          (throw (ex-info "Unknown AST equation or lowering hook" {:equation eqn :op op})))
+           :else
+           (throw (ex-info "Unknown AST equation or lowering hook" {:equation eqn :op op})))
 
         ;; If multi-term accumulation, emit inline addition immediately when idx > 1
-        (when is-accum?
-          (if (= idx 1)
-            (swap! accum-state assoc head {:seen 1 :current-var term-var})
-            (let [prev-var (get-in @accum-state [head :current-var])
-                  is-last? (= idx total)
-                  out-var (if is-last? h-name (gen-id (str (name h-name) "_acc" idx) counter))
-                  add-eqn {:op :stablehlo/add :invars [prev-var term-var] :outvars [out-var]}]
-              (swap! eqns-atom conj add-eqn)
-              (swap! accum-state assoc head {:seen idx :current-var out-var}))))))
+         (when is-accum?
+           (if (= idx 1)
+             (swap! accum-state assoc head {:seen 1 :current-var term-var})
+             (let [prev-var (get-in @accum-state [head :current-var])
+                   is-last? (= idx total)
+                   out-var (if is-last? h-name (gen-id (str (name h-name) "_acc" idx) counter))
+                   add-eqn {:op :stablehlo/add :invars [prev-var term-var] :outvars [out-var]}]
+               (swap! eqns-atom conj add-eqn)
+               (swap! accum-state assoc head {:seen idx :current-var out-var}))))))
 
-    (let [outvars (if (sequential? target-heads) (vec target-heads) (vec targets))
-          graph {:name graph-name
-                 :invars invars
-                 :outvars outvars
-                 :known-shapes known-shapes
-                 :eqns @eqns-atom}]
-      (shlo/validate-graph graph))))
+     (let [outvars (if (sequential? target-heads) (vec target-heads) (vec targets))
+           graph {:name graph-name
+                  :invars invars
+                  :outvars outvars
+                  :known-shapes known-shapes
+                  :eqns @eqns-atom}]
+       (shlo/validate-graph graph)))))
