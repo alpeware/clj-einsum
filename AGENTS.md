@@ -7,7 +7,7 @@
 * **Rule 1: Strict TDD.** Write generative tests (`clojure.test.check`) for invariants *before* implementing core logic.
 * **Rule 2: Pure Functions.** The core must remain pure (Sans-IO). Side effects are strictly isolated to boundary shells.
 * **Rule 3: Clean Local Commits.** Run format (`clojure -M:format`), lint (`clojure -M:lint`), and tests (`clojure -M:test fast` or `clojure -M:test all`) successfully before committing. Zero errors and zero linter warnings allowed.
-* **Rule 4: Zero Java Escape Hatches (Pure XLA Execution).** All tensor math, neural network layers, and forward passes MUST be written in pure Clojure using Pedro Domingos' Declarative Tensor Logic (`einsum.logic.*`) and compiled into StableHLO MLIR for OpenXLA execution via PJRT. Under NO circumstances should custom `.java` classes, host-side primitive float arrays (`float[][]`), or manual CPU matrix math engines be created to bypass XLA compilation.
+* **Rule 4: Maximize Mechanical Sympathy (Pure XLA Device Core + Host Pragmatism).** Place workloads where they run best: dense contractions, neural network layers, attention graphs, and autoregressive generation loops compile via Declarative Tensor Logic (`einsum.logic.*`) into StableHLO MLIR for in-accelerator OpenXLA PJRT execution (zero host-device round-trips in the hot path). Discrete index lookups, schema checks, tokenization, and commitment gates run host-side in pure Clojure persistent data structures. Do not build custom host matrix-math engines or ad-hoc Java classes to bypass XLA compilation, but do not force host-suited discrete operations onto device memory.
 
 ---
 
