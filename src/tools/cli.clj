@@ -36,6 +36,7 @@
    :repetition-penalty 1.10
    :backend :cpu
    :precision :bf16
+   :thinking false
    :quiet false
    :verbose false})
 
@@ -206,7 +207,12 @@
                  (recur (subvec remaining 1) (assoc opts :quiet true)))
 
              (or (= arg "--thinking") (= arg "--think"))
-             (recur (subvec remaining 1) (assoc opts :thinking true))
+             (if (and val (not (str/starts-with? val "--")))
+               (recur (subvec remaining 2) (assoc opts :thinking (Boolean/parseBoolean val)))
+               (recur (subvec remaining 1) (assoc opts :thinking true)))
+
+             (or (= arg "--no-thinking") (= arg "--no-think"))
+             (recur (subvec remaining 1) (assoc opts :thinking false))
 
              (= arg "--ternary")
              (recur (subvec remaining 1) (assoc opts :precision :ternary :is-ternary true))

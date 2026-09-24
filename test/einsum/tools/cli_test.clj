@@ -16,7 +16,7 @@
 
 (defspec prop-parse-cli-args-numbers 50
   (prop/for-all [max-tokens (gen/choose 1 1024)
-                 temp (gen/fmap #(+ 0.1 (Math/abs (double %))) gen/double)
+                 temp (gen/double* {:min 0.05 :max 2.0 :NaN? false :infinite? false})
                  top-k (gen/choose 1 100)]
                 (let [args ["--max-new-tokens" (str max-tokens)
                             "--temperature" (str temp)

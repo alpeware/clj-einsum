@@ -31,6 +31,7 @@ Clojure syntax rules:
    :method nil
    :backend :cpu
    :precision :bf16
+   :thinking false
    :out "scratch/output_agent_loop.txt"
    :profile-out "scratch/gemma4_agent_profile.edn"
    :chrome-trace-out "scratch/gemma4_agent_chrome_trace.json"
@@ -52,36 +53,74 @@ Clojure syntax rules:
                           (recur (inc i) (dec depth)))
               :else (recur (inc i) depth))))))))
 
+(defn extract-thinking-trace
+  "Extracts reasoning thoughts from model output text.
+   Supports Gemma 4 native channel (<|channel>thought ... <channel|>),
+   XML tags (<thought>...</thought>, <think>...</think>),
+   and Gemma thought tags (<|thought|>...<thought|>)."
+  [text]
+  (when (string? text)
+    (let [patterns [#"(?s)<\|channel>thought\s*(.*?)(?:<channel\|>|$)"
+                    #"(?s)<\|thought\|>\s*(.*?)(?:<thought\|>|$)"
+                    #"(?s)<thought>\s*(.*?)(?:</thought>|$)"
+                    #"(?s)<think>\s*(.*?)(?:</think>|$)"]
+          matches (mapcat (fn [pat]
+                            (mapv second (re-seq pat text)))
+                          patterns)
+          cleaned (mapv str/trim (filter #(seq (str/trim %)) matches))]
+      (when (seq cleaned)
+        (str/join "\n\n" cleaned)))))
+
+(defn strip-thinking-trace
+  "Removes thinking and reasoning blocks from text to isolate final response or tool calls."
+  [text]
+  (if (string? text)
+    (let [patterns [#"(?s)<\|channel>thought\s*.*?(?:<channel\|>|$)"
+                    #"(?s)<\|thought\|>\s*.*?(?:<thought\|>|$)"
+                    #"(?s)<thought>\s*.*?(?:</thought>|$)"
+                    #"(?s)<think>\s*.*?(?:</think>|$)"]]
+      (str/trim (reduce (fn [acc pat] (str/replace acc pat "")) text patterns)))
+    text))
+
 (defn extract-clojure-code-blocks
   "Extracts all ```clojure ... ``` or ```clj ... ``` code block strings, Gemma 4 <|tool_call> tags, or raw S-expressions from text."
   [text]
-  (let [pattern #"(?s)```(?:clojure|clj)?\s*\n?(.*?)(?:```|$)"
-        raw-matches (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq pattern text))))
-        cleaned-blocks (mapv (fn [block]
-                               (-> block
-                                   (str/replace #"^```[a-z]*>?" "")
-                                   (str/replace #"```$" "")
-                                   str/trim))
-                             raw-matches)
-        tool-call-pattern #"(?s)<\|tool_call>call:(\w+)(.*?)(?:<tool_call\|>|$)"
-        tool-call-matches (mapv (fn [[_ fn-name args]]
-                                  (let [clean-args (str/trim (str/replace args #"^\{|\}$" ""))]
-                                    (if (seq clean-args)
-                                      (str "(" fn-name " " clean-args ")")
-                                      (str "(" fn-name ")"))))
-                                (re-seq tool-call-pattern text))
-        raw-fn-pattern #"(?s)\((?:defn|def|range|take|filter|map|reduce|\+|\-|\*|\/|list-files|slurp|system-info|println)\b[^\)]*\)"
-        raw-matches (mapv str/trim (re-seq raw-fn-pattern text))]
-    (cond
-      (seq cleaned-blocks) (vec cleaned-blocks)
-      (seq tool-call-matches) (vec tool-call-matches)
-      (seq raw-matches) (vec raw-matches)
-      :else (if-let [sexpr (extract-balanced-sexpr text)]
-              (let [trimmed (str/trim sexpr)]
-                (if (and (> (count trimmed) 3) (re-find #"^\([a-zA-Z\+\-\*\/0-9]" trimmed))
-                  [trimmed]
-                  []))
-              []))))
+  (let [extract-raw (fn [s allow-loose?]
+                      (let [pattern #"(?s)```(?:clojure|clj)?\s*\n?(.*?)(?:```|$)"
+                            raw-matches (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq pattern s))))
+                            cleaned-blocks (mapv (fn [block]
+                                                   (-> block
+                                                       (str/replace #"^```[a-z]*>?" "")
+                                                       (str/replace #"```$" "")
+                                                       str/trim))
+                                                 raw-matches)
+                            tool-call-pattern #"(?s)<\|tool_call>call:(\w+)(.*?)(?:<tool_call\|>|$)"
+                            tool-call-matches (mapv (fn [[_ fn-name args]]
+                                                      (let [clean-args (str/trim (str/replace args #"^\{|\}$" ""))]
+                                                        (if (seq clean-args)
+                                                          (str "(" fn-name " " clean-args ")")
+                                                          (str "(" fn-name ")"))))
+                                                    (re-seq tool-call-pattern s))]
+                        (cond
+                          (seq cleaned-blocks) (vec cleaned-blocks)
+                          (seq tool-call-matches) (vec tool-call-matches)
+                          allow-loose?
+                          (let [raw-fn-pattern #"(?s)\((?:defn|def|range|take|filter|map|reduce|\+|\-|\*|\/|list-files|slurp|system-info|println)\b[^\)]*\)"
+                                raw-matches (mapv str/trim (re-seq raw-fn-pattern s))]
+                            (cond
+                              (seq raw-matches) (vec raw-matches)
+                              :else (if-let [sexpr (extract-balanced-sexpr s)]
+                                      (let [trimmed (str/trim sexpr)]
+                                        (if (and (> (count trimmed) 3) (re-find #"^\([a-zA-Z\+\-\*\/0-9]" trimmed))
+                                          [trimmed]
+                                          []))
+                                      [])))
+                          :else [])))
+        stripped (strip-thinking-trace text)
+        stripped-blocks (extract-raw stripped true)]
+    (if (seq stripped-blocks)
+      stripped-blocks
+      (extract-raw text false))))
 
 (defn create-agent-sci-ctx
   "Creates a safe SCI sandbox context populated with useful Clojure agent helper functions."
@@ -132,21 +171,50 @@ Clojure syntax rules:
 
 (defn format-agent-chat-prompt
   "Formats conversation history into Gemma 4 Turn syntax, placing system instructions in a native system turn.
-   Applies sliding window context retention for long histories to preserve the initial task and alternating turns."
+   Applies sliding window context retention for long histories to preserve the initial task and alternating turns.
+   When `thinking?` is enabled, injects the native Gemma 4 `<|think|>` token into the system turn."
   ([system-prompt history]
-   (format-agent-chat-prompt system-prompt history 8))
-  ([system-prompt history max-recent-turns]
+   (format-agent-chat-prompt system-prompt history 8 false))
+  ([system-prompt history opts-or-max-turns]
+   (cond
+     (map? opts-or-max-turns)
+     (format-agent-chat-prompt system-prompt history
+                               (long (get opts-or-max-turns :max-recent-turns 8))
+                               (boolean (or (:thinking opts-or-max-turns) (:thinking? opts-or-max-turns))))
+
+     (boolean? opts-or-max-turns)
+     (format-agent-chat-prompt system-prompt history 8 opts-or-max-turns)
+
+     :else
+     (format-agent-chat-prompt system-prompt history (long opts-or-max-turns) false)))
+  ([system-prompt history max-recent-turns thinking?]
    (let [history-vec (vec history)
-         trimmed (if (<= (count history-vec) (inc max-recent-turns))
+         max-turns (long (or max-recent-turns 8))
+         trimmed (if (<= (count history-vec) (inc max-turns))
                    history-vec
                    (let [initial (first history-vec)
-                         tail-candidates (take-last max-recent-turns (rest history-vec))
+                         tail-candidates (take-last max-turns (rest history-vec))
                          clean-tail (if (= (:role (first tail-candidates)) :user)
                                       (vec (rest tail-candidates))
                                       (vec tail-candidates))]
                      (into [initial] clean-tail)))
-         system-turn (when (seq system-prompt)
-                       (str "<|turn>system\n" (str/trim system-prompt) "<turn|>\n"))
+         has-system? (boolean (seq system-prompt))
+         clean-system (when has-system? (str/trim system-prompt))
+         already-has-think? (and has-system? (str/includes? clean-system "<|think|>"))
+         thinking-needed? (and thinking? (not already-has-think?))
+         system-content (cond
+                          (and has-system? thinking-needed?)
+                          (str "<|think|>\n" clean-system)
+
+                          has-system?
+                          clean-system
+
+                          thinking-needed?
+                          "<|think|>"
+
+                          :else nil)
+         system-turn (when system-content
+                       (str "<|turn>system\n" system-content "<turn|>\n"))
          turns (mapv (fn [{:keys [role content]}]
                        (str "<|turn>" (name role) "\n" (str/trim content) "<turn|>\n"))
                      trimmed)]
@@ -156,7 +224,8 @@ Clojure syntax rules:
   "Runs autonomous agent loop with SCI Clojure tool calling across multiple turns."
   [session initial-prompt]
   (let [{:keys [opts]} session
-        {:keys [system max-turns out quiet profile-out]} opts
+        {:keys [system max-turns out quiet profile-out thinking]} opts
+        thinking? (boolean thinking)
         sci-ctx (create-agent-sci-ctx)
         history (atom [{:role :user :content initial-prompt}])
         transcript (atom [])
@@ -174,7 +243,7 @@ Clojure syntax rules:
           (when-not quiet (println "\n=================================================="))
           (when-not quiet (println (format "=== Agent Turn %d/%d ===" turn max-turns)))
           (when-not quiet (println "=================================================="))
-          (let [formatted-prompt (format-agent-chat-prompt system @history)
+          (let [formatted-prompt (format-agent-chat-prompt system @history 8 thinking?)
                 _ (when-not quiet (println "Executing Gemma 4 Agent Forward Pass..."))
                 t-gen-0 (System/nanoTime)
                 full-gen (gemma4-inf/generate-text-string session formatted-prompt)
@@ -184,15 +253,32 @@ Clojure syntax rules:
                              (last (str/split full-gen #"<\|turn>model\r?\n?"))
                              full-gen)
                 model-reply (str/trim (str/replace model-text #"<bos>|<eos>|<turn\|>|<\|turn>" ""))
+                thinking-trace (extract-thinking-trace model-reply)
+                final-response (strip-thinking-trace model-reply)
                 code-blocks (extract-clojure-code-blocks model-reply)]
 
+            (when (and thinking? (seq thinking-trace) (not quiet))
+              (println "\n--------------------------------------------------")
+              (println "[Agent Thought Process]:")
+              (println thinking-trace)
+              (println "--------------------------------------------------"))
+
             (swap! history conj {:role :model :content model-reply})
-            (swap! transcript conj {:turn turn :role :model :content model-reply})
+            (swap! transcript conj {:turn turn
+                                    :role :model
+                                    :content (if (seq thinking-trace)
+                                               (str "[Thought Process]\n" thinking-trace "\n\n[Model Response]\n" final-response)
+                                               model-reply)
+                                    :thought thinking-trace})
 
             (if (empty? code-blocks)
               (do
                 (swap! turn-telemetry conj {:turn turn :model-ms gen-ms :tool-ms 0.0 :total-turn-ms gen-ms})
-                (when-not quiet (println "\n[Agent] No further tool calls requested. Task completed!"))
+                (when-not quiet
+                  (when (seq final-response)
+                    (println "\n[Agent Response]:")
+                    (println final-response))
+                  (println "\n[Agent] No further tool calls requested. Task completed!"))
                 (let [total-loop-ms (/ (- (System/nanoTime) loop-start-t) 1e6)
                       total-model-ms (reduce + (map :model-ms @turn-telemetry))
                       total-tool-ms (reduce + (map :tool-ms @turn-telemetry))]
@@ -253,21 +339,19 @@ Clojure syntax rules:
   "CLI Entrypoint for Gemma 4 Agent."
   [& args]
   (try
-    (let [opts (parse-agent-cli-args args)]
-      (when (gemma4-inf/needs-libjsig-reexec? opts)
-        (gemma4-inf/reexec-with-libjsig! args "tools.gemma4-agent"))
-      (let [model-dir (cli/find-model-dir (or (:model-dir opts) (:model opts)) :gemma-4)
-            max-seq-len (long (or (:max-seq-len opts) 1024))
-            opts (assoc opts :model-dir model-dir :model model-dir :mode :agent :max-seq-len max-seq-len)
-            metrics-atom (atom {})
-            trace-spans-atom (atom [])
-            session (assoc (gemma4-inf/init-agent-vram-session opts max-seq-len)
-                           :metrics-atom metrics-atom
-                           :trace-spans-atom trace-spans-atom)]
-        (try
-          (run-agent-loop session (:prompt opts))
-          (finally
-            (gemma4-inf/close-agent-session! session)))))
+    (let [opts (parse-agent-cli-args args)
+          model-dir (cli/find-model-dir (or (:model-dir opts) (:model opts)) :gemma-4)
+          max-seq-len (long (or (:max-seq-len opts) 1024))
+          opts (assoc opts :model-dir model-dir :model model-dir :mode :agent :max-seq-len max-seq-len)
+          metrics-atom (atom {})
+          trace-spans-atom (atom [])
+          session (assoc (gemma4-inf/init-agent-vram-session opts max-seq-len)
+                         :metrics-atom metrics-atom
+                         :trace-spans-atom trace-spans-atom)]
+      (try
+        (run-agent-loop session (:prompt opts))
+        (finally
+          (gemma4-inf/close-agent-session! session))))
     (catch Throwable e
       (println "\nAgent Exception:" (.getMessage e))
       (.printStackTrace e))
