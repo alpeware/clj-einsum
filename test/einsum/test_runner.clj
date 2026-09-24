@@ -48,6 +48,7 @@
             [einsum.logic.symbolic-test]
             [einsum.models.gemma-test]
             [einsum.models.gemma3-test]
+            [einsum.models.gemma4-test]
             [einsum.models.gpt2-test]
             [einsum.models.predicate-invention-test]
             [einsum.models.smollm-test]
@@ -107,6 +108,7 @@
    'einsum.quantize-test
    'einsum.quant.catq-test
    'einsum.quant.ternary-test
+   'einsum.models.gemma4-test
    'einsum.core-test])
 
 (def logic-namespaces
@@ -151,6 +153,7 @@
   "Model architectures, layer lowerings, transformer blocks, and predicate invention."
   ['einsum.models.gemma-test
    'einsum.models.gemma3-test
+   'einsum.models.gemma4-test
    'einsum.models.gpt2-test
    'einsum.models.smollm-test
    'einsum.models.tl-block-test
