@@ -33,6 +33,32 @@
                        (seq expanded)
                        (every? ast/valid-node? expanded)))))
 
+(deftest test-gemma2-alias-resolver
+  (testing "gemma2-alias-resolver correctly resolves AST keywords to safetensors paths"
+    (let [resolver (gemma/gemma2-alias-resolver "model.")]
+      (is (= "model.embed_tokens.weight" (resolver :embed_tokens)))
+      (is (= "model.norm.weight" (resolver :final_norm_w)))
+      (is (= "model.layers.0.input_layernorm.weight" (resolver :input_ln_w_0)))
+      (is (= "model.layers.0.self_attn.q_proj.weight" (resolver :q_w_0)))
+      (is (= "model.layers.0.mlp.down_proj.weight" (resolver :down_w_0)))
+      (is (= "model.layers.17.mlp.up_proj.weight" (resolver :up_w_17))))))
+
+(defspec prop-gemma2-alias-resolver-matches-weight-key-map 35
+  (prop/for-all [layer-idx (gen/choose 0 17)]
+                (let [resolver (gemma/gemma2-alias-resolver "model.layers.")
+                      kmap (gemma/weight-key-map layer-idx)]
+                  (and (= (resolver (keyword (str "input_ln_w_" layer-idx))) (:input-ln-w kmap))
+                       (= (resolver (keyword (str "q_w_" layer-idx))) (:q-w kmap))
+                       (= (resolver (keyword (str "k_w_" layer-idx))) (:k-w kmap))
+                       (= (resolver (keyword (str "v_w_" layer-idx))) (:v-w kmap))
+                       (= (resolver (keyword (str "o_w_" layer-idx))) (:o-w kmap))
+                       (= (resolver (keyword (str "post_attn_ln_w_" layer-idx))) (:post-attn-ln-w kmap))
+                       (= (resolver (keyword (str "pre_mlp_ln_w_" layer-idx))) (:pre-mlp-ln-w kmap))
+                       (= (resolver (keyword (str "post_mlp_ln_w_" layer-idx))) (:post-mlp-ln-w kmap))
+                       (= (resolver (keyword (str "gate_w_" layer-idx))) (:gate-w kmap))
+                       (= (resolver (keyword (str "up_w_" layer-idx))) (:up-w kmap))
+                       (= (resolver (keyword (str "down_w_" layer-idx))) (:down-w kmap))))))
+
 (deftest test-gemma4-alias-resolver
   (testing "gemma4-alias-resolver correctly resolves AST keywords to safetensors paths"
     (let [resolver (gemma/gemma4-alias-resolver "model.language_model.")]

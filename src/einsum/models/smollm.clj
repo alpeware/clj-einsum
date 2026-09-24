@@ -1,5 +1,6 @@
 (ns einsum.models.smollm
-  "Declarative SmolLM-135M Architecture definition in pure Tensor Logic Hiccup AST.")
+  "Declarative SmolLM-135M Architecture definition in pure Tensor Logic Hiccup AST."
+  (:require [clojure.string :as str]))
 
 (def DEFAULT_SMOLLM_CONFIG
   {:vocab-size 49152
@@ -28,6 +29,49 @@
    :gate-w (format "model.layers.%d.mlp.gate_proj.weight" i)
    :up-w (format "model.layers.%d.mlp.up_proj.weight" i)
    :down-w (format "model.layers.%d.mlp.down_proj.weight" i)})
+
+(defn smollm-alias-resolver
+  "Returns a resolver function mapping SmolLM Tensor Logic AST variable keywords
+   to canonical HuggingFace Safetensors parameter paths under `prefix-base` or `weights-or-header`."
+  ([]
+   (smollm-alias-resolver {}))
+  ([header-or-prefix]
+   (let [header (cond
+                  (string? header-or-prefix) {}
+                  (map? header-or-prefix) (or (:header header-or-prefix) header-or-prefix)
+                  :else {})
+         p-base (if (string? header-or-prefix)
+                  (if (or (str/ends-with? header-or-prefix ".") (empty? header-or-prefix))
+                    header-or-prefix
+                    (str header-or-prefix "."))
+                  "model.")
+         p-layers (if (str/ends-with? p-base "layers.")
+                    p-base
+                    (str p-base "layers."))
+         has-lm-head? (or (contains? header "lm_head.weight")
+                          (contains? header :lm_head.weight))]
+     (fn [k]
+       (let [k-str (if (keyword? k) (name k) (str k))]
+         (cond
+           (= k-str "embed_tokens") (str p-base "embed_tokens.weight")
+           (= k-str "final_norm_w") (str p-base "norm.weight")
+           (= k-str "lm_head_w") (if has-lm-head? "lm_head.weight" (str p-base "embed_tokens.weight"))
+           :else
+           (if-let [[_ prefix idx-str] (re-matches #"^(input_ln_w|q_w|k_w|v_w|o_w|post_attn_ln_w|gate_w|up_w|down_w)_(\d+)$" k-str)]
+             (let [i (Long/parseLong idx-str)
+                   l-prefix (str p-layers i ".")]
+               (case prefix
+                 "input_ln_w" (str l-prefix "input_layernorm.weight")
+                 "q_w" (str l-prefix "self_attn.q_proj.weight")
+                 "k_w" (str l-prefix "self_attn.k_proj.weight")
+                 "v_w" (str l-prefix "self_attn.v_proj.weight")
+                 "o_w" (str l-prefix "self_attn.o_proj.weight")
+                 "post_attn_ln_w" (str l-prefix "post_attention_layernorm.weight")
+                 "gate_w" (str l-prefix "mlp.gate_proj.weight")
+                 "up_w" (str l-prefix "mlp.up_proj.weight")
+                 "down_w" (str l-prefix "mlp.down_proj.weight")
+                 nil))
+             k-str)))))))
 
 (defn smollm-layer-ast
   "Generates Tensor Logic Hiccup AST for SmolLM Transformer layer block `layer-idx`."

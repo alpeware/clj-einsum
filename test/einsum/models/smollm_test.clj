@@ -6,7 +6,7 @@
             [einsum.logic.lower :as lower]
             [einsum.models.smollm :as smollm]
             [einsum.compiler.stablehlo :as shlo]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]))
@@ -66,3 +66,30 @@
                        (string? (:gate-w kmap))
                        (string? (:up-w kmap))
                        (string? (:down-w kmap))))))
+
+(deftest test-smollm-alias-resolver
+  (testing "smollm-alias-resolver correctly resolves AST keywords to safetensors paths"
+    (let [resolver-tied (smollm/smollm-alias-resolver {})
+          resolver-untied (smollm/smollm-alias-resolver {"lm_head.weight" {:shape [49152 576]}})]
+      (is (= "model.embed_tokens.weight" (resolver-tied :embed_tokens)))
+      (is (= "model.norm.weight" (resolver-tied :final_norm_w)))
+      (is (= "model.embed_tokens.weight" (resolver-tied :lm_head_w)))
+      (is (= "lm_head.weight" (resolver-untied :lm_head_w)))
+      (is (= "model.layers.0.input_layernorm.weight" (resolver-tied :input_ln_w_0)))
+      (is (= "model.layers.0.self_attn.q_proj.weight" (resolver-tied :q_w_0)))
+      (is (= "model.layers.0.mlp.down_proj.weight" (resolver-tied :down_w_0)))
+      (is (= "model.layers.29.mlp.up_proj.weight" (resolver-tied :up_w_29))))))
+
+(defspec prop-smollm-alias-resolver-matches-weight-key-map 30
+  (prop/for-all [layer-idx (gen/choose 0 29)]
+                (let [resolver (smollm/smollm-alias-resolver "model.layers.")
+                      kmap (smollm/weight-key-map layer-idx)]
+                  (and (= (resolver (keyword (str "input_ln_w_" layer-idx))) (:input-ln-w kmap))
+                       (= (resolver (keyword (str "q_w_" layer-idx))) (:q-w kmap))
+                       (= (resolver (keyword (str "k_w_" layer-idx))) (:k-w kmap))
+                       (= (resolver (keyword (str "v_w_" layer-idx))) (:v-w kmap))
+                       (= (resolver (keyword (str "o_w_" layer-idx))) (:o-w kmap))
+                       (= (resolver (keyword (str "post_attn_ln_w_" layer-idx))) (:post-attn-ln-w kmap))
+                       (= (resolver (keyword (str "gate_w_" layer-idx))) (:gate-w kmap))
+                       (= (resolver (keyword (str "up_w_" layer-idx))) (:up-w kmap))
+                       (= (resolver (keyword (str "down_w_" layer-idx))) (:down-w kmap))))))

@@ -1,5 +1,6 @@
 (ns einsum.models.gemma3
-  "Declarative Gemma 3 Architecture definition in pure Tensor Logic Hiccup AST.")
+  "Declarative Gemma 3 Architecture definition in pure Tensor Logic Hiccup AST."
+  (:require [clojure.string :as str]))
 
 (def DEFAULT_GEMMA3_270M_CONFIG
   {:hidden-dim 640
@@ -34,6 +35,44 @@
      :gate-w         (str prefix "mlp.gate_proj.weight")
      :up-w           (str prefix "mlp.up_proj.weight")
      :down-w         (str prefix "mlp.down_proj.weight")}))
+
+(defn gemma3-alias-resolver
+  "Returns a resolver function mapping Gemma 3 Tensor Logic AST variable keywords
+   to canonical HuggingFace Safetensors parameter paths under `prefix-base`."
+  ([]
+   (gemma3-alias-resolver "model."))
+  ([prefix-base]
+   (let [p-base (if (or (str/ends-with? prefix-base ".") (empty? prefix-base))
+                  prefix-base
+                  (str prefix-base "."))
+         p-layers (if (str/ends-with? p-base "layers.")
+                    p-base
+                    (str p-base "layers."))]
+     (fn [k]
+       (let [k-str (if (keyword? k) (name k) (str k))]
+         (cond
+           (= k-str "embed_tokens") (str p-base "embed_tokens.weight")
+           (= k-str "final_norm_w") (str p-base "norm.weight")
+           :else
+           (if-let [[_ prefix idx-str] (re-matches #"^(input_ln_w|q_w|k_w|v_w|o_w|q_norm_w|k_norm_w|post_attn_ln_w|pre_mlp_ln_w|post_mlp_ln_w|gate_w|up_w|down_w)_(\d+)$" k-str)]
+             (let [i (Long/parseLong idx-str)
+                   l-prefix (str p-layers i ".")]
+               (case prefix
+                 "input_ln_w" (str l-prefix "input_layernorm.weight")
+                 "q_w" (str l-prefix "self_attn.q_proj.weight")
+                 "k_w" (str l-prefix "self_attn.k_proj.weight")
+                 "v_w" (str l-prefix "self_attn.v_proj.weight")
+                 "o_w" (str l-prefix "self_attn.o_proj.weight")
+                 "q_norm_w" (str l-prefix "self_attn.q_norm.weight")
+                 "k_norm_w" (str l-prefix "self_attn.k_norm.weight")
+                 "post_attn_ln_w" (str l-prefix "post_attention_layernorm.weight")
+                 "pre_mlp_ln_w" (str l-prefix "pre_feedforward_layernorm.weight")
+                 "post_mlp_ln_w" (str l-prefix "post_feedforward_layernorm.weight")
+                 "gate_w" (str l-prefix "mlp.gate_proj.weight")
+                 "up_w" (str l-prefix "mlp.up_proj.weight")
+                 "down_w" (str l-prefix "mlp.down_proj.weight")
+                 nil))
+             k-str)))))))
 
 (defn gemma3-layer-ast
   "Generates Tensor Logic Hiccup AST for Gemma 3 Transformer layer block `layer-idx`."
