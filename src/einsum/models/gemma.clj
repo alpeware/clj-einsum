@@ -231,3 +231,4 @@
 (def build-gemma4-kv-invars g4/build-gemma4-kv-invars)
 (def build-gemma4-kv-outvars g4/build-gemma4-kv-outvars)
 (def build-gemma4-prefill-outvars g4/build-gemma4-prefill-outvars)
+(def gemma4-alias-resolver g4/gemma4-alias-resolver)

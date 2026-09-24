@@ -299,6 +299,7 @@
 (def track! arena/track!)
 (def disown! arena/disown!)
 (def promote! arena/promote!)
+(def destroy! arena/destroy!)
 (def close-arena! arena/close!)
 (def device-buffer arena/device-buffer)
 (defmacro with-device-arena

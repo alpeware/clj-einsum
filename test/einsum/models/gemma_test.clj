@@ -8,7 +8,7 @@
             [einsum.models.gemma :as gemma]
             [einsum.logic.memory.contrastive :as contrastive]
             [einsum.compiler.stablehlo :as shlo]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]))
@@ -32,6 +32,38 @@
                   (and (vector? layer-ast)
                        (seq expanded)
                        (every? ast/valid-node? expanded)))))
+
+(deftest test-gemma4-alias-resolver
+  (testing "gemma4-alias-resolver correctly resolves AST keywords to safetensors paths"
+    (let [resolver (gemma/gemma4-alias-resolver "model.language_model.")]
+      (is (= "model.language_model.embed_tokens.weight" (resolver :embed_tokens)))
+      (is (= "model.language_model.norm.weight" (resolver :final_norm_w)))
+      (is (= "model.language_model.layers.0.input_layernorm.weight" (resolver :input_ln_w_0)))
+      (is (= "model.language_model.layers.0.self_attn.q_proj.weight" (resolver :q_w_0)))
+      (is (= "model.language_model.layers.0.mlp.down_proj.weight" (resolver :down_w_0)))
+      (is (= "model.language_model.layers.34.mlp.up_proj.weight" (resolver :up_w_34))))))
+
+(defspec prop-gemma4-alias-resolver-matches-weight-key-map 35
+  (prop/for-all [layer-idx (gen/choose 0 34)]
+                (let [resolver (gemma/gemma4-alias-resolver "model.layers.")
+                      kmap (gemma/gemma4-weight-key-map layer-idx "model.layers.")]
+                  (and (= (resolver (keyword (str "input_ln_w_" layer-idx))) (:input-ln-w kmap))
+                       (= (resolver (keyword (str "layer_scalar_" layer-idx))) (:layer-scalar-w kmap))
+                       (= (resolver (keyword (str "q_w_" layer-idx))) (:q-w kmap))
+                       (= (resolver (keyword (str "k_w_" layer-idx))) (:k-w kmap))
+                       (= (resolver (keyword (str "v_w_" layer-idx))) (:v-w kmap))
+                       (= (resolver (keyword (str "o_w_" layer-idx))) (:o-w kmap))
+                       (= (resolver (keyword (str "q_norm_w_" layer-idx))) (:q-norm-w kmap))
+                       (= (resolver (keyword (str "k_norm_w_" layer-idx))) (:k-norm-w kmap))
+                       (= (resolver (keyword (str "post_attn_ln_w_" layer-idx))) (:post-attn-ln-w kmap))
+                       (= (resolver (keyword (str "pre_mlp_ln_w_" layer-idx))) (:pre-mlp-ln-w kmap))
+                       (= (resolver (keyword (str "post_mlp_ln_w_" layer-idx))) (:post-mlp-ln-w kmap))
+                       (= (resolver (keyword (str "gate_w_" layer-idx))) (:gate-w kmap))
+                       (= (resolver (keyword (str "up_w_" layer-idx))) (:up-w kmap))
+                       (= (resolver (keyword (str "down_w_" layer-idx))) (:down-w kmap))
+                       (= (resolver (keyword (str "per_layer_gate_w_" layer-idx))) (:per-layer-gate-w kmap))
+                       (= (resolver (keyword (str "per_layer_proj_w_" layer-idx))) (:per-layer-proj-w kmap))
+                       (= (resolver (keyword (str "post_per_layer_norm_w_" layer-idx))) (:post-per-layer-norm-w kmap))))))
 
 (deftest test-gemma4-single-layer-lowering
   (let [num-layers 1

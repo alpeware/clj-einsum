@@ -1,6 +1,7 @@
 (ns einsum.models.gemma4
   "Canonical Declarative Gemma 4 Architecture definitions in pure Tensor Logic Hiccup AST."
-  (:require [einsum.logic.memory.relation :as mem]))
+  (:require [clojure.string :as str]
+            [einsum.logic.memory.relation :as mem]))
 
 ;; ==============================================================================
 ;; 1. Configurations
@@ -117,6 +118,58 @@
       :per-layer-gate-w       (str prefix "per_layer_input_gate.weight")
       :per-layer-proj-w       (str prefix "per_layer_projection.weight")
       :post-per-layer-norm-w  (str prefix "post_per_layer_input_norm.weight")})))
+
+(defn gemma4-alias-resolver
+  "Returns a resolver function mapping Gemma 4 Tensor Logic AST variable keywords
+   to canonical HuggingFace Safetensors parameter paths under `prefix-base`."
+  ([]
+   (gemma4-alias-resolver "model."))
+  ([prefix-base]
+   (let [p-base (if (or (str/ends-with? prefix-base ".") (empty? prefix-base))
+                  prefix-base
+                  (str prefix-base "."))
+         p-layers (if (str/ends-with? p-base "layers.")
+                    p-base
+                    (str p-base "layers."))]
+     (fn [k]
+       (let [k-str (if (keyword? k) (name k) (str k))]
+         (cond
+           (= k-str "embed_tokens") (str p-base "embed_tokens.weight")
+           (= k-str "embed_tokens_per_layer") (str p-base "embed_tokens_per_layer.weight")
+           (= k-str "per_layer_model_projection") (str p-base "per_layer_model_projection.weight")
+           (= k-str "per_layer_projection_norm") (str p-base "per_layer_projection_norm.weight")
+           (= k-str "final_norm_w") (str p-base "norm.weight")
+           :else
+           (if-let [[_ prefix idx-str] (re-matches #"^(input_ln_w|layer_scalar|q_w|q_scale|k_w|k_scale|v_w|v_scale|o_w|o_scale|q_norm_w|k_norm_w|post_attn_ln_w|pre_mlp_ln_w|post_mlp_ln_w|gate_w|gate_scale|up_w|up_scale|down_w|down_scale|per_layer_gate_w|per_layer_proj_w|post_per_layer_norm_w)_(\d+)$" k-str)]
+             (let [i (Long/parseLong idx-str)
+                   l-prefix (str p-layers i ".")]
+               (case prefix
+                 "input_ln_w" (str l-prefix "input_layernorm.weight")
+                 "layer_scalar" (str l-prefix "layer_scalar")
+                 "q_w" (str l-prefix "self_attn.q_proj.weight")
+                 "q_scale" (str l-prefix "self_attn.q_proj.weight.scales")
+                 "k_w" (str l-prefix "self_attn.k_proj.weight")
+                 "k_scale" (str l-prefix "self_attn.k_proj.weight.scales")
+                 "v_w" (str l-prefix "self_attn.v_proj.weight")
+                 "v_scale" (str l-prefix "self_attn.v_proj.weight.scales")
+                 "o_w" (str l-prefix "self_attn.o_proj.weight")
+                 "o_scale" (str l-prefix "self_attn.o_proj.weight.scales")
+                 "q_norm_w" (str l-prefix "self_attn.q_norm.weight")
+                 "k_norm_w" (str l-prefix "self_attn.k_norm.weight")
+                 "post_attn_ln_w" (str l-prefix "post_attention_layernorm.weight")
+                 "pre_mlp_ln_w" (str l-prefix "pre_feedforward_layernorm.weight")
+                 "post_mlp_ln_w" (str l-prefix "post_feedforward_layernorm.weight")
+                 "gate_w" (str l-prefix "mlp.gate_proj.weight")
+                 "gate_scale" (str l-prefix "mlp.gate_proj.weight.scales")
+                 "up_w" (str l-prefix "mlp.up_proj.weight")
+                 "up_scale" (str l-prefix "mlp.up_proj.weight.scales")
+                 "down_w" (str l-prefix "mlp.down_proj.weight")
+                 "down_scale" (str l-prefix "mlp.down_proj.weight.scales")
+                 "per_layer_gate_w" (str l-prefix "per_layer_input_gate.weight")
+                 "per_layer_proj_w" (str l-prefix "per_layer_projection.weight")
+                 "post_per_layer_norm_w" (str l-prefix "post_per_layer_input_norm.weight")
+                 nil))
+             k-str)))))))
 
 (defn layer-is-global?
   "Determines whether layer `layer-idx` is a full global attention layer or sliding window layer."

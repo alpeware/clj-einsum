@@ -10,11 +10,13 @@
             [einsum.logic.lower :as lower]
             [einsum.models.gemma :as gemma-logic]
             [einsum.quant.ternary :as ternary]
+            [einsum.runtime.arena :as arena]
             [einsum.runtime.profile :as profile]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.sampling :as sampling]
             [einsum.runtime.tokenizer.core :as tok]
-            [einsum.runtime.tokenizer.protocol :refer [bos-id decode encode eos-id]])
+            [einsum.runtime.tokenizer.protocol :refer [bos-id decode encode eos-id]]
+            [einsum.runtime.weights :as weights])
   (:import [java.lang.foreign Arena]))
 
 (def DEFAULT_CLI_OPTS
@@ -194,11 +196,15 @@
       default-shape))
 
 (defn load-weight-buffer
-  "Loads a single weight tensor from `weights-mmap` into PJRT device memory in specified precision."
+  "Loads a single weight tensor from `weights-mmap` into PJRT device memory in specified precision.
+   Optionally registers the buffer in `arena` (or `arena/*active-arena*`)."
   ([ctx weights-mmap tensor-name shape weight-dtype weight-enum]
-   (load-weight-buffer ctx weights-mmap tensor-name shape weight-dtype weight-enum 0.0))
-  ([ctx weights-mmap tensor-name shape _weight-dtype weight-enum default-val]
-   (let [header (or (:header weights-mmap) {})
+   (load-weight-buffer ctx weights-mmap tensor-name shape weight-dtype weight-enum 0.0 nil))
+  ([ctx weights-mmap tensor-name shape weight-dtype weight-enum default-val]
+   (load-weight-buffer ctx weights-mmap tensor-name shape weight-dtype weight-enum default-val nil))
+  ([ctx weights-mmap tensor-name shape _weight-dtype weight-enum default-val arena]
+   (let [target-arena (or arena arena/*active-arena*)
+         header (or (:header weights-mmap) {})
          trellis-name (when (str/ends-with? tensor-name ".weight")
                         (str/replace tensor-name #"\.weight$" ".trellis"))
          actual-trellis-name (when trellis-name
@@ -211,132 +217,151 @@
                               (let [k-name (str/replace tensor-name #"\.v_proj\." ".k_proj.")]
                                 (if (or (contains? header k-name) (contains? (:tensors weights-mmap) k-name))
                                   k-name
-                                  tensor-name)))]
-     (cond
-       ;; EXL3 trellis quantized tensor
-       (and actual-trellis-name (contains? header actual-trellis-name))
-       (let [base-name (str/replace actual-trellis-name #"\.trellis$" "")
-             suh-name (str base-name ".suh")
-             svh-name (str base-name ".svh")
-             trellis-slice (st/get-tensor-slice weights-mmap actual-trellis-name)
-             suh-slice (st/get-tensor-slice weights-mmap suh-name)
-             svh-slice (st/get-tensor-slice weights-mmap svh-name)
-             in-features (first (get-in header [suh-name "shape"]))
-             out-features (first (get-in header [svh-name "shape"]))
-             trellis-shape (get-in header [actual-trellis-name "shape"])
-             words-per-tile (last trellis-shape)
-             bits (quot words-per-tile 16)
-             target-format (if (= weight-enum 11) :f32 :bf16)
-             dequant-arr (exl3/dequant-exl3-matrix trellis-slice in-features out-features bits suh-slice svh-slice
-                                                   {:as target-format :transpose? true})]
-         (xla/buffer-from-host-buffer ctx (:client ctx) dequant-arr shape weight-enum))
+                                  tensor-name)))
+         buf (cond
+               ;; EXL3 trellis quantized tensor
+               (and actual-trellis-name (contains? header actual-trellis-name))
+               (let [base-name (str/replace actual-trellis-name #"\.trellis$" "")
+                     suh-name (str base-name ".suh")
+                     svh-name (str base-name ".svh")
+                     trellis-slice (st/get-tensor-slice weights-mmap actual-trellis-name)
+                     suh-slice (st/get-tensor-slice weights-mmap suh-name)
+                     svh-slice (st/get-tensor-slice weights-mmap svh-name)
+                     in-features (first (get-in header [suh-name "shape"]))
+                     out-features (first (get-in header [svh-name "shape"]))
+                     trellis-shape (get-in header [actual-trellis-name "shape"])
+                     words-per-tile (last trellis-shape)
+                     bits (quot words-per-tile 16)
+                     target-format (if (= weight-enum 11) :f32 :bf16)
+                     dequant-arr (exl3/dequant-exl3-matrix trellis-slice in-features out-features bits suh-slice svh-slice
+                                                           {:as target-format :transpose? true})]
+                 (xla/buffer-from-host-buffer ctx (:client ctx) dequant-arr shape weight-enum))
 
-       (or (zero? (reduce * 1 shape))
-           (not (or (contains? header actual-tensor-name)
-                    (contains? (:tensors weights-mmap) actual-tensor-name))))
-       (let [num-elements (reduce * 1 shape)
-             default-f (float default-val)
-             data (if (= weight-enum 11)
-                    (let [arr (float-array num-elements)]
-                      (java.util.Arrays/fill arr default-f)
-                      arr)
-                    (let [arr (short-array num-elements)
-                          bf-bits (short (bit-shift-right (Float/floatToRawIntBits default-f) 16))]
-                      (java.util.Arrays/fill arr bf-bits)
-                      arr))]
-         (xla/buffer-from-host-buffer ctx (:client ctx) data shape weight-enum))
+               (or (zero? (reduce * 1 shape))
+                   (not (or (contains? header actual-tensor-name)
+                            (contains? (:tensors weights-mmap) actual-tensor-name))))
+               (let [num-elements (reduce * 1 shape)
+                     default-f (float default-val)
+                     data (if (= weight-enum 11)
+                            (let [arr (float-array num-elements)]
+                              (java.util.Arrays/fill arr default-f)
+                              arr)
+                            (let [arr (short-array num-elements)
+                                  bf-bits (short (bit-shift-right (Float/floatToRawIntBits default-f) 16))]
+                              (java.util.Arrays/fill arr bf-bits)
+                              arr))]
+                 (xla/buffer-from-host-buffer ctx (:client ctx) data shape weight-enum))
 
-       :else
-       (let [slice (st/get-tensor-slice weights-mmap actual-tensor-name)]
-         (xla/buffer-from-host-buffer ctx (:client ctx) slice shape weight-enum))))))
+               :else
+               (let [slice (st/get-tensor-slice weights-mmap actual-tensor-name)]
+                 (xla/buffer-from-host-buffer ctx (:client ctx) slice shape weight-enum)))]
+     (when target-arena
+       (xla/track! target-arena buf))
+     buf)))
 
 (defn load-linear-projection-buffers
   "Loads a linear projection matrix as either a single unquantized PJRT buffer,
-   or if is-int8/is-int4/is-ternary is true, a pair [w-buf scale-buf] with in-graph quantization."
+   or if is-int8/is-int4/is-ternary is true, a pair [w-buf scale-buf] with in-graph quantization.
+   Optionally registers allocated buffers in `arena` (or `arena/*active-arena*`)."
   ([ctx weights-mmap tensor-name shape is-int8 norm-enum weight-enum]
-   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 false false norm-enum weight-enum 128))
+   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 false false norm-enum weight-enum 128 nil))
   ([ctx weights-mmap tensor-name shape is-int8 is-int4 norm-enum weight-enum]
-   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 false norm-enum weight-enum 128))
+   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 false norm-enum weight-enum 128 nil))
   ([ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum]
-   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum 128))
-  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 is-ternary norm-enum _weight-enum group-size]
-   (if-not (or is-int8 is-int4 is-ternary)
-     [(load-weight-buffer ctx weights-mmap tensor-name shape (if (= norm-enum 11) :f32 :bf16) norm-enum 0.0)]
-     (let [header (or (:header weights-mmap) {})
-           actual-tensor-name (if (or (contains? header tensor-name) (contains? (:tensors weights-mmap) tensor-name))
-                                tensor-name
-                                (let [k-name (str/replace tensor-name #"\.v_proj\." ".k_proj.")]
-                                  (if (or (contains? header k-name) (contains? (:tensors weights-mmap) k-name))
-                                    k-name
-                                    tensor-name)))
-           scale-name (str actual-tensor-name ".scales")
-           prequantized? (and (or (contains? header scale-name) (contains? (:tensors weights-mmap) scale-name))
-                              (or (contains? header actual-tensor-name) (contains? (:tensors weights-mmap) actual-tensor-name)))]
-       (if prequantized?
-         (let [w-shape (cond is-ternary [rows (quot cols 4)] is-int4 [rows (quot cols 2)] :else [rows cols])
-               w-slice (st/get-tensor-slice weights-mmap actual-tensor-name)
-               scale-slice (st/get-tensor-slice weights-mmap scale-name)
-               scale-shape (or (get-in header [scale-name "shape"])
-                               (get-in (:tensors weights-mmap) [scale-name :info "shape"])
-                               (if (and (or is-int4 is-ternary) group-size (zero? (mod cols group-size)))
-                                 [rows (quot cols group-size)]
-                                 [rows]))
-               w-buf (xla/buffer-from-host-buffer ctx (:client ctx) w-slice w-shape 2)
-               scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scale-slice scale-shape norm-enum)]
-           [w-buf scale-buf])
-         (let [trellis-name (when (str/ends-with? tensor-name ".weight")
-                              (str/replace tensor-name #"\.weight$" ".trellis"))
-               actual-trellis-name (when trellis-name
-                                     (if (contains? header trellis-name)
-                                       trellis-name
-                                       (let [k-trellis (str/replace trellis-name #"\.v_proj\." ".k_proj.")]
-                                         (if (contains? header k-trellis) k-trellis trellis-name))))
-               scale-format (if (= norm-enum 11) :f32 :bf16)
-               raw-arr (cond
-                         (and actual-trellis-name (contains? header actual-trellis-name))
-                         (let [base-name (str/replace actual-trellis-name #"\.trellis$" "")
-                               suh-name (str base-name ".suh")
-                               svh-name (str base-name ".svh")
-                               trellis-slice (st/get-tensor-slice weights-mmap actual-trellis-name)
-                               suh-slice (st/get-tensor-slice weights-mmap suh-name)
-                               svh-slice (st/get-tensor-slice weights-mmap svh-name)
-                               in-features (first (get-in header [suh-name "shape"]))
-                               out-features (first (get-in header [svh-name "shape"]))
-                               trellis-shape (get-in header [actual-trellis-name "shape"])
-                               words-per-tile (last trellis-shape)
-                               bits (quot words-per-tile 16)]
-                           (exl3/dequant-exl3-matrix trellis-slice in-features out-features bits suh-slice svh-slice
-                                                     {:as :bf16 :transpose? true}))
+   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum 128 nil))
+  ([ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size]
+   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size nil))
+  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 is-ternary norm-enum _weight-enum group-size arena]
+   (let [target-arena (or arena arena/*active-arena*)]
+     (if-not (or is-int8 is-int4 is-ternary)
+       [(load-weight-buffer ctx weights-mmap tensor-name shape (if (= norm-enum 11) :f32 :bf16) norm-enum 0.0 target-arena)]
+       (let [header (or (:header weights-mmap) {})
+             actual-tensor-name (if (or (contains? header tensor-name) (contains? (:tensors weights-mmap) tensor-name))
+                                  tensor-name
+                                  (let [k-name (str/replace tensor-name #"\.v_proj\." ".k_proj.")]
+                                    (if (or (contains? header k-name) (contains? (:tensors weights-mmap) k-name))
+                                      k-name
+                                      tensor-name)))
+             scale-name (str actual-tensor-name ".scales")
+             prequantized? (and (or (contains? header scale-name) (contains? (:tensors weights-mmap) scale-name))
+                                (or (contains? header actual-tensor-name) (contains? (:tensors weights-mmap) actual-tensor-name)))]
+         (if prequantized?
+           (let [w-shape (cond is-ternary [rows (quot cols 4)] is-int4 [rows (quot cols 2)] :else [rows cols])
+                 w-slice (st/get-tensor-slice weights-mmap actual-tensor-name)
+                 scale-slice (st/get-tensor-slice weights-mmap scale-name)
+                 scale-shape (or (get-in header [scale-name "shape"])
+                                 (get-in (:tensors weights-mmap) [scale-name :info "shape"])
+                                 (if (and (or is-int4 is-ternary) group-size (zero? (mod cols group-size)))
+                                   [rows (quot cols group-size)]
+                                   [rows]))
+                 w-buf (xla/buffer-from-host-buffer ctx (:client ctx) w-slice w-shape 2)
+                 scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scale-slice scale-shape norm-enum)]
+             (when target-arena
+               (xla/track! target-arena w-buf)
+               (xla/track! target-arena scale-buf))
+             [w-buf scale-buf])
+           (let [trellis-name (when (str/ends-with? tensor-name ".weight")
+                                (str/replace tensor-name #"\.weight$" ".trellis"))
+                 actual-trellis-name (when trellis-name
+                                       (if (contains? header trellis-name)
+                                         trellis-name
+                                         (let [k-trellis (str/replace trellis-name #"\.v_proj\." ".k_proj.")]
+                                           (if (contains? header k-trellis) k-trellis trellis-name))))
+                 scale-format (if (= norm-enum 11) :f32 :bf16)
+                 raw-arr (cond
+                           (and actual-trellis-name (contains? header actual-trellis-name))
+                           (let [base-name (str/replace actual-trellis-name #"\.trellis$" "")
+                                 suh-name (str base-name ".suh")
+                                 svh-name (str base-name ".svh")
+                                 trellis-slice (st/get-tensor-slice weights-mmap actual-trellis-name)
+                                 suh-slice (st/get-tensor-slice weights-mmap suh-name)
+                                 svh-slice (st/get-tensor-slice weights-mmap svh-name)
+                                 in-features (first (get-in header [suh-name "shape"]))
+                                 out-features (first (get-in header [svh-name "shape"]))
+                                 trellis-shape (get-in header [actual-trellis-name "shape"])
+                                 words-per-tile (last trellis-shape)
+                                 bits (quot words-per-tile 16)]
+                             (exl3/dequant-exl3-matrix trellis-slice in-features out-features bits suh-slice svh-slice
+                                                       {:as :bf16 :transpose? true}))
 
-                         (or (zero? (reduce * 1 shape))
-                             (not (or (contains? header actual-tensor-name)
-                                      (contains? (:tensors weights-mmap) actual-tensor-name))))
-                         (short-array (* rows cols))
+                           (or (zero? (reduce * 1 shape))
+                               (not (or (contains? header actual-tensor-name)
+                                        (contains? (:tensors weights-mmap) actual-tensor-name))))
+                           (short-array (* rows cols))
 
-                         :else
-                         (st/get-tensor-floats weights-mmap actual-tensor-name))]
-           (cond
-             is-ternary
-             (let [{:keys [data scales scale-shape]} (ternary/quantize-weights-per-row-ternary raw-arr rows cols
-                                                                                               {:as scale-format
-                                                                                                :group-size group-size})
-                   w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 4)] 2)
-                   scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum)]
-               [w-buf scale-buf])
+                           :else
+                           (st/get-tensor-floats weights-mmap actual-tensor-name))]
+             (cond
+               is-ternary
+               (let [{:keys [data scales scale-shape]} (ternary/quantize-weights-per-row-ternary raw-arr rows cols
+                                                                                                 {:as scale-format
+                                                                                                  :group-size group-size})
+                     w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 4)] 2)
+                     scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum)]
+                 (when target-arena
+                   (xla/track! target-arena w-buf)
+                   (xla/track! target-arena scale-buf))
+                 [w-buf scale-buf])
 
-             is-int4
-             (let [{:keys [data scales scale-shape]} (exl3/quantize-weights-per-row-int4 raw-arr rows cols
-                                                                                         {:as scale-format
-                                                                                          :group-size group-size})
-                   w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 2)] 2)
-                   scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum)]
-               [w-buf scale-buf])
+               is-int4
+               (let [{:keys [data scales scale-shape]} (exl3/quantize-weights-per-row-int4 raw-arr rows cols
+                                                                                           {:as scale-format
+                                                                                            :group-size group-size})
+                     w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 2)] 2)
+                     scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum)]
+                 (when target-arena
+                   (xla/track! target-arena w-buf)
+                   (xla/track! target-arena scale-buf))
+                 [w-buf scale-buf])
 
-             :else
-             (let [{:keys [data scales]} (exl3/quantize-weights-per-row-int8 raw-arr rows cols {:as scale-format})
-                   w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data shape 2)
-                   scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales [rows] norm-enum)]
-               [w-buf scale-buf]))))))))
+               :else
+               (let [{:keys [data scales]} (exl3/quantize-weights-per-row-int8 raw-arr rows cols {:as scale-format})
+                     w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data shape 2)
+                     scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales [rows] norm-enum)]
+                 (when target-arena
+                   (xla/track! target-arena w-buf)
+                   (xla/track! target-arena scale-buf))
+                 [w-buf scale-buf])))))))))
 
 (defn quantize-bf16-to-int8
   "Quantizes a BF16 short-array to INT8 byte-array with per-tensor symmetric quantization.
@@ -379,6 +404,10 @@
          prefix-base (if (contains? header "model.language_model.embed_tokens.weight")
                        "model.language_model."
                        "model.")
+         session-arena (or (:session-arena opts) (xla/create-arena ctx))
+         weight-store (weights/create-weight-store ctx weights-mmap
+                                                   {:aliases (gemma-logic/gemma4-alias-resolver prefix-base)
+                                                    :arena session-arena})
          model-cfg (load-model-config resolved-model-dir)
          text-cfg (or (:text_config model-cfg) model-cfg)
          layer-types-cfg (:layer_types text-cfg)
@@ -483,6 +512,8 @@
       :tokenizer tokenizer
       :weights-mmap weights-mmap
       :arena arena
+      :session-arena session-arena
+      :weight-store weight-store
       :config {:model-dir resolved-model-dir
                :prefix-base prefix-base
                :vocab-size vocab-size
@@ -634,53 +665,87 @@
                       [:w_entity_to_vocab [:tensor [entity-count vocab-size] norm-dtype]]]))))))
 
 (defn allocate-device-weights
-  "Loads individual weight tensors for Gemma 4 into PJRT device buffers matching build-tensor-logic-invars."
-  [{:keys [ctx weights-mmap config]}]
-  (let [{:keys [prefix-base vocab-size hidden-dim total-pl-dim pl-dim weight-dtype weight-enum norm-enum layer-configs num-layers is-int8 is-int4 is-ternary group-size]} config
-        has-ple? (pos? total-pl-dim)
-        load-fn (fn
-                  ([name shape enum] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum 0.0))
-                  ([name shape enum default-val] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum default-val)))
-        embed-buf (load-fn (str prefix-base "embed_tokens.weight") [vocab-size hidden-dim] norm-enum)
-        ple-bufs (when has-ple?
-                   [(load-fn (str prefix-base "embed_tokens_per_layer.weight") [vocab-size total-pl-dim] norm-enum)
-                    (load-fn (str prefix-base "per_layer_model_projection.weight") [total-pl-dim hidden-dim] norm-enum)
-                    (load-fn (str prefix-base "per_layer_projection_norm.weight") [pl-dim] norm-enum)])
-        layer-bufs (mapcat (fn [i]
-                             (let [kmap (gemma-logic/gemma4-weight-key-map i (str prefix-base "layers."))
-                                   cfg (nth layer-configs i)
-                                   q-dim (:q-dim cfg)
-                                   kv-dim (:kv-dim cfg)
-                                   head-dim (:head-dim cfg)
-                                   mlp-dim (:mlp-dim cfg)
-                                   skipped? (contains? (set (:skip-layers config)) i)
-                                   layer-is-ternary (and is-ternary (not skipped?))
-                                   layer-is-int8 (and is-int8 (not skipped?))
-                                   layer-is-int4 (and is-int4 (not skipped?))
-                                   load-linear-fn (fn [name shape]
-                                                    (load-linear-projection-buffers ctx weights-mmap name shape layer-is-int8 layer-is-int4 layer-is-ternary norm-enum weight-enum group-size))]
-                               (concat
-                                [(load-fn (:input-ln-w kmap) [hidden-dim] norm-enum 0.0)
-                                 (load-fn (:layer-scalar-w kmap) [1] norm-enum 1.0)]
-                                (load-linear-fn (:q-w kmap) [q-dim hidden-dim])
-                                (load-linear-fn (:k-w kmap) [kv-dim hidden-dim])
-                                (load-linear-fn (:v-w kmap) [kv-dim hidden-dim])
-                                (load-linear-fn (:o-w kmap) [hidden-dim q-dim])
-                                [(load-fn (:q-norm-w kmap) [head-dim] norm-enum 0.0)
-                                 (load-fn (:k-norm-w kmap) [head-dim] norm-enum 0.0)
-                                 (load-fn (:post-attn-ln-w kmap) [hidden-dim] norm-enum 0.0)
-                                 (load-fn (:pre-mlp-ln-w kmap) [hidden-dim] norm-enum 0.0)
-                                 (load-fn (:post-mlp-ln-w kmap) [hidden-dim] norm-enum 0.0)]
-                                (load-linear-fn (:gate-w kmap) [mlp-dim hidden-dim])
-                                (load-linear-fn (:up-w kmap) [mlp-dim hidden-dim])
-                                (load-linear-fn (:down-w kmap) [hidden-dim mlp-dim])
-                                (when has-ple?
-                                  [(load-fn (:per-layer-gate-w kmap) [pl-dim hidden-dim] norm-enum 0.0)
-                                   (load-fn (:per-layer-proj-w kmap) [hidden-dim pl-dim] norm-enum 0.0)
-                                   (load-fn (:post-per-layer-norm-w kmap) [hidden-dim] norm-enum 0.0)]))))
-                           (range num-layers))
-        final-norm-buf (load-fn (str prefix-base "norm.weight") [hidden-dim] norm-enum 0.0)]
-    (vec (concat [embed-buf] ple-bufs layer-bufs [final-norm-buf]))))
+  "Loads individual weight tensors for Gemma 4 into PJRT device buffers matching build-tensor-logic-invars.
+   Registers buffers in session-arena and populates weight-store device-buffers map."
+  [{:keys [ctx weights-mmap config session-arena weight-store] :as _session}]
+  (let [target-arena (or session-arena arena/*active-arena*)
+        register-store-entry! (fn [k buf]
+                                (when (and weight-store buf)
+                                  (swap! (:device-buffers weight-store) assoc k buf))
+                                buf)]
+    (binding [arena/*active-arena* target-arena]
+      (let [{:keys [prefix-base vocab-size hidden-dim total-pl-dim pl-dim weight-dtype weight-enum norm-enum layer-configs num-layers is-int8 is-int4 is-ternary group-size]} config
+            has-ple? (pos? total-pl-dim)
+            load-fn (fn
+                      ([name shape enum] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum 0.0 target-arena))
+                      ([name shape enum default-val] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum default-val target-arena)))
+            embed-buf (register-store-entry! :embed_tokens
+                                             (load-fn (str prefix-base "embed_tokens.weight") [vocab-size hidden-dim] norm-enum))
+            ple-bufs (when has-ple?
+                       (let [b1 (register-store-entry! :embed_tokens_per_layer
+                                                       (load-fn (str prefix-base "embed_tokens_per_layer.weight") [vocab-size total-pl-dim] norm-enum))
+                             b2 (register-store-entry! :per_layer_model_projection
+                                                       (load-fn (str prefix-base "per_layer_model_projection.weight") [total-pl-dim hidden-dim] norm-enum))
+                             b3 (register-store-entry! :per_layer_projection_norm
+                                                       (load-fn (str prefix-base "per_layer_projection_norm.weight") [pl-dim] norm-enum))]
+                         [b1 b2 b3]))
+            layer-bufs (mapcat (fn [i]
+                                 (let [kmap (gemma-logic/gemma4-weight-key-map i (str prefix-base "layers."))
+                                       cfg (nth layer-configs i)
+                                       q-dim (:q-dim cfg)
+                                       kv-dim (:kv-dim cfg)
+                                       head-dim (:head-dim cfg)
+                                       mlp-dim (:mlp-dim cfg)
+                                       skipped? (contains? (set (:skip-layers config)) i)
+                                       layer-is-ternary (and is-ternary (not skipped?))
+                                       layer-is-int8 (and is-int8 (not skipped?))
+                                       layer-is-int4 (and is-int4 (not skipped?))
+                                       quantized? (or layer-is-ternary layer-is-int8 layer-is-int4)
+                                       load-linear-fn (fn [name shape w-kw scale-kw]
+                                                        (let [bufs (load-linear-projection-buffers ctx weights-mmap name shape layer-is-int8 layer-is-int4 layer-is-ternary norm-enum weight-enum group-size target-arena)]
+                                                          (if quantized?
+                                                            (do (register-store-entry! w-kw (first bufs))
+                                                                (register-store-entry! scale-kw (second bufs)))
+                                                            (register-store-entry! w-kw (first bufs)))
+                                                          bufs))
+                                       in-ln (register-store-entry! (keyword (str "input_ln_w_" i))
+                                                                    (load-fn (:input-ln-w kmap) [hidden-dim] norm-enum 0.0))
+                                       l-scalar (register-store-entry! (keyword (str "layer_scalar_" i))
+                                                                       (load-fn (:layer-scalar-w kmap) [1] norm-enum 1.0))
+                                       q-bufs (load-linear-fn (:q-w kmap) [q-dim hidden-dim] (keyword (str "q_w_" i)) (keyword (str "q_scale_" i)))
+                                       k-bufs (load-linear-fn (:k-w kmap) [kv-dim hidden-dim] (keyword (str "k_w_" i)) (keyword (str "k_scale_" i)))
+                                       v-bufs (load-linear-fn (:v-w kmap) [kv-dim hidden-dim] (keyword (str "v_w_" i)) (keyword (str "v_scale_" i)))
+                                       o-bufs (load-linear-fn (:o-w kmap) [hidden-dim q-dim] (keyword (str "o_w_" i)) (keyword (str "o_scale_" i)))
+                                       qn (register-store-entry! (keyword (str "q_norm_w_" i))
+                                                                 (load-fn (:q-norm-w kmap) [head-dim] norm-enum 0.0))
+                                       kn (register-store-entry! (keyword (str "k_norm_w_" i))
+                                                                 (load-fn (:k-norm-w kmap) [head-dim] norm-enum 0.0))
+                                       post-attn (register-store-entry! (keyword (str "post_attn_ln_w_" i))
+                                                                        (load-fn (:post-attn-ln-w kmap) [hidden-dim] norm-enum 0.0))
+                                       pre-mlp (register-store-entry! (keyword (str "pre_mlp_ln_w_" i))
+                                                                      (load-fn (:pre-mlp-ln-w kmap) [hidden-dim] norm-enum 0.0))
+                                       post-mlp (register-store-entry! (keyword (str "post_mlp_ln_w_" i))
+                                                                       (load-fn (:post-mlp-ln-w kmap) [hidden-dim] norm-enum 0.0))
+                                       gate-bufs (load-linear-fn (:gate-w kmap) [mlp-dim hidden-dim] (keyword (str "gate_w_" i)) (keyword (str "gate_scale_" i)))
+                                       up-bufs (load-linear-fn (:up-w kmap) [mlp-dim hidden-dim] (keyword (str "up_w_" i)) (keyword (str "up_scale_" i)))
+                                       down-bufs (load-linear-fn (:down-w kmap) [hidden-dim mlp-dim] (keyword (str "down_w_" i)) (keyword (str "down_scale_" i)))
+                                       ple-layer-bufs (when has-ple?
+                                                        [(register-store-entry! (keyword (str "per_layer_gate_w_" i))
+                                                                                (load-fn (:per-layer-gate-w kmap) [pl-dim hidden-dim] norm-enum 0.0))
+                                                         (register-store-entry! (keyword (str "per_layer_proj_w_" i))
+                                                                                (load-fn (:per-layer-proj-w kmap) [hidden-dim pl-dim] norm-enum 0.0))
+                                                         (register-store-entry! (keyword (str "post_per_layer_norm_w_" i))
+                                                                                (load-fn (:post-per-layer-norm-w kmap) [hidden-dim] norm-enum 0.0))])]
+                                   (concat
+                                    [in-ln l-scalar]
+                                    q-bufs k-bufs v-bufs o-bufs
+                                    [qn kn post-attn pre-mlp post-mlp]
+                                    gate-bufs up-bufs down-bufs
+                                    ple-layer-bufs)))
+                               (range num-layers))
+            final-norm-buf (register-store-entry! :final_norm_w
+                                                  (load-fn (str prefix-base "norm.weight") [hidden-dim] norm-enum 0.0))]
+        (vec (concat [embed-buf] ple-bufs layer-bufs [final-norm-buf]))))))
 
 (def allocate-tensor-logic-weights allocate-device-weights)
 
@@ -733,9 +798,11 @@
 
 (defn destroy-relational-buffers!
   "Releases device PJRT buffers for relational memory."
-  [ctx buffers]
-  (doseq [b buffers]
-    (when b (xla/destroy-buffer! ctx b))))
+  [arena-or-ctx buffers]
+  (if (arena/arena? arena-or-ctx)
+    (arena/destroy! arena-or-ctx buffers)
+    (doseq [b buffers]
+      (when b (xla/destroy-buffer! arena-or-ctx b)))))
 
 (defn compile-tensor-logic-executable
   "Compiles Gemma 4 model AST into a native StableHLO MLIR executable."
@@ -826,25 +893,32 @@
     (xla/compile-graph ctx graph)))
 
 (defn allocate-kv-cache-buffers
-  "Allocates initial zero-filled device VRAM buffers for KV cache of unshared layers."
-  [{:keys [ctx config]} max-seq-len]
-  (let [num-layers (long (or (:num-layers config) 35))
-        num-kv-shared (long (or (:num-kv-shared-layers config) 0))
-        num-unshared (- num-layers num-kv-shared)
-        norm-enum (or (:norm-enum config) 13)
-        layer-configs (:layer-configs config)
-        layer-types (:layer-types config)]
-    (vec (mapcat (fn [i]
-                   (let [c (if (seq layer-configs) (nth layer-configs i nil) nil)
-                         is-global? (if c (:is-global? c) (gemma-logic/layer-is-global? layer-types i))
-                         win (when-not is-global? (or (:sliding-window c) (:sliding-window config) (:sliding_window config) 512))
-                         seq-l (if win (min max-seq-len win) max-seq-len)
-                         n-kv (long (or (:num-kv-heads c) 1))
-                         h-dim (long (or (:head-dim c) (if is-global? 512 256)))
-                         zeros (float-array (* seq-l n-kv h-dim))]
-                     [(pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)
-                      (pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)]))
-                 (range num-unshared)))))
+  "Allocates initial zero-filled device VRAM buffers for KV cache of unshared layers.
+   Optionally registers the buffers in `arena` (or `session-arena`)."
+  ([session max-seq-len]
+   (allocate-kv-cache-buffers session max-seq-len (or (:session-arena session) arena/*active-arena*)))
+  ([{:keys [ctx config]} max-seq-len target-arena]
+   (let [num-layers (long (or (:num-layers config) 35))
+         num-kv-shared (long (or (:num-kv-shared-layers config) 0))
+         num-unshared (- num-layers num-kv-shared)
+         norm-enum (or (:norm-enum config) 13)
+         layer-configs (:layer-configs config)
+         layer-types (:layer-types config)]
+     (vec (mapcat (fn [i]
+                    (let [c (if (seq layer-configs) (nth layer-configs i nil) nil)
+                          is-global? (if c (:is-global? c) (gemma-logic/layer-is-global? layer-types i))
+                          win (when-not is-global? (or (:sliding-window c) (:sliding-window config) (:sliding_window config) 512))
+                          seq-l (if win (min max-seq-len win) max-seq-len)
+                          n-kv (long (or (:num-kv-heads c) 1))
+                          h-dim (long (or (:head-dim c) (if is-global? 512 256)))
+                          zeros (float-array (* seq-l n-kv h-dim))
+                          k-buf (pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)
+                          v-buf (pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)]
+                      (when target-arena
+                        (xla/track! target-arena k-buf)
+                        (xla/track! target-arena v-buf))
+                      [k-buf v-buf]))
+                  (range num-unshared))))))
 
 (defn compile-gemma4-kv-executable
   "Compiles single-step Gemma 4 KV-Cache AST into a native StableHLO MLIR executable."
@@ -957,7 +1031,8 @@
 (defn run-vram-loop-generation
   "Executes autoregressive token generation entirely within device VRAM using 1-shot prefill (or sequential prefill for large contexts) and an OpenXLA while-loop carrying KV-Cache."
   [session exec device-weights prompt-ids max-seq-len]
-  (let [{:keys [ctx opts config kv-state prefill-executable]} session
+  (let [{:keys [ctx opts config kv-state prefill-executable session-arena]} session
+        session-arena (or session-arena (xla/create-arena ctx))
         {:keys [max-new-tokens quiet]} opts
         seq-len (long max-seq-len)
         raw-p-count (count prompt-ids)
@@ -982,102 +1057,99 @@
             in-arr (int-array seq-len)
             _ (dotimes [i p-count] (aset in-arr i (int (nth clamped-prompt-ids i))))
 
-            ;; 1. Populate KV cache for prompt tokens (Parallel or Sequential)
+            ;; 1. Populate KV cache for prompt tokens (Parallel or Sequential) in a scoped step arena
             t-prefill-0 (System/nanoTime)
-            prefill-kv (if (some? prefill-exec)
-                         ;; Path A: 1-shot parallel prefill
-                         (let [pos-p (int-array [(dec p-count)])
-                               in-b (xla/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
-                               pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
-                               prefill-inputs (into [in-b pos-b] device-weights)
-                               num-prefill-outs (inc (* 2 num-unshared))
-                               prefill-outs (pjrt/execute-executable ctx (or (:handle prefill-exec) prefill-exec) prefill-inputs num-prefill-outs)
-                               _ (xla/destroy-buffer! ctx in-b)
-                               _ (xla/destroy-buffer! ctx pos-b)
-                               prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
-                               prefill-logits (first prefill-outs-vec)
-                               kv-outs (vec (subvec prefill-outs-vec 1))]
-                           (xla/destroy-buffer! ctx prefill-logits)
-                           kv-outs)
-                         ;; Path B: Sequential prefill for sequence lengths exceeding VRAM parallel workspace headroom
-                         (let [step-exec (or (:step-executable session)
-                                             (compile-gemma4-kv-executable session seq-len))
-                               initial-kv (allocate-kv-cache-buffers session seq-len)
-                               num-step-outs (inc (* 2 num-unshared))
-                               x-arr (int-array 1)
-                               pos-arr (int-array 1)
-                               prefill-limit (max 0 (dec p-count))]
-                           (when-not quiet
-                             (println (format "Prefilling %d prompt tokens into KV-Cache (exceeds parallel prefill limit %d)..."
-                                              prefill-limit safe-prefill-len)))
-                           (loop [p 0
-                                  cur-kv initial-kv
-                                  cur-log nil]
-                             (if (< p prefill-limit)
-                               (let [tok (int (nth clamped-prompt-ids p))
-                                     _ (aset x-arr 0 tok)
-                                     _ (aset pos-arr 0 p)
-                                     x-b (xla/buffer-from-host-buffer ctx (:client ctx) x-arr [1 1] 4)
-                                     pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4)
-                                     step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                     outs (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs)
-                                     _ (xla/destroy-buffer! ctx x-b)
-                                     _ (xla/destroy-buffer! ctx pos-b)
-                                     outs-vec (if (vector? outs) outs [outs])
-                                     new-log (first outs-vec)
-                                     new-kv (vec (subvec outs-vec 1))]
-                                 (when cur-log (xla/destroy-buffer! ctx cur-log))
-                                 (doseq [b cur-kv] (xla/destroy-buffer! ctx b))
-                                 (recur (inc p) new-kv new-log))
-                               (do
-                                 (when cur-log (xla/destroy-buffer! ctx cur-log))
-                                 cur-kv)))))
+            prefill-kv (xla/with-device-arena [prefill-arena session-arena]
+                         (if (some? prefill-exec)
+                           ;; Path A: 1-shot parallel prefill
+                           (let [pos-p (int-array [(dec p-count)])
+                                 in-b (xla/device-buffer prefill-arena in-arr [1 seq-len] :i32)
+                                 pos-b (xla/device-buffer prefill-arena pos-p [1] :i32)
+                                 prefill-inputs (into [in-b pos-b] device-weights)
+                                 num-prefill-outs (inc (* 2 num-unshared))
+                                 prefill-outs (xla/track! prefill-arena
+                                                          (pjrt/execute-executable ctx (or (:handle prefill-exec) prefill-exec) prefill-inputs num-prefill-outs))
+                                 prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
+                                 kv-outs (vec (subvec prefill-outs-vec 1))]
+                             (xla/promote! prefill-arena session-arena kv-outs)
+                             kv-outs)
+                           ;; Path B: Sequential prefill for sequence lengths exceeding VRAM parallel workspace headroom
+                           (let [step-exec (or (:step-executable session)
+                                               (compile-gemma4-kv-executable session seq-len))
+                                 initial-kv (allocate-kv-cache-buffers session seq-len prefill-arena)
+                                 num-step-outs (inc (* 2 num-unshared))
+                                 x-arr (int-array 1)
+                                 pos-arr (int-array 1)
+                                 prefill-limit (max 0 (dec p-count))]
+                             (when-not quiet
+                               (println (format "Prefilling %d prompt tokens into KV-Cache (exceeds parallel prefill limit %d)..."
+                                                prefill-limit safe-prefill-len)))
+                             (let [final-prefill-kv
+                                   (loop [p 0
+                                          cur-kv initial-kv]
+                                     (if (< p prefill-limit)
+                                       (let [new-kv
+                                             (xla/with-device-arena [iter-arena prefill-arena]
+                                               (let [tok (int (nth clamped-prompt-ids p))
+                                                     _ (aset x-arr 0 tok)
+                                                     _ (aset pos-arr 0 p)
+                                                     x-b (xla/device-buffer iter-arena x-arr [1 1] :i32)
+                                                     pos-b (xla/device-buffer iter-arena pos-arr [1] :i32)
+                                                     step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
+                                                     outs (xla/track! iter-arena (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                                                     outs-vec (if (vector? outs) outs [outs])
+                                                     nk (vec (subvec outs-vec 1))]
+                                                 (xla/promote! iter-arena prefill-arena nk)
+                                                 (arena/destroy! prefill-arena cur-kv)
+                                                 nk))]
+                                         (recur (inc p) new-kv))
+                                       cur-kv))]
+                               (xla/promote! prefill-arena session-arena final-prefill-kv)
+                               final-prefill-kv))))
             t-prefill-1 (System/nanoTime)
             prefill-ms (/ (- t-prefill-1 t-prefill-0) 1e6)
 
-            ;; 2. Run In-VRAM While Loop carrying the KV cache
-            b-step (xla/buffer-from-host-buffer ctx (:client ctx) (int-array [p-count]) [] 4)
-            b-max (xla/buffer-from-host-buffer ctx (:client ctx) (int-array [target-max]) [] 4)
-            b-toks (xla/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
-            loop-inputs (into [b-step b-max b-toks] (concat prefill-kv device-weights))
-            num-loop-outs (+ 2 (* 2 num-unshared))
+            ;; 2. Run In-VRAM While Loop carrying the KV cache in a scoped loop arena
+            is-persistent? (some? kv-state)
+            [decode-ms cleaned-ids]
+            (xla/with-device-arena [loop-arena session-arena]
+              (let [b-step (xla/device-buffer loop-arena (int-array [p-count]) [] :i32)
+                    b-max (xla/device-buffer loop-arena (int-array [target-max]) [] :i32)
+                    b-toks (xla/device-buffer loop-arena in-arr [1 seq-len] :i32)
+                    loop-inputs (into [b-step b-max b-toks] (concat prefill-kv device-weights))
+                    num-loop-outs (+ 2 (* 2 num-unshared))
 
-            t-loop-0 (System/nanoTime)
-            loop-outs (pjrt/execute-executable ctx (or (:handle exec) exec) loop-inputs num-loop-outs)
-            t-loop-1 (System/nanoTime)
-            decode-ms (/ (- t-loop-1 t-loop-0) 1e6)
+                    t-loop-0 (System/nanoTime)
+                    loop-outs (xla/track! loop-arena (pjrt/execute-executable ctx (or (:handle exec) exec) loop-inputs num-loop-outs))
+                    t-loop-1 (System/nanoTime)
+                    decode-ms (/ (- t-loop-1 t-loop-0) 1e6)
 
-            _ (xla/destroy-buffer! ctx b-step)
-            _ (xla/destroy-buffer! ctx b-max)
-            _ (xla/destroy-buffer! ctx b-toks)
-            _ (doseq [b prefill-kv] (xla/destroy-buffer! ctx b))
+                    loop-outs-vec (if (vector? loop-outs) loop-outs [loop-outs])
+                    out-step (nth loop-outs-vec 0)
+                    out-toks (nth loop-outs-vec 1)
+                    final-kv (vec (subvec loop-outs-vec 2))
 
-            loop-outs-vec (if (vector? loop-outs) loop-outs [loop-outs])
-            out-step (nth loop-outs-vec 0)
-            out-toks (nth loop-outs-vec 1)
-            final-kv (vec (subvec loop-outs-vec 2))
+                    step-floats (pjrt/buffer-to-host-buffer ctx out-step 1 :f32)
+                    step-val (int (Float/floatToIntBits (aget step-floats 0)))
+                    toks-floats (pjrt/buffer-to-host-buffer ctx out-toks seq-len :f32)
 
-            step-floats (pjrt/buffer-to-host-buffer ctx out-step 1 :f32)
-            step-val (int (Float/floatToIntBits (aget step-floats 0)))
-            toks-floats (pjrt/buffer-to-host-buffer ctx out-toks seq-len :f32)
-            _ (xla/destroy-buffer! ctx out-step)
-            _ (xla/destroy-buffer! ctx out-toks)
-
-            actual-step (min (max p-count step-val) seq-len)
-            final-ids (mapv #(Float/floatToIntBits %) (take actual-step (vec toks-floats)))
-            cleaned-ids (if (and (> (count final-ids) p-count)
-                                 (contains? GEMMA4-STOP-TOKEN-IDS (last final-ids)))
-                          (subvec final-ids 0 (dec (count final-ids)))
-                          final-ids)
-
-            is-persistent? (some? kv-state)]
-        (if is-persistent?
-          (do
-            (when-let [prior @kv-state]
-              (doseq [b (:kv-buffers prior)] (when b (xla/destroy-buffer! ctx b))))
-            (reset! kv-state {:cached-tokens cleaned-ids
-                              :kv-buffers final-kv}))
-          (doseq [b final-kv] (xla/destroy-buffer! ctx b)))
+                    actual-step (min (max p-count step-val) seq-len)
+                    final-ids (mapv #(Float/floatToIntBits %) (take actual-step (vec toks-floats)))
+                    cleaned-ids (if (and (> (count final-ids) p-count)
+                                         (contains? GEMMA4-STOP-TOKEN-IDS (last final-ids)))
+                                  (subvec final-ids 0 (dec (count final-ids)))
+                                  final-ids)]
+                (if is-persistent?
+                  (do
+                    (xla/promote! loop-arena session-arena final-kv)
+                    (when-let [prior @kv-state]
+                      (arena/destroy! session-arena (:kv-buffers prior)))
+                    (reset! kv-state {:cached-tokens cleaned-ids
+                                      :kv-buffers final-kv}))
+                  nil)
+                [decode-ms cleaned-ids]))]
+        ;; Free prefill-kv once loop has finished
+        (arena/destroy! session-arena prefill-kv)
 
         (let [t-end (System/nanoTime)
               total-ms (/ (- t-end t0) 1e6)
@@ -1149,7 +1221,7 @@
   "Executes autoregressive token generation using pure Tensor Logic Gemma 4 executable."
   ([session exec device-weights prompt-ids]
    (run-autoregressive-generation-logic session exec device-weights prompt-ids nil))
-  ([{:keys [ctx opts config tokenizer] :as session} exec device-weights prompt-ids max-seq-len]
+  ([{:keys [ctx opts config tokenizer session-arena] :as session} exec device-weights prompt-ids max-seq-len]
    (let [{:keys [max-new-tokens quiet mode]} opts
          is-agent? (= mode :agent)
          seq-len (long (or max-seq-len (:max-seq-len config) 128))
@@ -1168,23 +1240,20 @@
          nil
          (let [s-len (count @cur-tokens)
                _ (when last-token? (aset pos-arr 0 (dec s-len)))
-               in-b (xla/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
-               pos-b (when last-token?
-                       (xla/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4))
-               args (let [base (if last-token? [in-b pos-b] [in-b])
-                          rel-bufs (get session :relational-buffers [])]
-                      (into base (concat device-weights rel-bufs)))
-               out (xla/execute exec args)
-               out-buf (if (sequential? out) (first out) out)
-               logits (if last-token?
-                        (xla/to-host-slice out-buf 0 vocab-size vocab-size weight-dt)
-                        (xla/to-host-slice out-buf (dec s-len) vocab-size (* seq-len vocab-size) weight-dt))
-               next-id (sample-next-token logits opts prompt-ids (subvec @cur-tokens (count prompt-ids)))]
-           (xla/destroy-buffer! ctx in-b)
-           (when pos-b (xla/destroy-buffer! ctx pos-b))
-           (if (sequential? out)
-             (doseq [b out] (xla/destroy-buffer! ctx b))
-             (xla/destroy-buffer! ctx out))
+               next-id
+               (xla/with-device-arena [step-arena (or session-arena ctx)]
+                 (let [in-b (xla/device-buffer step-arena in-arr [1 seq-len] :i32)
+                       pos-b (when last-token?
+                               (xla/device-buffer step-arena pos-arr [1] :i32))
+                       args (let [base (if last-token? [in-b pos-b] [in-b])
+                                  rel-bufs (get session :relational-buffers [])]
+                              (into base (concat device-weights rel-bufs)))
+                       out (xla/track! step-arena (xla/execute exec args))
+                       out-buf (if (sequential? out) (first out) out)
+                       logits (if last-token?
+                                (xla/to-host-slice out-buf 0 vocab-size vocab-size weight-dt)
+                                (xla/to-host-slice out-buf (dec s-len) vocab-size (* seq-len vocab-size) weight-dt))]
+                   (sample-next-token logits opts prompt-ids (subvec @cur-tokens (count prompt-ids)))))]
            (when (< s-len seq-len)
              (aset in-arr s-len (int next-id)))
            (swap! cur-tokens conj next-id)
@@ -1221,8 +1290,9 @@
    and 1-shot parallel prefill."
   ([session exec device-weights prompt-ids]
    (run-cached-kv-generation session exec device-weights prompt-ids nil))
-  ([{:keys [ctx opts config tokenizer kv-state prefill-executable] :as session} exec device-weights prompt-ids max-seq-len]
-   (let [{:keys [max-new-tokens quiet mode]} opts
+  ([{:keys [ctx opts config tokenizer kv-state prefill-executable session-arena] :as session} exec device-weights prompt-ids max-seq-len]
+   (let [session-arena (or session-arena (xla/create-arena ctx))
+         {:keys [max-new-tokens quiet mode]} opts
          is-agent? (= mode :agent)
          seq-len (long (or max-seq-len (:max-seq-len config) 512))
          vocab-size (long (or (:vocab-size config) 262144))
@@ -1244,7 +1314,7 @@
                    (common-prefix-len (:cached-tokens prior-cache) clamped-prompt-ids)
                    0)
          _ (when (and is-persistent? prior-cache (zero? p-match))
-             (doseq [b (:kv-buffers prior-cache)] (xla/destroy-buffer! ctx b))
+             (arena/destroy! session-arena (:kv-buffers prior-cache))
              (reset! kv-state nil))
          initial-kv (cond
                       (pos? p-match)
@@ -1254,7 +1324,7 @@
                       nil
 
                       :else
-                      (allocate-kv-cache-buffers session seq-len))
+                      (allocate-kv-cache-buffers session seq-len session-arena))
          kv-buffers-atom (atom initial-kv)
          x-arr (int-array 1)
          pos-arr (int-array 1)
@@ -1269,41 +1339,47 @@
                      cur-log (loop [p start-p
                                     cur-logits nil]
                                (if (< p prompt-count)
-                                 (let [tok (int (nth clamped-prompt-ids p))
-                                       _ (aset x-arr 0 tok)
-                                       _ (aset pos-arr 0 p)
-                                       x-b (xla/buffer-from-host-buffer ctx (:client ctx) x-arr [1 1] 4)
-                                       pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4)
-                                       step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                       outs (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs)
-                                       _ (xla/destroy-buffer! ctx x-b)
-                                       _ (xla/destroy-buffer! ctx pos-b)
-                                       outs-vec (if (vector? outs) outs [outs])
-                                       new-logits (first outs-vec)
-                                       new-kv (vec (subvec outs-vec 1))
+                                 (let [[new-log new-kv]
+                                       (xla/with-device-arena [step-arena session-arena]
+                                         (let [tok (int (nth clamped-prompt-ids p))
+                                               _ (aset x-arr 0 tok)
+                                               _ (aset pos-arr 0 p)
+                                               x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
+                                               pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
+                                               step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                                               outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                               outs-vec (if (vector? outs) outs [outs])
+                                               nl (first outs-vec)
+                                               nk (vec (subvec outs-vec 1))]
+                                           (xla/promote! step-arena session-arena nl)
+                                           (xla/promote! step-arena session-arena nk)
+                                           [nl nk]))
                                        old-kv @kv-buffers-atom]
-                                   (when cur-logits (xla/destroy-buffer! ctx cur-logits))
-                                   (when (not= old-kv (:kv-buffers prior-cache))
-                                     (doseq [b old-kv] (xla/destroy-buffer! ctx b)))
+                                   (when cur-logits (arena/destroy! session-arena cur-logits))
+                                   (when (seq old-kv)
+                                     (arena/destroy! session-arena old-kv))
                                    (reset! kv-buffers-atom new-kv)
-                                   (recur (inc p) new-logits))
+                                   (recur (inc p) new-log))
                                  cur-logits))]
                  [cur-log (System/nanoTime)])
 
                ;; Path B: 1-Shot Parallel Prefill
                (some? prefill-exec)
-               (let [in-arr (int-array seq-len)
-                     _ (dotimes [i prompt-count] (aset in-arr i (int (nth clamped-prompt-ids i))))
-                     pos-p (int-array [(dec prompt-count)])
-                     in-b (xla/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
-                     pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
-                     step-inputs (into [in-b pos-b] device-weights)
-                     outs (pjrt/execute-executable ctx (or (:handle prefill-exec) prefill-exec) step-inputs num-outs)
-                     _ (xla/destroy-buffer! ctx in-b)
-                     _ (xla/destroy-buffer! ctx pos-b)
-                     outs-vec (if (vector? outs) outs [outs])
-                     prefill-logits (first outs-vec)
-                     prefill-kv (vec (subvec outs-vec 1))]
+               (let [[prefill-logits prefill-kv]
+                     (xla/with-device-arena [step-arena session-arena]
+                       (let [in-arr (int-array seq-len)
+                             _ (dotimes [i prompt-count] (aset in-arr i (int (nth clamped-prompt-ids i))))
+                             pos-p (int-array [(dec prompt-count)])
+                             in-b (xla/device-buffer step-arena in-arr [1 seq-len] :i32)
+                             pos-b (xla/device-buffer step-arena pos-p [1] :i32)
+                             step-inputs (into [in-b pos-b] device-weights)
+                             outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle prefill-exec) prefill-exec) step-inputs num-outs))
+                             outs-vec (if (vector? outs) outs [outs])
+                             pl (first outs-vec)
+                             pkv (vec (subvec outs-vec 1))]
+                         (xla/promote! step-arena session-arena pl)
+                         (xla/promote! step-arena session-arena pkv)
+                         [pl pkv]))]
                  (reset! kv-buffers-atom prefill-kv)
                  [prefill-logits (System/nanoTime)])
 
@@ -1312,23 +1388,27 @@
                (let [cur-log (loop [p 0
                                     cur-logits nil]
                                (if (< p prompt-count)
-                                 (let [tok (int (nth clamped-prompt-ids p))
-                                       _ (aset x-arr 0 tok)
-                                       _ (aset pos-arr 0 p)
-                                       x-b (xla/buffer-from-host-buffer ctx (:client ctx) x-arr [1 1] 4)
-                                       pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4)
-                                       step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                       outs (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs)
-                                       _ (xla/destroy-buffer! ctx x-b)
-                                       _ (xla/destroy-buffer! ctx pos-b)
-                                       outs-vec (if (vector? outs) outs [outs])
-                                       new-logits (first outs-vec)
-                                       new-kv (vec (subvec outs-vec 1))
+                                 (let [[new-log new-kv]
+                                       (xla/with-device-arena [step-arena session-arena]
+                                         (let [tok (int (nth clamped-prompt-ids p))
+                                               _ (aset x-arr 0 tok)
+                                               _ (aset pos-arr 0 p)
+                                               x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
+                                               pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
+                                               step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                                               outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                               outs-vec (if (vector? outs) outs [outs])
+                                               nl (first outs-vec)
+                                               nk (vec (subvec outs-vec 1))]
+                                           (xla/promote! step-arena session-arena nl)
+                                           (xla/promote! step-arena session-arena nk)
+                                           [nl nk]))
                                        old-kv @kv-buffers-atom]
-                                   (when cur-logits (xla/destroy-buffer! ctx cur-logits))
-                                   (doseq [b old-kv] (xla/destroy-buffer! ctx b))
+                                   (when cur-logits (arena/destroy! session-arena cur-logits))
+                                   (when (seq old-kv)
+                                     (arena/destroy! session-arena old-kv))
                                    (reset! kv-buffers-atom new-kv)
-                                   (recur (inc p) new-logits))
+                                   (recur (inc p) new-log))
                                  cur-logits))]
                  [cur-log (System/nanoTime)]))
 
@@ -1339,9 +1419,9 @@
                 cur-logits last-logits]
            (if (or (>= (- (count @cur-tokens) prompt-count) max-tokens)
                    (>= step (dec seq-len)))
-             (when cur-logits (xla/destroy-buffer! ctx cur-logits))
+             (when cur-logits (arena/destroy! session-arena cur-logits))
              (let [logits-data (xla/to-host-slice cur-logits 0 vocab-size vocab-size weight-dt)
-                   _ (xla/destroy-buffer! ctx cur-logits)
+                   _ (arena/destroy! session-arena cur-logits)
                    next-id (sample-next-token logits-data opts clamped-prompt-ids (subvec @cur-tokens prompt-count))]
                (swap! cur-tokens conj next-id)
                (when (and (not quiet) (not is-agent?))
@@ -1349,21 +1429,24 @@
                  (flush))
                (if (or (contains? GEMMA4-STOP-TOKEN-IDS next-id) (= next-id (eos-id tokenizer)))
                  nil
-                 (let [_ (aset x-arr 0 (int next-id))
-                       _ (aset pos-arr 0 step)
-                       x-b (xla/buffer-from-host-buffer ctx (:client ctx) x-arr [1 1] 4)
-                       pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4)
-                       step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                       outs (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs)
-                       _ (xla/destroy-buffer! ctx x-b)
-                       _ (xla/destroy-buffer! ctx pos-b)
-                       outs-vec (if (vector? outs) outs [outs])
-                       new-logits (first outs-vec)
-                       new-kv (vec (subvec outs-vec 1))
+                 (let [[new-log new-kv]
+                       (xla/with-device-arena [step-arena session-arena]
+                         (let [_ (aset x-arr 0 (int next-id))
+                               _ (aset pos-arr 0 step)
+                               x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
+                               pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
+                               step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                               outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                               outs-vec (if (vector? outs) outs [outs])
+                               nl (first outs-vec)
+                               nk (vec (subvec outs-vec 1))]
+                           (xla/promote! step-arena session-arena nl)
+                           (xla/promote! step-arena session-arena nk)
+                           [nl nk]))
                        old-kv @kv-buffers-atom]
-                   (doseq [b old-kv] (xla/destroy-buffer! ctx b))
+                   (arena/destroy! session-arena old-kv)
                    (reset! kv-buffers-atom new-kv)
-                   (recur (inc step) new-logits))))))
+                   (recur (inc step) new-log))))))
          (when is-persistent?
            (reset! kv-state {:cached-tokens @cur-tokens
                              :kv-buffers @kv-buffers-atom}))
@@ -1386,7 +1469,8 @@
            @cur-tokens))
        (finally
          (when-not is-persistent?
-           (doseq [b @kv-buffers-atom] (when b (xla/destroy-buffer! ctx b)))))))))
+           (when-let [bufs (seq @kv-buffers-atom)]
+             (arena/destroy! session-arena bufs))))))))
 
 (defn run-autoregressive-generation
   "Executes autoregressive generation either via in-VRAM while loop, cached KV generation, or full sequence recomputation."
@@ -1498,7 +1582,9 @@
           (println)
           (println generated-str))
         (when-not reuse-weights?
-          (doseq [w device-weights] (xla/destroy-buffer! (:ctx session) w)))
+          (if-let [sa (:session-arena session)]
+            (xla/close-arena! sa)
+            (doseq [w device-weights] (xla/destroy-buffer! (:ctx session) w))))
         (when-let [out-path (:out opts)]
           (spit out-path generated-str)
           (when-not quiet
@@ -1565,14 +1651,19 @@
 
 (defn close-agent-session!
   "Releases VRAM resources for an agent session."
-  [{:keys [ctx device-weights kv-state]}]
-  (when (seq device-weights)
-    (doseq [w device-weights]
-      (xla/destroy-buffer! ctx w)))
-  (when (and kv-state @kv-state)
-    (doseq [b (:kv-buffers @kv-state)]
-      (xla/destroy-buffer! ctx b))
-    (reset! kv-state nil)))
+  [{:keys [ctx device-weights kv-state session-arena]}]
+  (if session-arena
+    (do
+      (xla/close-arena! session-arena)
+      (when kv-state (reset! kv-state nil)))
+    (do
+      (when (seq device-weights)
+        (doseq [w device-weights]
+          (xla/destroy-buffer! ctx w)))
+      (when (and kv-state @kv-state)
+        (doseq [b (:kv-buffers @kv-state)]
+          (xla/destroy-buffer! ctx b))
+        (reset! kv-state nil)))))
 
 (defn- find-libjsig
   "Searches standard JDK paths for libjsig.so."
