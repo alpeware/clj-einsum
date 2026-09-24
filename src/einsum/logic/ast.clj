@@ -2,13 +2,17 @@
   "Hiccup AST Malli schemas, node constructors, and syntax helpers for Tensor Logic."
   (:require [malli.core :as m]))
 
+(def TermIdSchema
+  "Schema for tensor identifier: keyword or composite tuple [:name & args]."
+  [:or :keyword [:and [:vector :any] [:fn seq]]])
+
 (def HeadSchema
-  "Schema for equation head [:name & indices]."
-  [:and [:vector :keyword] [:fn seq]])
+  "Schema for equation head [id & indices]."
+  [:and [:vector [:or :keyword TermIdSchema]] [:fn seq]])
 
 (def BodyTermSchema
-  "Schema for equation body term [:name & indices]."
-  [:and [:vector :keyword] [:fn seq]])
+  "Schema for equation body term [id & indices]."
+  [:and [:vector [:or :keyword TermIdSchema]] [:fn seq]])
 
 (def EquationSchema
   "Schema for primitive contraction equation [:= head ?attrs & body-terms]."

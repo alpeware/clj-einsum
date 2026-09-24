@@ -48,4 +48,33 @@
                 (ast/valid-node?
                  [:argmax [out-n] [in-n] {:axis -1}])))
 
+(defspec prop-composite-tuple-terms-satisfy-schema
+  50
+  (prop/for-all [idx (gen/choose 0 50)
+                 name-kw (gen/elements [:h :pl_in :x_norm :qkv :scores])
+                 indices (gen/vector (gen/elements [:b :p :d :h :dh :v]) 1 4)]
+                (let [head (into [[name-kw idx]] indices)
+                      eqn [:= head [:x :b :p]]]
+                  (and (ast/valid-node? eqn)
+                       (ast/eqn? eqn)
+                       (= head (ast/head eqn))))))
+
+(defspec prop-next-state-hash-term-satisfies-schema
+  50
+  (prop/for-all [indices (gen/vector (gen/elements [:b :p :d :h :dh]) 1 4)]
+                (let [head (into [:h#] indices)
+                      eqn [:= head [:h :b :p :d]]]
+                  (and (ast/valid-node? eqn)
+                       (ast/eqn? eqn)
+                       (= head (ast/head eqn))))))
+
+(defspec prop-composite-block-names-satisfy-schema
+  50
+  (prop/for-all [idx (gen/choose 0 50)
+                 block-type (gen/elements [:gpt2_layer :smollm_layer :gemma4_layer])]
+                (ast/valid-node?
+                 [:block {:name [block-type idx]}
+                  [:= [[:h (inc idx)] :b :p :d] [[:h idx] :b :p :d]]])))
+
+
 

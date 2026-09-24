@@ -3,8 +3,10 @@
   (:require [einsum.logic.ast :as ast]
             [einsum.logic.expand :as expand]
             [einsum.logic.generators :as lg]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]))
 
 (defspec prop-primitive-expansion-idempotence
@@ -71,3 +73,55 @@
     (let [eq2 (second expanded)]
       (is (= [:EmbR :i :j] (ast/head eq2)))
       (is (= [:E :y :j] (second (ast/body-terms eq2)))))))
+
+(deftest test-layer-block-recurrence-and-wire-scoping
+  (let [ast [:block {:name [:gpt2_layer 0]}
+             [:layer-norm [:x_norm1 :b :p :d] [:h :b :p :d] [:ln1_g :d] [:ln1_b :d]]
+             [:= [:qkv :b :p :qkv_dim] [:x_norm1 :b :p :d] [:attn_w :d :qkv_dim]]
+             [:= [:h# :b :p :d] [:qkv :b :p :d]]]
+        expanded (expand/expand-ast {} ast)]
+    (is (= 3 (count expanded)))
+    (is (every? ast/valid-node? expanded))
+    ;; 1. Check LayerNorm: :h -> :h0, :x_norm1 -> :gpt2_layer_0_x_norm1, :ln1_g -> :ln1_g_0
+    (let [eq1 (first expanded)]
+      (is (= [:gpt2_layer_0_x_norm1 :b :p :d] (ast/head eq1)))
+      (is (= [:h0 :b :p :d] (first (ast/body-terms eq1))))
+      (is (= [:ln1_g_0 :d] (second (ast/body-terms eq1))))
+      (is (= [:ln1_b_0 :d] (nth (ast/body-terms eq1) 2))))
+    ;; 2. Check Contraction: :qkv -> :gpt2_layer_0_qkv, :attn_w -> :attn_w_0
+    (let [eq2 (second expanded)]
+      (is (= :gpt2_layer_0_qkv (first (ast/head eq2))))
+      (is (= [:gpt2_layer_0_x_norm1 :b :p :d] (first (ast/body-terms eq2))))
+      (is (= :attn_w_0 (first (second (ast/body-terms eq2))))))
+    ;; 3. Check Recurrence Next State: :h# -> :h1
+    (let [eq3 (nth expanded 2)]
+      (is (= [:h1 :b :p :d] (ast/head eq3)))
+      (is (= [:gpt2_layer_0_qkv :b :p :d] (first (ast/body-terms eq3)))))))
+
+(deftest test-layer-block-chaining
+  (let [ast [:block {:name :two_layers}
+             [:block {:name [:test_layer 0]}
+              [:= [:h# :b :p :d] [:h :b :p :d] [:w :d :d]]]
+             [:block {:name [:test_layer 1]}
+              [:= [:h# :b :p :d] [:h :b :p :d] [:w :d :d]]]]
+        expanded (expand/expand-ast {} ast)]
+    (is (= 2 (count expanded)))
+    ;; Layer 0: reads :h0, writes :h1, uses parameter :w_0
+    (let [eq0 (first expanded)]
+      (is (= [:h1 :b :p :d] (ast/head eq0)))
+      (is (= [:h0 :b :p :d] (first (ast/body-terms eq0))))
+      (is (= [:w_0 :d :d] (second (ast/body-terms eq0)))))
+    ;; Layer 1: reads :h1, writes :h2, uses parameter :w_1
+    (let [eq1 (second expanded)]
+      (is (= [:h2 :b :p :d] (ast/head eq1)))
+      (is (= [:h1 :b :p :d] (first (ast/body-terms eq1))))
+      (is (= [:w_1 :d :d] (second (ast/body-terms eq1)))))))
+
+(defspec prop-normalize-id-invariants
+  50
+  (prop/for-all [idx (gen/choose 0 50)
+                 name-kw (gen/elements [:pl_in :q_w :k_w :attn_w :scores])]
+                (let [norm (expand/normalize-id [name-kw idx])]
+                  (and (keyword? norm)
+                       (= norm (keyword (str (str/replace (name name-kw) "-" "_") "_" idx)))))))
+
