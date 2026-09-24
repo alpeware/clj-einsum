@@ -82,102 +82,60 @@
         lambda-mem (double (or (:lambda-mem cfg) 0.2))
         tau (double (or (:tau cfg) 0.2))
         inv-tau (/ 1.0 tau)
-        attn-scale (/ 1.0 (Math/sqrt (double dh)))
+        attn-scale (/ 1.0 (Math/sqrt (double dh)))]
 
-        h-in (keyword (str "h_" i))
-        h-out (keyword (str "h_" (inc i)))
-        x-norm1 (keyword (str "x_norm1_" i))
-        w-q (keyword (str "W_q_" i))
-        w-k (keyword (str "W_k_" i))
-        w-v (keyword (str "W_v_" i))
-        w-o (keyword (str "W_o_" i))
-        w-gate (keyword (str "W_gate_" i))
-        w-up (keyword (str "W_up_" i))
-        w-down (keyword (str "W_down_" i))
-
-        q-flat (keyword (str "q_flat_" i))
-        k-flat (keyword (str "k_flat_" i))
-        v-flat (keyword (str "v_flat_" i))
-        q (keyword (str "q_" i))
-        k (keyword (str "k_" i))
-        v (keyword (str "v_" i))
-        scores-raw (keyword (str "scores_raw_" i))
-        scores (keyword (str "scores_" i))
-        attn-probs (keyword (str "attn_probs_" i))
-        out (keyword (str "out_" i))
-        out-flat (keyword (str "out_flat_" i))
-        attn-out (keyword (str "attn_out_" i))
-        h-attn (keyword (str "H_attn_" i))
-
-        h-tl (keyword (str "H_tl_" i))
-        x-norm2 (keyword (str "x_norm2_" i))
-        gate-out (keyword (str "gate_out_" i))
-        up-out (keyword (str "up_out_" i))
-        mlp-act (keyword (str "mlp_act_" i))
-        mlp-out (keyword (str "mlp_out_" i))]
-
-    [:block {:name (keyword (str "tl_nano_layer_" i))}
+    [:block {:name [:tl_nano_layer i]}
      ;; 1. Pre-Attention RMSNorm
-     [:rms-norm [x-norm1 :b :p :d] [h-in :b :p :d]]
+     [:rms-norm [:x_norm1 :b :p :d] [:h :b :p :d]]
 
      ;; 2. Attention Projections
-     [:= [q-flat :b :p :d2] [x-norm1 :b :p :d1] [w-q :d1 :d2]]
-     [:reshape [q :b :p :h :dh] [q-flat :b :p :d2] {:shape [b l h dh]}]
-     [:= [k-flat :b :p :d2] [x-norm1 :b :p :d1] [w-k :d1 :d2]]
-     [:reshape [k :b :p :h :dh] [k-flat :b :p :d2] {:shape [b l h dh]}]
-     [:= [v-flat :b :p :d2] [x-norm1 :b :p :d1] [w-v :d1 :d2]]
-     [:reshape [v :b :p :h :dh] [v-flat :b :p :d2] {:shape [b l h dh]}]
+     [:= [:q_flat :b :p :d2] [:x_norm1 :b :p :d1] [:W_q :d1 :d2]]
+     [:reshape [:q :b :p :h :dh] [:q_flat :b :p :d2] {:shape [b l h dh]}]
+     [:= [:k_flat :b :p :d2] [:x_norm1 :b :p :d1] [:W_k :d1 :d2]]
+     [:reshape [:k :b :p :h :dh] [:k_flat :b :p :d2] {:shape [b l h dh]}]
+     [:= [:v_flat :b :p :d2] [:x_norm1 :b :p :d1] [:W_v :d1 :d2]]
+     [:reshape [:v :b :p :h :dh] [:v_flat :b :p :d2] {:shape [b l h dh]}]
 
      ;; 3. Attention Scoring (with optional KG Mask)
      (if hybrid?
-       [:block {:name (keyword (str "kg_attention_" i))}
-        [:= [(keyword (str "TR_" i)) :p_q :e2] [:T :p_q :e1] [:R_adj :e1 :e2]]
-        [:= [(keyword (str "M_raw_" i)) :p_q :p_k] [(keyword (str "TR_" i)) :p_q :e2] [:T :p_k :e2]]
-        [:= [(keyword (str "M_kg_" i)) :p_q :p_k] {:scale gamma} [(keyword (str "M_raw_" i)) :p_q :p_k]]
-        [:= [scores-raw :b :h :p_q :p_k] {:scale attn-scale} [q :b :p_q :h :dh] [k :b :p_k :h :dh]]
-        [:= [scores :b :h :p_q :p_k] {:op :add} [scores-raw :b :h :p_q :p_k] [(keyword (str "M_kg_" i)) :p_q :p_k]]]
-       [:= [scores :b :h :p_q :p_k] {:scale attn-scale} [q :b :p_q :h :dh] [k :b :p_k :h :dh]])
+       [:block {:name :kg_attention}
+        [:= [:TR :p_q :e2] [:T :p_q :e1] [:R_adj :e1 :e2]]
+        [:= [:M_raw :p_q :p_k] [:TR :p_q :e2] [:T :p_k :e2]]
+        [:= [:M_kg :p_q :p_k] {:scale gamma} [:M_raw :p_q :p_k]]
+        [:= [:scores_raw :b :h :p_q :p_k] {:scale attn-scale} [:q :b :p_q :h :dh] [:k :b :p_k :h :dh]]
+        [:= [:scores :b :h :p_q :p_k] {:op :add} [:scores_raw :b :h :p_q :p_k] [:M_kg :p_q :p_k]]]
+       [:= [:scores :b :h :p_q :p_k] {:scale attn-scale} [:q :b :p_q :h :dh] [:k :b :p_k :h :dh]])
 
      ;; 4. Causal Softmax & Context Contraction
-     [:causal-softmax [attn-probs :b :h :p_q :p_k] [scores :b :h :p_q :p_k]]
-     [:= [out :b :p_q :h :dh] [attn-probs :b :h :p_q :p_k] [v :b :p_k :h :dh]]
-     [:reshape [out-flat :b :p_q :d1] [out :b :p_q :h :dh] {:shape [b l d]}]
-     [:= [attn-out :b :p_q :d] [out-flat :b :p_q :d1] [w-o :d1 :d]]
-     [:+ [h-attn :b :p_q :d] [h-in :b :p_q :d] [attn-out :b :p_q :d]]
+     [:causal-softmax [:attn_probs :b :h :p_q :p_k] [:scores :b :h :p_q :p_k]]
+     [:= [:out :b :p_q :h :dh] [:attn_probs :b :h :p_q :p_k] [:v :b :p_k :h :dh]]
+     [:reshape [:out_flat :b :p_q :d1] [:out :b :p_q :h :dh] {:shape [b l d]}]
+     [:= [:attn_out :b :p_q :d] [:out_flat :b :p_q :d1] [:W_o :d1 :d]]
+     [:+ [:H_attn :b :p_q :d] [:h :b :p_q :d] [:attn_out :b :p_q :d]]
 
      ;; 5. Relational Memory Unbinding (Hybrid Layers Only)
      (if hybrid?
-       (let [u-q (keyword (str "u_q_" i))
-             u-target (keyword (str "u_target_" i))
-             u-target-norm (keyword (str "u_target_norm_" i))
-             u-cand (keyword (str "U_cand_" i))
-             cand-scores (keyword (str "cand_scores_" i))
-             valid-mask (keyword (str "valid_mask_" i))
-             valid-weight (keyword (str "valid_weight_" i))
-             clamped-scores (keyword (str "clamped_scores_" i))
-             v-grounded (keyword (str "v_grounded_" i))
-             v-bias (keyword (str "v_bias_" i))]
-         [:block {:name (keyword (str "rel_memory_unbinding_" i))}
-          [:= [u-q :b :p_q :dm] [h-attn :b :p_q :d] [:W_mem :d :dm]]
-          [:= [u-target :b :p_q :dm2] [u-q :b :p_q :dm1] [:R_mem :dm1 :dm2]]
-          [:rms-norm [u-target-norm :b :p_q :dm2] [u-target :b :p_q :dm2]]
-          [:= [u-cand :nc :dm] [:E_cand :nc :d] [:W_mem :d :dm]]
-          [:= [cand-scores :b :p_q :nc] {:scale inv-tau} [u-target-norm :b :p_q :dm] [u-cand :nc :dm]]
-          [:compare [valid-mask :b :p_q :nc] [cand-scores :b :p_q :nc] [:threshold :one] {:comparison_direction "GT"}]
-          [:convert [valid-weight :b :p_q :nc] {:target-dtype :f32} [valid-mask :b :p_q :nc]]
-          [:= [clamped-scores :b :p_q :nc] [cand-scores :b :p_q :nc] [valid-weight :b :p_q :nc]]
-          [:= [v-grounded :b :p_q :d] [clamped-scores :b :p_q :nc] [:E_cand :nc :d]]
-          [:= [v-bias :b :p_q :d] {:scale lambda-mem} [v-grounded :b :p_q :d]]
-          [:+ [h-tl :b :p_q :d] [h-attn :b :p_q :d] [v-bias :b :p_q :d]]])
-       [:= [h-tl :b :p_q :d] [h-attn :b :p_q :d]])
+       [:block {:name :rel_memory_unbinding}
+        [:= [:u_q :b :p_q :dm] [:H_attn :b :p_q :d] [:W_mem :d :dm]]
+        [:= [:u_target :b :p_q :dm2] [:u_q :b :p_q :dm1] [:R_mem :dm1 :dm2]]
+        [:rms-norm [:u_target_norm :b :p_q :dm2] [:u_target :b :p_q :dm2]]
+        [:= [:u_cand :nc :dm] [:E_cand :nc :d] [:W_mem :d :dm]]
+        [:= [[:cand_scores i] :b :p_q :nc] {:scale inv-tau} [:u_target_norm :b :p_q :dm] [:u_cand :nc :dm]]
+        [:compare [:valid_mask :b :p_q :nc] [[:cand_scores i] :b :p_q :nc] [:threshold :one] {:comparison_direction "GT"}]
+        [:convert [:valid_weight :b :p_q :nc] {:target-dtype :f32} [:valid_mask :b :p_q :nc]]
+        [:= [[:clamped_scores i] :b :p_q :nc] [[:cand_scores i] :b :p_q :nc] [:valid_weight :b :p_q :nc]]
+        [:= [:v_grounded :b :p_q :d] [[:clamped_scores i] :b :p_q :nc] [:E_cand :nc :d]]
+        [:= [:v_bias :b :p_q :d] {:scale lambda-mem} [:v_grounded :b :p_q :d]]
+        [:+ [:H_tl :b :p_q :d] [:H_attn :b :p_q :d] [:v_bias :b :p_q :d]]]
+       [:= [:H_tl :b :p_q :d] [:H_attn :b :p_q :d]])
 
      ;; 6. GeGLU Feed-Forward Network
-     [:rms-norm [x-norm2 :b :p_q :d] [h-tl :b :p_q :d]]
-     [:= [gate-out :b :p_q :dff] {:act :gelu} [x-norm2 :b :p_q :d] [w-gate :d :dff]]
-     [:= [up-out :b :p_q :dff] [x-norm2 :b :p_q :d] [w-up :d :dff]]
-     [:= [mlp-act :b :p_q :dff] [gate-out :b :p_q :dff] [up-out :b :p_q :dff]]
-     [:= [mlp-out :b :p_q :d] [mlp-act :b :p_q :dff] [w-down :dff :d]]
-     [:+ [h-out :b :p_q :d] [h-tl :b :p_q :d] [mlp-out :b :p_q :d]]]))
+     [:rms-norm [:x_norm2 :b :p_q :d] [:H_tl :b :p_q :d]]
+     [:= [:gate_out :b :p_q :dff] {:act :gelu} [:x_norm2 :b :p_q :d] [:W_gate :d :dff]]
+     [:= [:up_out :b :p_q :dff] [:x_norm2 :b :p_q :d] [:W_up :d :dff]]
+     [:= [:mlp_act :b :p_q :dff] [:gate_out :b :p_q :dff] [:up_out :b :p_q :dff]]
+     [:= [:mlp_out :b :p_q :d] [:mlp_act :b :p_q :dff] [:W_down :dff :d]]
+     [:+ [:h# :b :p_q :d] [:H_tl :b :p_q :d] [:mlp_out :b :p_q :d]]]))
 
 (defn tl-nano-model-ast
   "Generates full TL-Nano forward model AST."
@@ -186,17 +144,16 @@
   ([batch seq-len cfg]
    (let [b (long batch)
          l (long seq-len)
-         num-layers (long (:num-layers cfg))
-         h-last (keyword (str "h_" num-layers))]
+         num-layers (long (:num-layers cfg))]
      [:block {:name :tl_nano_model}
       ;; 1. Token Embedding via Gather
-      [:gather [:h_0 :b :p :d] [:W_embed :v :d] [:x :b :p]]
+      [:gather [[:h 0] :b :p :d] [:W_embed :v :d] [:x :b :p]]
 
       ;; 2. Layer Blocks
       (mapv (fn [i] (tl-nano-layer-ast i b l cfg)) (range num-layers))
 
       ;; 3. Final RMSNorm
-      [:rms-norm [:H_final :b :p :d] [h-last :b :p :d]]
+      [:rms-norm [:H_final :b :p :d] [[:h num-layers] :b :p :d]]
 
       ;; 4. Tied LM Head Logits: H_final [b p d] @ W_embed [v d]^T = logits [b p v]
       [:= [:logits :b :p :v] [:H_final :b :p :d] [:W_embed :v :d]]])))

@@ -9,7 +9,8 @@
   #{:b :p :d :v :max_pos :one :l :total_pl_dim})
 
 (def ^:private GLOBAL-INPUTS
-  #{:x :pos_ids :pos :embed_tokens :wte :wpe :normed :logits :total_pl_dim :one})
+  #{:x :pos_ids :pos :embed_tokens :wte :wpe :normed :logits :total_pl_dim :one
+    :W_mem :R_mem :E_cand :T :R_adj :threshold})
 
 (defn normalize-id
   "Normalizes a composite tuple identifier [:name & args] or keyword to a canonical keyword."
@@ -49,13 +50,14 @@
                    :else []))
                stmts)))
 
-(defn- expand-indexed-layer-block [block-info _attrs children]
+(defn- expand-indexed-layer-block [block-info attrs children]
   (let [{:keys [prefix layer]} block-info
         b-prefix (str prefix "_" layer)
         h-in-kw (keyword (str "h" layer))
         h-out-kw (keyword (str "h" (inc layer)))
         defined-heads (collect-defined-heads children)
         internal-wires (set (filter keyword? (disj defined-heads :h# :h-out :h h-in-kw h-out-kw)))
+        global-inputs (into GLOBAL-INPUTS (or (:globals attrs) (:inputs attrs) (:shared attrs)))
         remap-id (fn [id]
                    (cond
                      (or (= id :h) (= id :h-in) (= id h-in-kw))
@@ -67,7 +69,7 @@
                      (contains? internal-wires id)
                      (keyword (str b-prefix "_" (str/replace (name id) "-" "_")))
 
-                     (contains? GLOBAL-INPUTS id)
+                     (contains? global-inputs id)
                      id
 
                      (and (keyword? id) (not (contains? defined-heads id)))

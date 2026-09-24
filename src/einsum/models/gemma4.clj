@@ -549,128 +549,45 @@
          layer-is-ternary? (and is-ternary? (not skipped?))
          norm-dtype (get config :norm-dtype (if (or is-int8? is-int4? is-ternary?) :bf16 (get config :weight-dtype :bf16)))
 
-         h-in (keyword (str "h" i))
-         h-out (keyword (str "h" (inc i)))
+         actual-k-cache (if is-shared? shared-k [:k_cache_out i])
+         actual-v-cache (if is-shared? shared-v [:v_cache_out i])]
 
-         input-ln-w (keyword (str "input_ln_w_" i))
-         layer-scalar-w (keyword (str "layer_scalar_" i))
-         q-w (keyword (str "q_w_" i))
-         k-w (keyword (str "k_w_" i))
-         v-w (keyword (str "v_w_" i))
-         o-w (keyword (str "o_w_" i))
-         q-norm-w (keyword (str "q_norm_w_" i))
-         k-norm-w (keyword (str "k_norm_w_" i))
-         post-attn-ln-w (keyword (str "post_attn_ln_w_" i))
-         pre-mlp-ln-w (keyword (str "pre_mlp_ln_w_" i))
-         post-mlp-ln-w (keyword (str "post_mlp_ln_w_" i))
-         gate-w (keyword (str "gate_w_" i))
-         up-w (keyword (str "up_w_" i))
-         down-w (keyword (str "down_w_" i))
-         per-layer-gate-w (keyword (str "per_layer_gate_w_" i))
-         per-layer-proj-w (keyword (str "per_layer_proj_w_" i))
-         post-per-layer-norm-w (keyword (str "post_per_layer_norm_w_" i))
-         pl-in-var (keyword (str "pl_in_" i))
-
-         q-scale (keyword (str "q_scale_" i))
-         k-scale (keyword (str "k_scale_" i))
-         v-scale (keyword (str "v_scale_" i))
-         o-scale (keyword (str "o_scale_" i))
-         gate-scale (keyword (str "gate_scale_" i))
-         up-scale (keyword (str "up_scale_" i))
-         down-scale (keyword (str "down_scale_" i))
-
-         k-cache-in (keyword (str "k_cache_in_" i))
-         v-cache-in (keyword (str "v_cache_in_" i))
-         k-cache-out (keyword (str "k_cache_out_" i))
-         v-cache-out (keyword (str "v_cache_out_" i))
-
-         x-norm1 (keyword (str "x_norm1_" i))
-         q-raw (keyword (str "q_raw_" i))
-         k-raw (keyword (str "k_raw_" i))
-         v-raw (keyword (str "v_raw_" i))
-         v-normed (keyword (str "v_normed_" i))
-         q-heads-raw (keyword (str "q_heads_raw_" i))
-         k-heads-raw (keyword (str "k_heads_raw_" i))
-         v-heads (keyword (str "v_heads_" i))
-         q-normed-4d (keyword (str "q_normed_4d_" i))
-         k-normed-4d (keyword (str "k_normed_4d_" i))
-         q-normed-3d (keyword (str "q_normed_3d_" i))
-         k-normed-3d (keyword (str "k_normed_3d_" i))
-         q-rope (keyword (str "q_rope_" i))
-         k-rope (keyword (str "k_rope_" i))
-         q-ro (keyword (str "q_ro_" i))
-         k-ro (keyword (str "k_ro_" i))
-
-         actual-k-cache (if is-shared? shared-k k-cache-out)
-         actual-v-cache (if is-shared? shared-v v-cache-out)
-
-         ctx (keyword (str "ctx_" i))
-         ctx-flat (keyword (str "ctx_flat_" i))
-         attn-raw (keyword (str "attn_raw_" i))
-         attn-normed (keyword (str "attn_normed_" i))
-         res1 (keyword (str "res1_" i))
-
-         x-norm2 (keyword (str "x_norm2_" i))
-         gate (keyword (str "gate_" i))
-         up (keyword (str "up_" i))
-         mlp-act (keyword (str "mlp_act_" i))
-         mlp-raw (keyword (str "mlp_raw_" i))
-         mlp-normed (keyword (str "mlp_normed_" i))
-         res2 (keyword (str "res2_" i))
-
-         gate-raw (keyword (str "gate_raw_" i))
-         gated (keyword (str "gated_" i))
-         proj-raw (keyword (str "proj_raw_" i))
-         ple-normed (keyword (str "ple_normed_" i))
-         res3 (keyword (str "res3_" i))
-
-         dh (keyword (str "dh_" i))
-         qd (keyword (str "qd_" i))
-         kvd (keyword (str "kvd_" i))
-         kvh (keyword (str "kvh_" i))
-         _g (keyword (str "g_" i))
-         h (keyword (str "h_" i))
-         dff (keyword (str "dff_" i))
-         pld (keyword (str "pld_" i))
-         p (keyword (str "p_" i))
-         kv-s (keyword (str "kvs_" i))]
-
-     [:block {:name (keyword (str "gemma4_kv_layer_" i))}
+     [:block {:name [:gemma4_kv_layer i]}
       ;; 1. Pre-Attention RMSNorm
-      [:rms-norm [x-norm1 :b p :d] [h-in :b p :d] [input-ln-w :d] {:eps 1e-6}]
+      [:rms-norm [:x_norm1 :b :p :d] [:h :b :p :d] [:input_ln_w :d] {:eps 1e-6}]
 
       ;; 2. Q Projection & Reshape for single token
-      (gemma4-linear-proj [q-raw :b p qd] [x-norm1 :b p :d] [q-w qd :d] layer-is-int8? layer-is-int4? layer-is-ternary? q-scale norm-dtype {})
-      [:reshape [q-heads-raw :b p h dh] [q-raw :b p qd] {:shape [1 1 num-heads head-dim]}]
-      [:rms-norm [q-normed-4d :b p h dh] [q-heads-raw :b p h dh] [q-norm-w dh] {:eps 1e-6}]
-      [:reshape [q-normed-3d :b p qd] [q-normed-4d :b p h dh] {:shape [1 1 q-dim]}]
-      [:rope [q-rope :b p qd] [q-normed-3d :b p qd] {:head-dim head-dim :theta theta :rope-proportion rope-prop :pos :pos :max-seq-len max-seq-len}]
-      [:reshape [q-ro :b p h dh] [q-rope :b p qd] {:shape [1 1 num-heads head-dim]}]
+      (gemma4-linear-proj [:q_raw :b :p :qd] [:x_norm1 :b :p :d] [:q_w :qd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :q_scale norm-dtype {})
+      [:reshape [:q_heads_raw :b :p :h :dh] [:q_raw :b :p :qd] {:shape [1 1 num-heads head-dim]}]
+      [:rms-norm [:q_normed_4d :b :p :h :dh] [:q_heads_raw :b :p :h :dh] [:q_norm_w :dh] {:eps 1e-6}]
+      [:reshape [:q_normed_3d :b :p :qd] [:q_normed_4d :b :p :h :dh] {:shape [1 1 q-dim]}]
+      [:rope [:q_rope :b :p :qd] [:q_normed_3d :b :p :qd] {:head-dim head-dim :theta theta :rope-proportion rope-prop :pos :pos :max-seq-len max-seq-len}]
+      [:reshape [:q_ro :b :p :h :dh] [:q_rope :b :p :qd] {:shape [1 1 num-heads head-dim]}]
 
       ;; 3. K, V Projections & Dynamic Cache Update (if not shared)
       (when-not is-shared?
-        [:block {:name (keyword (str "kv_proj_update_" i))}
-         (gemma4-linear-proj [k-raw :b p kvd] [x-norm1 :b p :d] [k-w kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? k-scale norm-dtype {})
-         (gemma4-linear-proj [v-raw :b p kvd] [x-norm1 :b p :d] [v-w kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? v-scale norm-dtype {})
-         [:rms-norm [v-normed :b p kvd] [v-raw :b p kvd] {:eps 1e-6}]
-         [:reshape [k-heads-raw :b p kvh dh] [k-raw :b p kvd] {:shape [1 1 num-kv-heads head-dim]}]
-         [:reshape [v-heads :b p kvh dh] [v-normed :b p kvd] {:shape [1 1 num-kv-heads head-dim]}]
-         [:rms-norm [k-normed-4d :b p kvh dh] [k-heads-raw :b p kvh dh] [k-norm-w dh] {:eps 1e-6}]
-         [:reshape [k-normed-3d :b p kvd] [k-normed-4d :b p kvh dh] {:shape [1 1 kv-dim]}]
-         [:rope [k-rope :b p kvd] [k-normed-3d :b p kvd] {:head-dim head-dim :theta theta :rope-proportion rope-prop :pos :pos :max-seq-len max-seq-len}]
-         [:reshape [k-ro :b p kvh dh] [k-rope :b p kvd] {:shape [1 1 num-kv-heads head-dim]}]
-         [:dynamic-update-slice [k-cache-out :b kv-s kvh dh] [k-cache-in :b kv-s kvh dh] [k-ro :b p kvh dh]
+        [:block {:name :kv_proj_update}
+         (gemma4-linear-proj [:k_raw :b :p :kvd] [:x_norm1 :b :p :d] [:k_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :k_scale norm-dtype {})
+         (gemma4-linear-proj [:v_raw :b :p :kvd] [:x_norm1 :b :p :d] [:v_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :v_scale norm-dtype {})
+         [:rms-norm [:v_normed :b :p :kvd] [:v_raw :b :p :kvd] {:eps 1e-6}]
+         [:reshape [:k_heads_raw :b :p :kvh :dh] [:k_raw :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
+         [:reshape [:v_heads :b :p :kvh :dh] [:v_normed :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
+         [:rms-norm [:k_normed_4d :b :p :kvh :dh] [:k_heads_raw :b :p :kvh :dh] [:k_norm_w :dh] {:eps 1e-6}]
+         [:reshape [:k_normed_3d :b :p :kvd] [:k_normed_4d :b :p :kvh :dh] {:shape [1 1 kv-dim]}]
+         [:rope [:k_rope :b :p :kvd] [:k_normed_3d :b :p :kvd] {:head-dim head-dim :theta theta :rope-proportion rope-prop :pos :pos :max-seq-len max-seq-len}]
+         [:reshape [:k_ro :b :p :kvh :dh] [:k_rope :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
+         [:dynamic-update-slice [[:k_cache_out i] :b :kvs :kvh :dh] [:k_cache_in :b :kvs :kvh :dh] [:k_ro :b :p :kvh :dh]
           (merge {:start-indices [0 :pos 0 0]}
                  (when ring-buffer? {:window window}))]
-         [:dynamic-update-slice [v-cache-out :b kv-s kvh dh] [v-cache-in :b kv-s kvh dh] [v-heads :b p kvh dh]
+         [:dynamic-update-slice [[:v_cache_out i] :b :kvs :kvh :dh] [:v_cache_in :b :kvs :kvh :dh] [:v_heads :b :p :kvh :dh]
           (merge {:start-indices [0 :pos 0 0]}
                  (when ring-buffer? {:window window}))]])
 
       ;; 4 & 5. Chunked Scaled Dot-Product Attention (Online Streaming Softmax)
-      [:chunked-attention [ctx :b p h dh]
-       [q-ro :b p h dh]
-       [actual-k-cache :b kv-s kvh dh]
-       [actual-v-cache :b kv-s kvh dh]
+      [:chunked-attention [:ctx :b :p :h :dh]
+       [:q_ro :b :p :h :dh]
+       [actual-k-cache :b :kvs :kvh :dh]
+       [actual-v-cache :b :kvs :kvh :dh]
        (merge {:pos :pos
                :chunk-size (min 64 layer-seq-len)
                :head-dim head-dim
@@ -680,42 +597,42 @@
                :shape [1 1 num-heads head-dim]}
               (when ring-buffer? {:ring-buffer true :sliding-window window})
               (when (and window (not ring-buffer?)) {:sliding-window window}))]
-      [:reshape [ctx-flat :b p qd] [ctx :b p h dh] {:shape [1 1 q-dim]}]
+      [:reshape [:ctx_flat :b :p :qd] [:ctx :b :p :h :dh] {:shape [1 1 q-dim]}]
 
       ;; 6. Output Projection & Post-Attention RMSNorm
-      (gemma4-linear-proj [attn-raw :b p :d] [ctx-flat :b p qd] [o-w :d qd] layer-is-int8? layer-is-int4? layer-is-ternary? o-scale norm-dtype {})
-      [:rms-norm [attn-normed :b p :d] [attn-raw :b p :d] [post-attn-ln-w :d] {:eps 1e-6}]
+      (gemma4-linear-proj [:attn_raw :b :p :d] [:ctx_flat :b :p :qd] [:o_w :d :qd] layer-is-int8? layer-is-int4? layer-is-ternary? :o_scale norm-dtype {})
+      [:rms-norm [:attn_normed :b :p :d] [:attn_raw :b :p :d] [:post_attn_ln_w :d] {:eps 1e-6}]
 
       ;; 7. Residual Connection 1
-      [:= [res1 :b p :d] [h-in :b p :d]]
-      [:= [res1 :b p :d] [attn-normed :b p :d]]
+      [:= [:res1 :b :p :d] [:h :b :p :d]]
+      [:= [:res1 :b :p :d] [:attn_normed :b :p :d]]
 
       ;; 8. Pre-MLP RMSNorm
-      [:rms-norm [x-norm2 :b p :d] [res1 :b p :d] [pre-mlp-ln-w :d] {:eps 1e-6}]
+      [:rms-norm [:x_norm2 :b :p :d] [:res1 :b :p :d] [:pre_mlp_ln_w :d] {:eps 1e-6}]
 
       ;; 9. GeGLU MLP Block: down_proj(gelu(gate_proj(x)) * up_proj(x))
-      (gemma4-linear-proj [gate :b p dff] [x-norm2 :b p :d] [gate-w dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? gate-scale norm-dtype {:act :gelu})
-      (gemma4-linear-proj [up :b p dff] [x-norm2 :b p :d] [up-w dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? up-scale norm-dtype {})
-      [:= [mlp-act :b p dff] [gate :b p dff] [up :b p dff]]
-      (gemma4-linear-proj [mlp-raw :b p :d] [mlp-act :b p dff] [down-w :d dff] layer-is-int8? layer-is-int4? layer-is-ternary? down-scale norm-dtype {})
-      [:rms-norm [mlp-normed :b p :d] [mlp-raw :b p :d] [post-mlp-ln-w :d] {:eps 1e-6}]
+      (gemma4-linear-proj [:gate :b :p :dff] [:x_norm2 :b :p :d] [:gate_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :gate_scale norm-dtype {:act :gelu})
+      (gemma4-linear-proj [:up :b :p :dff] [:x_norm2 :b :p :d] [:up_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :up_scale norm-dtype {})
+      [:= [:mlp_act :b :p :dff] [:gate :b :p :dff] [:up :b :p :dff]]
+      (gemma4-linear-proj [:mlp_raw :b :p :d] [:mlp_act :b :p :dff] [:down_w :d :dff] layer-is-int8? layer-is-int4? layer-is-ternary? :down_scale norm-dtype {})
+      [:rms-norm [:mlp_normed :b :p :d] [:mlp_raw :b :p :d] [:post_mlp_ln_w :d] {:eps 1e-6}]
 
       ;; 10. Residual Connection 2
-      [:= [res2 :b p :d] [res1 :b p :d]]
-      [:= [res2 :b p :d] [mlp-normed :b p :d]]
+      [:= [:res2 :b :p :d] [:res1 :b :p :d]]
+      [:= [:res2 :b :p :d] [:mlp_normed :b :p :d]]
 
       ;; 11. Gemma 4 Per-Layer Input (PLE) Gating Sub-block (if has-ple?)
       (when has-ple?
-        [:block {:name (keyword (str "ple_gate_" i))}
-         [:= [gate-raw :b p pld] {:act :gelu} [res2 :b p :d] [per-layer-gate-w pld :d]]
-         [:= [gated :b p pld] [gate-raw :b p pld] [pl-in-var :b p pld]]
-         [:= [proj-raw :b p :d] [gated :b p pld] [per-layer-proj-w :d pld]]
-         [:rms-norm [ple-normed :b p :d] [proj-raw :b p :d] [post-per-layer-norm-w :d] {:eps 1e-6}]
-         [:= [res3 :b p :d] [res2 :b p :d]]
-         [:= [res3 :b p :d] [ple-normed :b p :d]]])
+        [:block {:name :ple_gate}
+         [:= [:gate_raw :b :p :pld] {:act :gelu} [:res2 :b :p :d] [:per_layer_gate_w :pld :d]]
+         [:= [:gated :b :p :pld] [:gate_raw :b :p :pld] [[:pl_in i] :b :p :pld]]
+         [:= [:proj_raw :b :p :d] [:gated :b :p :pld] [:per_layer_proj_w :d :pld]]
+         [:rms-norm [:ple_normed :b :p :d] [:proj_raw :b :p :d] [:post_per_layer_norm_w :d] {:eps 1e-6}]
+         [:= [:res3 :b :p :d] [:res2 :b :p :d]]
+         [:= [:res3 :b :p :d] [:ple_normed :b :p :d]]])
 
       ;; 12. Gemma 4 Layer Scalar
-      [:= [h-out :b p :d] [(if has-ple? res3 res2) :b p :d] [layer-scalar-w :one]]])))
+      [:= [:h# :b :p :d] [(if has-ple? :res3 :res2) :b :p :d] [:layer_scalar :one]]])))
 
 (defn gemma4-kv-model-ast
   "Generates single-token step Gemma 4 model forward pass with persistent KV-Cache in pure Tensor Logic Hiccup AST."
@@ -731,21 +648,20 @@
         pl-dim (long (or pl-dim 256))
         total-pl-dim (long (or total-pl-dim (* num-layers pl-dim)))
         has-ple? (pos? total-pl-dim)
-        h-final (keyword (str "h" num-layers))
 
         last-unshared-sliding (when has-shared-kv? (last (filter #(not (layer-is-global? layer-types %)) (range num-unshared))))
         last-unshared-full (when has-shared-kv? (last (filter #(layer-is-global? layer-types %) (range num-unshared))))]
     [:block {:name :gemma4_kv_step_model}
      ;; 1. Token Embedding Lookup for single token [1 1]
      [:gather [:tok_embed_raw :b :p :d] [:embed_tokens :v :d] [:x :b :p]]
-     [:= [:h0 :b :p :d] {:scale (Math/sqrt (double hidden-dim))} [:tok_embed_raw :b :p :d]]
+     [:= [[:h 0] :b :p :d] {:scale (Math/sqrt (double hidden-dim))} [:tok_embed_raw :b :p :d]]
 
      ;; 2. Gemma 4 Per-Layer Embedding (PLE) generation at p=1
      (when has-ple?
        [:block {:name :ple_generation}
         [:gather [:raw_pl_tok :b :p :total_pl_dim] [:embed_tokens_per_layer :v :total_pl_dim] [:x :b :p]]
         [:= [:pl_tok_scaled :b :p :total_pl_dim] {:scale 16.0} [:raw_pl_tok :b :p :total_pl_dim]]
-        [:= [:pl_context_raw :b :p :total_pl_dim] [:h0 :b :p :d] [:per_layer_model_projection :total_pl_dim :d]]
+        [:= [:pl_context_raw :b :p :total_pl_dim] [[:h 0] :b :p :d] [:per_layer_model_projection :total_pl_dim :d]]
         [:reshape [:pl_tok_4d :b :p :l :pld] [:pl_tok_scaled :b :p :total_pl_dim] {:shape [1 1 num-layers pl-dim]}]
         [:reshape [:pl_context_4d :b :p :l :pld] [:pl_context_raw :b :p :total_pl_dim] {:shape [1 1 num-layers pl-dim]}]
         [:rms-norm [:pl_context_norm :b :p :l :pld] [:pl_context_4d :b :p :l :pld] [:per_layer_projection_norm :pld] {:eps 1e-6}]
@@ -753,11 +669,9 @@
         [:= [:pl_sum :b :p :l :pld] [:pl_tok_4d :b :p :l :pld]]
         [:= [:ple_all :b :p :l :pld] {:scale (/ 1.0 (Math/sqrt 2.0))} [:pl_sum :b :p :l :pld]]
         (mapv (fn [i]
-                (let [sl-var (keyword (str "pl_slice_" i))
-                      in-var (keyword (str "pl_in_" i))]
-                  [:block {:name (keyword (str "ple_slice_block_" i))}
-                   [:slice [sl-var :b :p :one :pld] [:ple_all :b :p :l :pld] {:start [0 0 i 0] :limit [1 1 (inc i) pl-dim]}]
-                   [:reshape [in-var :b :p :pld] [sl-var :b :p :one :pld] {:shape [1 1 pl-dim]}]]))
+                [:block {:name (keyword (str "ple_slice_block_" i))}
+                 [:slice [[:pl_slice i] :b :p :one :pld] [:ple_all :b :p :l :pld] {:start [0 0 i 0] :limit [1 1 (inc i) pl-dim]}]
+                 [:reshape [[:pl_in i] :b :p :pld] [[:pl_slice i] :b :p :one :pld] {:shape [1 1 pl-dim]}]])
               (range num-layers))])
 
      ;; 3. Sequential Transformer Layer Blocks with KV Cache
@@ -766,19 +680,19 @@
                    is-global? (layer-is-global? layer-types i)
                    shared-k (when is-shared?
                               (if is-global?
-                                (keyword (str "k_cache_out_" last-unshared-full))
-                                (keyword (str "k_cache_out_" last-unshared-sliding))))
+                                [:k_cache_out last-unshared-full]
+                                [:k_cache_out last-unshared-sliding]))
                    shared-v (when is-shared?
                               (if is-global?
-                                (keyword (str "v_cache_out_" last-unshared-full))
-                                (keyword (str "v_cache_out_" last-unshared-sliding))))]
+                                [:v_cache_out last-unshared-full]
+                                [:v_cache_out last-unshared-sliding]))]
                (gemma4-kv-layer-ast i max-seq-len cfg {:is-shared? is-shared?
                                                        :shared-k shared-k
                                                        :shared-v shared-v})))
            (range num-layers))
 
      ;; 4. Final RMSNorm
-     [:rms-norm [:normed :b :p :d] [h-final :b :p :d] [:final_norm_w :d] {:eps 1e-6}]
+     [:rms-norm [:normed :b :p :d] [[:h num-layers] :b :p :d] [:final_norm_w :d] {:eps 1e-6}]
 
      ;; 5. Tied LM Head (single token logits [1 1 vocab-size])
      [:= [:logits :b :p :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))

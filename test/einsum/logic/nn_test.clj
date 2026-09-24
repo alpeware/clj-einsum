@@ -1,6 +1,7 @@
 (ns einsum.logic.nn-test
   "Tests for neural network layers and transformer blocks represented as Tensor Logic."
   (:require [einsum.logic.lower :as lower]
+            [einsum.logic.nn :as nn]
             [einsum.compiler.stablehlo :as shlo]
             [clojure.test :refer [deftest is]]))
 
@@ -52,3 +53,23 @@
         graph (lower/ast->graph "residual_block_test" invars ast #{:out})]
     (is (shlo/validate-graph graph))
     (is (= [:out] (:outvars graph)))))
+
+(deftest test-nn-constructors
+  (let [invars [[:x [:tensor [1 4 8] :f32]]
+                [:fc-w [:tensor [8 16] :f32]]
+                [:proj-w [:tensor [16 8] :f32]]]
+        ast (nn/mlp [:out :b :p :d] [:x :b :p :d] [:fc-w :d :dff] [:proj-w :dff :d])
+        graph (lower/ast->graph "mlp_fn_test" invars ast #{:out})]
+    (is (shlo/validate-graph graph))
+    (is (= [:out] (:outvars graph))))
+  (let [invars [[:x [:tensor [1 4 16] :f32]]
+                [:w-q [:tensor [16 2 8] :f32]]
+                [:w-k [:tensor [16 2 8] :f32]]
+                [:w-v [:tensor [16 2 8] :f32]]
+                [:w-o [:tensor [2 8 16] :f32]]]
+        ast (nn/causal-attention [:attn_out :b :p-q :d] [:x :b :p :d]
+                                 [:w-q :d :h :dh] [:w-k :d :h :dh]
+                                 [:w-v :d :h :dh] [:w-o :h :dh :d])
+        graph (lower/ast->graph "attn_fn_test" invars ast #{:attn_out})]
+    (is (shlo/validate-graph graph))
+    (is (= [:attn_out] (:outvars graph)))))

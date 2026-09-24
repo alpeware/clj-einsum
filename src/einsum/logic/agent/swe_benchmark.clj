@@ -233,9 +233,9 @@
    Evaluates all paths up to 2^k hops in O(k) matrix multiplications."
   [k]
   (let [eqns (mapcat (fn [i]
-                       (let [prev (if (zero? i) :P (keyword (str "A_" (dec i))))
-                             unclamped (keyword (str "A_raw_" i))
-                             curr (keyword (str "A_" i))]
+                       (let [prev (if (zero? i) :P [:A (dec i)])
+                             unclamped [:A_raw i]
+                             curr [:A i]]
                          [[:= [unclamped :x :z] [prev :x :z]]
                           [:= [unclamped :x :z] [prev :x :y] [prev :y :z]]
                           [:= [curr :x :z] {:clamp [0.0 1.0]} [unclamped :x :z]]]))
