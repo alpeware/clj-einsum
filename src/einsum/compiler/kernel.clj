@@ -64,17 +64,20 @@
 (defn run-kernel
   "Executes `kernel` with `inputs` (either a keyword-indexed map or ordered vector)."
   [kernel inputs call-style]
-  (let [{:keys [exec in-spec in-keys out-spec ctx]} kernel
+  (let [{:keys [exec in-spec in-keys out-spec ctx opts]} kernel
         exec-handle (or (:handle exec) exec)
         spec-map (into {} in-spec)
+        weights-store (or (:weights opts) (:weight-store opts))
 
         ;; 1. Collect inputs in the exact canonical invars order
         input-buffers (if (= call-style :map)
                         (mapv (fn [k]
-                                (if-let [v (get inputs k)]
-                                  (to-device-buffer ctx k (get spec-map k) v)
-                                  (throw (ex-info (str "Missing required kernel input: " k)
-                                                  {:required k :available (keys inputs) :kernel-name (:name kernel)}))))
+                                (if (contains? inputs k)
+                                  (to-device-buffer ctx k (get spec-map k) (get inputs k))
+                                  (if (and weights-store (weights/weight-store? weights-store))
+                                    (weights/get-device-buffer weights-store k)
+                                    (throw (ex-info (str "Missing required kernel input: " k)
+                                                    {:required k :available (keys inputs) :kernel-name (:name kernel)})))))
                               in-keys)
                         (mapv (fn [idx val]
                                 (let [k (nth in-keys idx)

@@ -30,6 +30,34 @@
    :mlp-proj-w (format "h.%d.mlp.c_proj.weight" i)
    :mlp-proj-b (format "h.%d.mlp.c_proj.bias" i)})
 
+(defn gpt2-alias-resolver
+  "Resolves GPT-2 Tensor Logic AST variable keywords to canonical HuggingFace Safetensors parameter keys."
+  [k]
+  (let [k-str (if (keyword? k) (name k) (str k))]
+    (cond
+      (= k-str "wte") "wte.weight"
+      (= k-str "wpe") "wpe.weight"
+      (= k-str "ln_f_g") "ln_f.weight"
+      (= k-str "ln_f_b") "ln_f.bias"
+      :else
+      (if-let [[_ prefix idx-str] (re-matches #"^(ln1_g|ln1_b|attn_w|attn_b|proj_w|proj_b|ln2_g|ln2_b|mlp_fc_w|mlp_fc_b|mlp_proj_w|mlp_proj_b)_(\d+)$" k-str)]
+        (let [i (Long/parseLong idx-str)]
+          (case prefix
+            "ln1_g" (format "h.%d.ln_1.weight" i)
+            "ln1_b" (format "h.%d.ln_1.bias" i)
+            "attn_w" (format "h.%d.attn.c_attn.weight" i)
+            "attn_b" (format "h.%d.attn.c_attn.bias" i)
+            "proj_w" (format "h.%d.attn.c_proj.weight" i)
+            "proj_b" (format "h.%d.attn.c_proj.bias" i)
+            "ln2_g" (format "h.%d.ln_2.weight" i)
+            "ln2_b" (format "h.%d.ln_2.bias" i)
+            "mlp_fc_w" (format "h.%d.mlp.c_fc.weight" i)
+            "mlp_fc_b" (format "h.%d.mlp.c_fc.bias" i)
+            "mlp_proj_w" (format "h.%d.mlp.c_proj.weight" i)
+            "mlp_proj_b" (format "h.%d.mlp.c_proj.bias" i)
+            nil))
+        k-str))))
+
 (defn gpt2-layer-ast
   "Generates Tensor Logic Hiccup AST for GPT-2 Transformer layer block `layer-idx`."
   [layer-idx max-seq-len]

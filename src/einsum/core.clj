@@ -313,6 +313,8 @@
 
 (def create-weight-store weights/create-weight-store)
 (def infer-invars weights/infer-invars)
+(def get-device-buffer weights/get-device-buffer)
+(def load-device-buffers! weights/load-device-buffers!)
 
 ;; -----------------------------------------------------------------------------
 ;; Callable Compiled Kernels (Proposal 3)

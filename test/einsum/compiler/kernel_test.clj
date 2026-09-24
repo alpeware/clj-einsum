@@ -3,6 +3,7 @@
   (:require [einsum.compiler.kernel :as kernel]
             [einsum.core :as xla]
             [einsum.runtime.arena :as arena]
+            [einsum.runtime.weights :as weights]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
@@ -51,6 +52,30 @@
       ;; Outside arena: arena is closed and all 3 buffers were destroyed without leak
       (is (true? (arena/closed? @captured-arena)))
       (is (= [4.0 6.0] @output-result)))))
+
+(deftest test-compile-kernel-with-weight-store
+  (testing "compile-kernel automatically derives weight invars from WeightStore and fulfills them"
+    (let [ctx (xla/init-backend! :cpu)
+          ast [:= [:y :b :d] [:x :b :k] [:w :k :d]]
+          w-data (float-array [1.0 2.0
+                               3.0 4.0])]
+      (with-open [arena (arena/create-arena ctx)]
+        (let [store (weights/create-weight-store {"w" {:shape [2 2] :dtype :f32}}
+                                                 {:aliases {:w "w"}
+                                                  :arena arena})
+              _ (swap! (:device-buffers store) assoc :w (arena/device-buffer arena w-data [2 2] :f32))
+              k (kernel/compile-kernel ctx "gemm_weight_store" ast
+                                       {:in {:x [:tensor [1 2] :f32]}
+                                        :weights store
+                                        :out [:y]})]
+          (is (= [:x :w] (:in-keys k)))
+          (arena/with-device-arena [_step arena]
+            (let [x-data (float-array [1.0 1.0])
+                  res (k {:x x-data})]
+              (is (map? res))
+              (let [out-buf (:y res)
+                    floats (xla/to-host-slice out-buf 0 2 2 :f32)]
+                (is (= [4.0 6.0] (vec floats)))))))))))
 
 (defspec prop-compile-kernel-linear-scaling
   20

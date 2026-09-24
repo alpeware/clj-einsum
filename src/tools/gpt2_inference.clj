@@ -106,71 +106,23 @@
         (println (str "Loading Safetensors metadata from [" safetensors-path "]..."))
         (let [arena (Arena/ofAuto)
               weights (st/map-safetensors-weights safetensors-path arena)
-              header (:header weights)
-              ln-f-g (st/get-tensor-floats weights "ln_f.weight")
-              ln-f-b (st/get-tensor-floats weights "ln_f.bias")
-              wte-floats (st/get-tensor-floats weights "wte.weight")
-              wpe-floats (st/get-tensor-floats weights "wpe.weight")
               num-layers 12
-              layer-weights (mapv (fn [i]
-                                    {:ln1-g (st/get-tensor-floats weights (format "h.%d.ln_1.weight" i))
-                                     :ln1-b (st/get-tensor-floats weights (format "h.%d.ln_1.bias" i))
-                                     :c-attn-w (st/get-tensor-floats weights (format "h.%d.attn.c_attn.weight" i))
-                                     :c-attn-b (st/get-tensor-floats weights (format "h.%d.attn.c_attn.bias" i))
-                                     :c-proj-w (st/get-tensor-floats weights (format "h.%d.attn.c_proj.weight" i))
-                                     :c-proj-b (st/get-tensor-floats weights (format "h.%d.attn.c_proj.bias" i))
-                                     :ln2-g (st/get-tensor-floats weights (format "h.%d.ln_2.weight" i))
-                                     :ln2-b (st/get-tensor-floats weights (format "h.%d.ln_2.bias" i))
-                                     :mlp-fc-w (st/get-tensor-floats weights (format "h.%d.mlp.c_fc.weight" i))
-                                     :mlp-fc-b (st/get-tensor-floats weights (format "h.%d.mlp.c_fc.bias" i))
-                                     :mlp-proj-w (st/get-tensor-floats weights (format "h.%d.mlp.c_proj.weight" i))
-                                     :mlp-proj-b (st/get-tensor-floats weights (format "h.%d.mlp.c_proj.bias" i))})
-                                  (range num-layers))
-              flat-layer-weights (vec (mapcat (fn [m] [(:ln1-g m) (:ln1-b m) (:c-attn-w m) (:c-attn-b m)
-                                                       (:c-proj-w m) (:c-proj-b m) (:ln2-g m) (:ln2-b m)
-                                                       (:mlp-fc-w m) (:mlp-fc-b m) (:mlp-proj-w m) (:mlp-proj-b m)])
-                                              layer-weights))
-              max-seq-len 128
-              invars (into [[:x [:tensor [1 max-seq-len] :i32]]
-                            [:pos_ids [:tensor [1 max-seq-len] :i32]]
-                            [:ln_f_g [:tensor [768] :f32]]
-                            [:ln_f_b [:tensor [768] :f32]]
-                            [:wte [:tensor [50257 768] :f32]]
-                            [:wpe [:tensor [1024 768] :f32]]]
-                           (mapcat (fn [i]
-                                     [[(keyword (str "ln1_g_" i)) [:tensor [768] :f32]]
-                                      [(keyword (str "ln1_b_" i)) [:tensor [768] :f32]]
-                                      [(keyword (str "attn_w_" i)) [:tensor [768 2304] :f32]]
-                                      [(keyword (str "attn_b_" i)) [:tensor [2304] :f32]]
-                                      [(keyword (str "proj_w_" i)) [:tensor [768 768] :f32]]
-                                      [(keyword (str "proj_b_" i)) [:tensor [768] :f32]]
-                                      [(keyword (str "ln2_g_" i)) [:tensor [768] :f32]]
-                                      [(keyword (str "ln2_b_" i)) [:tensor [768] :f32]]
-                                      [(keyword (str "mlp_fc_w_" i)) [:tensor [768 3072] :f32]]
-                                      [(keyword (str "mlp_fc_b_" i)) [:tensor [3072] :f32]]
-                                      [(keyword (str "mlp_proj_w_" i)) [:tensor [3072 768] :f32]]
-                                      [(keyword (str "mlp_proj_b_" i)) [:tensor [768] :f32]]])
-                                   (range num-layers)))]
+              max-seq-len 128]
+          (println (format "Parsed Safetensors header (%d tensors, %d layers configured)."
+                           (count (:header weights)) num-layers))
 
-          (println (format "Parsed Safetensors header (%d tensors, %d layers loaded)."
-                           (count header) num-layers))
-
-          (println "Lowering & JIT Compiling full GPT-2 via Tensor Logic Hiccup AST...")
+          (println "Lowering & JIT Compiling full GPT-2 via Tensor Logic Hiccup AST & WeightStore...")
           (with-open [session-arena (xla/create-arena ctx)]
-            (let [ast (gpt2-logic/gpt2-model-ast {:num-layers num-layers :max-seq-len max-seq-len})
-                  gpt2-kernel (xla/compile-kernel ctx "full_gpt2_model_logic" ast {:in invars :out [:logits]})
+            (let [store (xla/create-weight-store ctx weights {:aliases gpt2-logic/gpt2-alias-resolver
+                                                              :arena session-arena})
+                  ast (gpt2-logic/gpt2-model-ast {:num-layers num-layers :max-seq-len max-seq-len})
+                  gpt2-kernel (xla/compile-kernel ctx "full_gpt2_model_logic" ast
+                                                  {:in {:x [:tensor [1 max-seq-len] :i32]
+                                                        :pos_ids [:tensor [1 max-seq-len] :i32]}
+                                                   :weights store
+                                                   :out [:logits]})
                   pos-array (int-array (range max-seq-len))
-                  pos-buf (xla/device-buffer session-arena pos-array [1 max-seq-len] :i32)
-                  ln-f-g-buf (xla/device-buffer session-arena ln-f-g [768] :f32)
-                  ln-f-b-buf (xla/device-buffer session-arena ln-f-b [768] :f32)
-                  wte-buf (xla/device-buffer session-arena wte-floats [50257 768] :f32)
-                  wpe-buf (xla/device-buffer session-arena wpe-floats [1024 768] :f32)
-                  weight-bufs (mapv (fn [idx w]
-                                      (let [[_var-name [_kw shape dtype]] (nth invars (+ 6 idx))]
-                                        (xla/device-buffer session-arena w shape dtype)))
-                                    (range (count flat-layer-weights))
-                                    flat-layer-weights)
-                  flat-device-weights (into [pos-buf ln-f-g-buf ln-f-b-buf wte-buf wpe-buf] weight-bufs)]
+                  pos-buf (xla/device-buffer session-arena pos-array [1 max-seq-len] :i32)]
 
               (println "Successfully compiled model to native XLA PjRtLoadedExecutable handle.")
               (println "\nGenerating tokens autoregressively...")
@@ -181,10 +133,9 @@
                   (xla/with-device-arena [_step-arena session-arena]
                     (let [seq-len (count @cur-tokens)
                           input-tensor (prepare-input-tensor @cur-tokens max-seq-len)
-                          input-args (into [input-tensor] flat-device-weights)
-                          out (gpt2-kernel input-args)
-                          logits (xla/to-host-slice out (dec seq-len) 50257 (* max-seq-len 50257))
-                          next-id (sample-logits logits temperature top-k)]
+                          {:keys [logits]} (gpt2-kernel {:x input-tensor :pos_ids pos-buf})
+                          logits-slice (xla/to-host-slice logits (dec seq-len) 50257 (* max-seq-len 50257))
+                          next-id (sample-logits logits-slice temperature top-k)]
                       (swap! cur-tokens conj next-id)
                       (print (bpe-token->str (get id->tok next-id next-id)))
                       (flush))))
