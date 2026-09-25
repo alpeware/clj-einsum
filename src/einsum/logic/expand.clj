@@ -6,22 +6,51 @@
             [clojure.walk :as walk]))
 
 (def ^:private GLOBAL-DIMS
-  #{:b :p :d :v :max_pos :one :l :total_pl_dim})
+  #{:b :p :d :v :max_pos :one :l :total_pl_dim :dh :qd :kvd :kvh :kvs :s})
 
 (def ^:private GLOBAL-INPUTS
   #{:x :pos_ids :pos :embed_tokens :wte :wpe :normed :logits :total_pl_dim :one
     :W_mem :R_mem :E_cand :T :R_adj :threshold})
 
+(defn composite-id?
+  "Returns true if `x` is a composite identifier tuple [:name & args] where prefix is a keyword
+   (excluding type/descriptor keywords) and all arguments are identifiers/scalars (keywords, numbers, strings, symbols)."
+  [x]
+  (and (vector? x)
+       (>= (count x) 2)
+       (keyword? (first x))
+       (not (contains? #{:tensor :const} (first x)))
+       (every? (fn [a] (or (keyword? a) (number? a) (string? a) (symbol? a))) (rest x))))
+
 (defn normalize-id
   "Normalizes a composite tuple identifier [:name & args] or keyword to a canonical keyword."
   [x]
-  (if (and (vector? x) (seq x) (keyword? (first x)))
+  (if (composite-id? x)
     (let [[prefix & args] x
           p-str (name prefix)]
       (if (and (= p-str "h") (number? (first args)))
         (keyword (str "h" (first args)))
-        (keyword (str (str/replace p-str "-" "_") "_" (str/join "_" args)))))
+        (keyword (str (str/replace p-str "-" "_") "_" (str/join "_" (map (fn [a] (if (keyword? a) (name a) (str a))) args))))))
     x))
+
+(defn- normalize-val
+  "Normalizes composite tuple identifiers in scalar values, vectors, or nested maps."
+  ([v] (normalize-val nil v))
+  ([k v]
+   (cond
+     (contains? #{:start-indices :start_indices :slice-sizes :shape :type} k)
+     v
+
+     (composite-id? v)
+     (normalize-id v)
+
+     (vector? v)
+     (mapv (fn [elem] (normalize-val k elem)) v)
+
+     (map? v)
+     (into {} (map (fn [[sub-k val]] [sub-k (normalize-val sub-k val)])) v)
+
+     :else v)))
 
 (defn- extract-layer-block-info [attrs]
   (when (map? attrs)
@@ -58,6 +87,7 @@
         defined-heads (collect-defined-heads children)
         internal-wires (set (filter keyword? (disj defined-heads :h# :h-out :h h-in-kw h-out-kw)))
         global-inputs (into GLOBAL-INPUTS (or (:globals attrs) (:inputs attrs) (:shared attrs)))
+        global-dims (into GLOBAL-DIMS (or (:dims attrs) (:global-dims attrs)))
         remap-id (fn [id]
                    (cond
                      (or (= id :h) (= id :h-in) (= id h-in-kw))
@@ -74,6 +104,7 @@
 
                      (and (keyword? id) (not (contains? defined-heads id)))
                      (if (or (re-find #"_\d+$" (name id))
+                             (re-find #"^h\d+$" (name id))
                              (str/starts-with? (name id) prefix))
                        id
                        (keyword (str (str/replace (name id) "-" "_") "_" layer)))
@@ -82,7 +113,7 @@
                      (normalize-id id)))
         remap-idx (fn [idx]
                     (if (or (not (keyword? idx))
-                            (contains? GLOBAL-DIMS idx)
+                            (contains? global-dims idx)
                             (str/ends-with? (name idx) (str "_" layer))
                             (re-find #"_\d+$" (name idx)))
                       idx
@@ -105,10 +136,7 @@
                              new-tail (mapv (fn [elem]
                                               (cond
                                                 (vector? elem) (remap-term elem)
-                                                (map? elem) (into {} (map (fn [[k v]]
-                                                                            [k (if (vector? v)
-                                                                                 (mapv normalize-id v)
-                                                                                 v)])) elem)
+                                                (map? elem) (normalize-val elem)
                                                 :else elem))
                                             tail)]
                          (into [op new-head] new-tail))
@@ -197,9 +225,14 @@
   (mapv (fn [stmt]
           (if (and (vector? stmt) (>= (count stmt) 2))
             (mapv (fn [elem]
-                    (if (and (vector? elem) (seq elem) (vector? (first elem)))
+                    (cond
+                      (and (vector? elem) (seq elem) (vector? (first elem)))
                       (into [(normalize-id (first elem))] (rest elem))
-                      elem))
+
+                      (map? elem)
+                      (normalize-val elem)
+
+                      :else elem))
                   stmt)
             stmt))
         stmts))

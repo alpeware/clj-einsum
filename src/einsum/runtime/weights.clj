@@ -129,12 +129,9 @@
               shape (:shape info)
               dtype (:dtype info)
               buf (cond
-                    ;; 1. MemorySegment already in source map
+                    ;; 1. MemorySegment already in source map (caller-owned buffer or host segment, never auto-tracked)
                     (and (map? source) (contains? source k) (instance? MemorySegment (get source k)))
-                    (let [seg (get source k)]
-                      (if arena
-                        (arena/track! arena seg)
-                        seg))
+                    (get source k)
 
                     ;; 2. Safetensors mapped weights
                     (and (map? source) (or (:segment source) (:tensors source)))
@@ -170,7 +167,7 @@
 
 (defn load-device-buffers!
   "Pre-transfers all weights in `store` (or for variables in `ast-or-keys`) into device memory.
-   Returns `store`."
+   Throws ExceptionInfo if any weight fails to load. Returns `store`."
   ([store]
    (load-device-buffers! store (keys (:header store))))
   ([store ast-or-keys]
@@ -179,16 +176,28 @@
               (and (vector? ast-or-keys) (seq ast-or-keys) (not (keyword? (first ast-or-keys))))
               (find-ast-free-vars ast-or-keys)
               (coll? ast-or-keys) ast-or-keys
-              :else (keys (:header store)))]
-     (doseq [k ks]
-       (try
-         (get-device-buffer store k)
-         (catch Exception _ nil)))
+              :else (keys (:header store)))
+         failures (reduce (fn [acc k]
+                            (try
+                              (get-device-buffer store k)
+                              acc
+                              (catch Exception e
+                                (conj acc {:key k :error (.getMessage e)}))))
+                          []
+                          ks)]
+     (when (seq failures)
+       (throw (ex-info (str "Failed to load device buffers for " (count failures) " weights: "
+                            (vec (map :key failures)))
+                       {:failed-count (count failures)
+                        :failures failures
+                        :store store})))
      store)))
 
 (defn infer-invars
   "Derives the full input variable signature `[[:var-name [:tensor shape dtype]] ...]`
-   for `ast` by combining explicit `dynamic-inputs` with weight shapes resolved from `weights-store-or-map`."
+   for `ast` by combining explicit `dynamic-inputs` with weight shapes resolved from `weights-store-or-map`.
+   When strict dynamic input ordering is required, pass `dynamic-inputs` as a vector of pairs
+   `[[:var spec] ...]` (standard Clojure maps with > 8 entries do not preserve key insertion order)."
   [ast dynamic-inputs weights-store-or-map]
   (let [;; 1. Parse dynamic inputs into map of {var-kw -> [:tensor shape dtype]}
         dyn-map (if (map? dynamic-inputs)

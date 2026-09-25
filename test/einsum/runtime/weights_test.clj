@@ -8,7 +8,8 @@
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
-            [clojure.test.check.properties :as prop]))
+            [clojure.test.check.properties :as prop])
+  (:import [java.lang.foreign MemorySegment]))
 
 (deftest test-weight-store-resolution
   (testing "create-weight-store normalizes dtypes and resolves weights"
@@ -111,3 +112,28 @@
                                    (= (weights/tensor-info store-map kw)
                                       (weights/tensor-info store-fn kw)))))
                           (range layers)))))
+
+(deftest test-get-device-buffer-source-memorysegment-not-tracked
+  (testing "MemorySegment in source map is treated as caller-owned and NEVER tracked/destroyed by arena"
+    (let [destroyed? (atom false)
+          ctx {:destroy-fn (fn [_ _buf] (reset! destroyed? true))}
+          seg (MemorySegment/ofArray (byte-array 16))
+          source {:w seg}
+          header {:w {:shape [4] :dtype :f32}}]
+      (with-open [a (arena/create-arena ctx)]
+        (let [store (weights/create-weight-store ctx {:header header :source source} {:arena a})
+              buf (weights/get-device-buffer store :w)]
+          ;; Returned buffer is identical to the caller-supplied segment
+          (is (identical? seg buf))
+          ;; Buffer is NOT tracked in the arena
+          (is (not (contains? (arena/tracked-buffers a) seg)))))
+      ;; Arena is now closed; mock destroy-fn should NEVER have been called on the host segment
+      (is (false? @destroyed?)))))
+
+(deftest test-load-device-buffers-throws-on-failure
+  (testing "load-device-buffers! throws ExceptionInfo when any requested weight cannot be resolved"
+    (let [header {:w1 {:shape [16 16] :dtype :f32}}
+          store (weights/create-weight-store header {})]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"Failed to load device buffers for 1 weights"
+                            (weights/load-device-buffers! store [:w1 :missing_w]))))))

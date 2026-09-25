@@ -114,3 +114,24 @@
       ;; Closing session-arena destroys b-persistent
       (arena/close! session-arena)
       (is (= #{301 302} @destroyed-ids)))))
+
+(deftest test-track-closed-arena-throws
+  (testing "Calling track! on a closed arena throws ExceptionInfo"
+    (let [a (arena/create-arena {})
+          b (mock-buffer 401)]
+      (arena/close! a)
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"Cannot track buffer in closed DeviceArena"
+                            (arena/track! a b))))))
+
+(defspec prop-track-closed-arena-throws
+  30
+  (prop/for-all [id gen/nat]
+                (let [a (arena/create-arena {})
+                      b (mock-buffer id)]
+                  (arena/close! a)
+                  (try
+                    (arena/track! a b)
+                    false
+                    (catch clojure.lang.ExceptionInfo _
+                      true)))))

@@ -4,7 +4,7 @@
             [einsum.logic.expand :as expand]
             [einsum.logic.generators :as lg]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]))
@@ -124,4 +124,53 @@
                 (let [norm (expand/normalize-id [name-kw idx])]
                   (and (keyword? norm)
                        (= norm (keyword (str (str/replace (name name-kw) "-" "_") "_" idx)))))))
+
+(deftest test-layer-block-bare-cross-layer-recurrence
+  (testing "Bare cross-layer recurrence keywords like :h0, :h1 are preserved inside later layers"
+    (let [ast [:block {:name [:test_layer 3]}
+               [:= [:h# :b :p :d] [:h :b :p :d] [:h0 :b :p :d] [:h1 :b :p :d]]]
+          expanded (expand/expand-ast {} ast)]
+      (is (= 2 (count expanded)))
+      (let [eq2 (second expanded)]
+        (is (= [:h4 :b :p :d] (ast/head eq2)))
+        ;; Body terms should contain :h0 and :h1, NOT :h0_3 or :h1_3
+        (let [all-body-names (set (mapcat (fn [t] [(first t)]) (mapcat ast/body-terms expanded)))]
+          (is (contains? all-body-names :h0))
+          (is (contains? all-body-names :h1))
+          (is (not (contains? all-body-names :h0_3)))
+          (is (not (contains? all-body-names :h1_3))))))))
+
+(deftest test-block-dims-escape-hatch
+  (testing "Block-level :dims attribute protects custom dimensions from being layer-suffixed"
+    (let [ast [:block {:name [:test_layer 0] :dims [:dh :custom_dim]}
+               [:= [:y :b :p :dh] [:x :b :p :custom_dim] [:w :custom_dim :dh]]]
+          expanded (expand/expand-ast {} ast)]
+      (is (= 1 (count expanded)))
+      (let [eq (first expanded)]
+        (is (= [:b :p :dh] (vec (rest (ast/head eq)))))
+        (is (= [:b :p :custom_dim] (vec (rest (first (ast/body-terms eq))))))
+        (is (= [:custom_dim :dh] (vec (rest (second (ast/body-terms eq))))))))))
+
+(deftest test-composite-id-attr-map-normalization
+  (testing "Composite identifiers inside equation attribute maps are properly normalized"
+    (let [ast [:= [:y :b :p :d] {:index [:indices 3] :weight [:w 0]} [:x :b :p :d]]
+          expanded (expand/expand-ast {} ast)]
+      (is (= 1 (count expanded)))
+      (let [eq (first expanded)
+            attrs (ast/attrs eq)]
+        (is (= :indices_3 (:index attrs)))
+        (is (= :w_0 (:weight attrs)))))))
+
+(defspec prop-nested-layer-block-double-expansion-idempotence
+  30
+  (prop/for-all [layers (gen/choose 1 4)]
+                (let [ast (into [:block {:name :model}]
+                                (mapv (fn [i]
+                                        [:block {:name [:layer i]}
+                                         [:= [:wire :b :p :d] [:h :b :p :d] [[:w i] :d :d]]
+                                         [:= [:h# :b :p :d] [:wire :b :p :d]]])
+                                      (range layers)))
+                      exp1 (expand/expand-ast {} ast)
+                      exp2 (expand/expand-ast {} exp1)]
+                  (= exp1 exp2))))
 

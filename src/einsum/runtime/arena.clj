@@ -85,11 +85,14 @@
 
 (defn track!
   "Registers `buffer` (or collection of buffers) in `arena` (or `*active-arena*`).
-   Returns `buffer`."
+   Throws ExceptionInfo if `arena` is closed. Returns `buffer`."
   ([buffer]
    (track! *active-arena* buffer))
   ([^DeviceArena arena buffer]
-   (when (and arena (not (closed? arena)))
+   (when arena
+     (when (closed? arena)
+       (throw (ex-info "Cannot track buffer in closed DeviceArena"
+                       {:arena arena :buffer buffer})))
      (let [^java.util.Set set-ref (:buffers-set arena)]
        (if (sequential? buffer)
          (doseq [b buffer] (when b (.add set-ref b)))

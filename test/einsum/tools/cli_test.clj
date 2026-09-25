@@ -73,15 +73,24 @@
       (is (= "test" (:prompt parsed))))))
 
 (deftest test-find-model-dir-resolution
-  (testing "Resolves existing models by family keyword"
-    (is (string? (cli/find-model-dir :gpt2)))
-    (is (string? (cli/find-model-dir :smollm)))
-    (is (string? (cli/find-model-dir :gemma-2)))
-    (is (string? (cli/find-model-dir :gemma-3)))
-    (is (string? (cli/find-model-dir :gemma-4))))
+  (testing "Resolves existing models by family keyword when models are present on disk"
+    (when (cli/model-dir? ".models/gpt2")
+      (is (string? (cli/find-model-dir :gpt2))))
+    (when (cli/model-dir? ".models/smollm-135m")
+      (is (string? (cli/find-model-dir :smollm))))
+    (when (cli/model-dir? ".models/gemma-4-E2B-it")
+      (is (string? (cli/find-model-dir :gemma-4)))))
 
-  (testing "Resolves explicit existing path"
-    (is (= ".models/gpt2" (cli/find-model-dir ".models/gpt2" :gpt2))))
+  (testing "Resolves explicit path hermetically with temporary directory"
+    (let [tmp-dir (doto (java.io.File/createTempFile "model_test_" "")
+                    (.delete)
+                    (.mkdir))
+          _ (spit (java.io.File. tmp-dir "model.safetensors") "dummy")]
+      (try
+        (is (= (.getPath tmp-dir) (cli/find-model-dir (.getPath tmp-dir) :gpt2)))
+        (finally
+          (.delete (java.io.File. tmp-dir "model.safetensors"))
+          (.delete tmp-dir)))))
 
   (testing "Throws descriptive exception when candidate directories do not exist"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo

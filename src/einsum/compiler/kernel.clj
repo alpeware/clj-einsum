@@ -62,7 +62,9 @@
       buf)))
 
 (defn run-kernel
-  "Executes `kernel` with `inputs` (either a keyword-indexed map or ordered vector)."
+  "Executes `kernel` with `inputs` (either a keyword-indexed map or ordered vector).
+   - Map-style `(kernel {:x input})`: Automatically resolves remaining parameters from `:weights` Store.
+   - Positional vector `(kernel [x w1 w2 ...])`: High-throughput, zero-overhead manual assembly fast-path."
   [kernel inputs call-style]
   (let [{:keys [exec in-spec in-keys out-spec ctx opts]} kernel
         exec-handle (or (:handle exec) exec)
@@ -109,7 +111,9 @@
 
 (defn compile-kernel
   "Compiles a Tensor Logic Hiccup AST into an invokable, callable CompiledKernel.
-   Supports automatic invar inference when :weights is passed in `opts`."
+   - When `:weights` is passed in `opts`, automatically infers missing input signatures via `weights/infer-invars`
+     and enables seamless map-style execution `(kernel {:x data})`.
+   - When explicit `:in` vector is provided without `:weights`, returns a positional kernel function."
   ([name-str ast opts]
    (let [ctx (if-let [f (resolve 'einsum.core/get-context)]
                (f)

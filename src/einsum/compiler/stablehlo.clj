@@ -456,9 +456,11 @@
       (let [[op-var _idx-var] invars
             op-type (get var-types op-var "tensor<1x1x12288x256xf32>")
             out-type (get var-types out-var op-type)
-            slice-sizes (get attrs :slice_sizes [1 1 12288 256])
+            slice-sizes (let [ss (get attrs :slice_sizes [1 1 12288 256])]
+                          (if (coll? ss) (vec ss) [ss]))
             sizes-attr (str "array<i64: " (str/join ", " slice-sizes) ">")
-            starts (get attrs :start_indices [0 0 0 0])
+            starts (let [s (get attrs :start_indices [0 0 0 0])]
+                     (if (coll? s) (vec s) [s]))
             [in-dims _in-dtype] (or (parse-tensor-dims op-type) [[1 1 12288 256] "f32"])
             rank (count in-dims)
             prep-info (mapv (fn [i idx]

@@ -1,6 +1,7 @@
 (ns einsum.logic.dce
   "Backward-chaining dead-code elimination and implicit accumulation grouping for Tensor Logic."
-  (:require [einsum.logic.ast :as ast]))
+  (:require [clojure.string :as str]
+            [einsum.logic.ast :as ast]))
 
 (defn eqn-head-names [eqn]
   (let [h (ast/head eqn)]
@@ -13,8 +14,14 @@
       (let [h (second eqn)]
         [(if (vector? h) (first h) h)])
 
+      (and (vector? h) (seq h) (every? vector? h))
+      (mapv (fn [elem] (if (vector? (first elem)) (first (first elem)) (first elem))) h)
+
       (and (vector? h) (vector? (first h)))
-      (mapv first h)
+      [(let [f (first h)]
+         (if (and (= (name (first f)) "h") (number? (second f)))
+           (keyword (str "h" (second f)))
+           (keyword (str (str/replace (name (first f)) #"-" "_") "_" (str/join "_" (map (fn [a] (if (keyword? a) (name a) (str a))) (rest f)))))))]
 
       (vector? h)
       [(first h)]
@@ -42,7 +49,10 @@
     (let [body-names (set (map first (ast/body-terms eqn)))
           attrs (ast/attrs eqn)
           start-idx-names (when-let [starts (or (:start_indices attrs) (:start-indices attrs))]
-                            (set (filter keyword? starts)))
+                            (cond
+                              (coll? starts) (set (filter keyword? starts))
+                              (keyword? starts) #{starts}
+                              :else nil))
           pos-name (when-let [p (:pos attrs)] (when (keyword? p) #{p}))]
       (cond-> body-names
         (seq start-idx-names) (into start-idx-names)
