@@ -30,6 +30,8 @@
   {:system "You are a helpful coding assistant with access to Clojure tools."
    :prompt "Inspect src/ and calculate total Clojure lines"
    :max-turns 8
+   :max-consecutive-errors 3
+   :sandbox :agent
    :max-new-tokens 256
    :temperature 0.70
    :top-k 40
@@ -167,6 +169,9 @@
              (= arg "--max-turns")
              (recur (subvec remaining 2) (assoc opts :max-turns (Long/parseLong val)))
 
+             (= arg "--max-consecutive-errors")
+             (recur (subvec remaining 2) (assoc opts :max-consecutive-errors (Long/parseLong val)))
+
              (or (= arg "--group-size") (= arg "-g"))
              (recur (subvec remaining 2) (assoc opts :group-size (Long/parseLong val)))
 
@@ -190,6 +195,9 @@
 
              (= arg "--mode")
              (recur (subvec remaining 2) (assoc opts :mode (keyword (str/replace val #"^:+" ""))))
+
+             (= arg "--sandbox")
+             (recur (subvec remaining 2) (assoc opts :sandbox (keyword (str/replace val #"^:+" ""))))
 
              ;; Boolean valued flags
              (= arg "--compare")

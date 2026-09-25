@@ -36,6 +36,22 @@
       (is (= "eval_clojure" (:name tc)))
       (is (= "(range 10)" (:code tc)))))
 
+  (testing "Extracting tool call with multiple fields does not swallow subsequent fields (Flag 2 fix)"
+    (let [text "<|tool_call>call:eval_clojure{code: \"(+ 1 2)\", note: \"(paren in note)\"}<tool_call|>"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(+ 1 2)" (:code tc))))
+    (let [text "<|tool_call>call:eval_clojure{code: (+ 1 2), note: \"(paren in note)\"}<tool_call|>"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(+ 1 2)" (:code tc)))))
+
+  (testing "Extracting tool call with parentheses in string literal"
+    (let [text "<|tool_call>call:eval_clojure{code:<|\"|>(println \"hello (world)\")<|\"|>}<tool_call|>"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(println \"hello (world)\")" (:code tc)))))
+
   (testing "Extracting tool call with bare s-expression"
     (let [text "<|tool_call>call:eval_clojure{(println \"hello\")}<tool_call|>"
           tc (agent/extract-tool-call text)]
@@ -250,4 +266,97 @@
   50
   (prop/for-all [text (gen/not-empty gen/string-alphanumeric)]
                 (nil? (agent/extract-tool-call text))))
+
+(deftest test-extract-balanced-sexpr-reader
+  (testing "Balanced reader handles strings with parentheses without premature termination (Flag 1)"
+    (is (= "(println \"hello (world)\")"
+           (agent/extract-balanced-sexpr "(println \"hello (world)\")")))
+    (is (= "(println \"hello ) world\")"
+           (agent/extract-balanced-sexpr "(println \"hello ) world\")")))
+    (is (= "(println (str \")\"))"
+           (agent/extract-balanced-sexpr "(println (str \")\"))"))))
+  (testing "Balanced reader handles comments with parentheses"
+    (is (= "(range 10)"
+           (agent/extract-balanced-sexpr "(range 10) ; (comment with parens)"))))
+  (testing "Balanced reader extracts first valid s-expression from surrounding text"
+    (is (= "(map inc [1 2 3])"
+           (agent/extract-balanced-sexpr "Here is the code: (map inc [1 2 3]) and some final note."))))
+  (testing "Returns nil when no balanced s-expression exists"
+    (is (nil? (agent/extract-balanced-sexpr "just plain text without parens")))))
+
+(deftest test-benchmark-sci-ctx-isolation
+  (let [bench-ctx (agent/create-benchmark-sci-ctx)]
+    (testing "Math and pure Clojure logic execute properly in benchmark sandbox"
+      (let [res (agent/eval-tool-code bench-ctx "(reduce + [1 2 3 4 5])")]
+        (is (= :success (:status res)))
+        (is (str/includes? (:output res) "15")))
+      (let [res (agent/eval-tool-code bench-ctx "(Math/sqrt 16)")]
+        (is (= :success (:status res)))
+        (is (str/includes? (:output res) "4.0"))))
+
+    (testing "File I/O is strictly forbidden in benchmark sandbox (Flag 5)"
+      (let [res (agent/eval-tool-code bench-ctx "(slurp \"/etc/passwd\")")]
+        (is (= :error (:status res)))
+        (is (str/includes? (:output res) "Could not resolve symbol: slurp")))
+      (let [res (agent/eval-tool-code bench-ctx "(spit \"test.txt\" \"data\")")]
+        (is (= :error (:status res)))
+        (is (str/includes? (:output res) "Could not resolve symbol: spit")))
+      (let [res (agent/eval-tool-code bench-ctx "(list-files \".\")")]
+        (is (= :error (:status res)))
+        (is (str/includes? (:output res) "Could not resolve symbol: list-files"))))
+
+    (testing "System inspection is strictly forbidden in benchmark sandbox (Flag 5)"
+      (let [res (agent/eval-tool-code bench-ctx "(system-info)")]
+        (is (= :error (:status res)))
+        (is (str/includes? (:output res) "Could not resolve symbol: system-info")))
+      (let [res (agent/eval-tool-code bench-ctx "(System/getProperty \"os.name\")")]
+        (is (= :error (:status res)))
+        (is (str/includes? (:output res) "Could not resolve symbol: System/getProperty"))))))
+
+(deftest test-agent-sci-ctx-system-info
+  (testing "Agent sandbox provides system inspection"
+    (let [agent-ctx (agent/create-agent-sci-ctx)
+          res (agent/eval-tool-code agent-ctx "(system-info)")]
+      (is (= :success (:status res)))
+      (is (str/includes? (:output res) ":os")))))
+
+(defspec prop-reader-balanced-sexpr-strings-with-parens
+  30
+  (prop/for-all [inner (gen/not-empty gen/string-alphanumeric)]
+                (let [code (format "(println \"hello (%s)\")" inner)
+                      extracted (agent/extract-balanced-sexpr code)]
+                  (= code extracted))))
+
+(deftest test-print-and-save-telemetry
+  (testing "Telemetry aggregates prompt and new tokens and writes profile EDN"
+    (let [tmp (java.io.File/createTempFile "telemetry_test" ".edn")
+          tmp-path (.getAbsolutePath tmp)]
+      (try
+        (let [telemetry (atom [{:turn 1 :prompt-tokens 50 :new-tokens 20 :tok-per-sec 40.0 :model-ms 500.0 :tool-ms 10.0 :total-turn-ms 510.0}
+                               {:turn 2 :prompt-tokens 75 :new-tokens 30 :tok-per-sec 37.5 :model-ms 800.0 :tool-ms 0.0 :total-turn-ms 800.0}])
+              start-t (System/nanoTime)]
+          (agent/print-and-save-telemetry! telemetry start-t true tmp-path)
+          (let [saved (read-string (slurp tmp-path))]
+            (is (= 2 (:total-turns saved)))
+            (is (= 125 (:total-prompt-tokens saved)))
+            (is (= 50 (:total-new-tokens saved)))
+            (is (= 1300.0 (:total-model-ms saved)))
+            (is (= 10.0 (:total-tool-ms saved)))
+            (is (pos? (:avg-tok-per-sec saved)))))
+        (finally
+          (.delete tmp))))))
+
+(deftest test-error-budget-warning-directive
+  (testing "Reaching consecutive error limit appends directive to tool response"
+    (let [limit 3
+          eval-res {:status :error :output "Execution Exception: Divide by zero"}
+          base-obs (agent/format-tool-response "eval_clojure" eval-res)
+          obs-with-directive (str base-obs
+                                  (format "\n[System: Consecutive tool error limit (%d) reached. Tool execution is now disabled. Provide your final answer in plain text based on the observations collected so far without calling further tools.]"
+                                          limit))]
+      (is (str/includes? obs-with-directive "Consecutive tool error limit (3) reached"))
+      (is (str/includes? obs-with-directive "Tool execution is now disabled")))))
+
+
+
 

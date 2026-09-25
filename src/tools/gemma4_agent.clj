@@ -22,6 +22,8 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
    :max-new-tokens 512
    :max-seq-len 1024
    :max-turns 5
+   :max-consecutive-errors 3
+   :sandbox :agent
    :temperature 0.0
    :top-k 10
    :repetition-penalty 1.15
@@ -34,21 +36,36 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
    :chrome-trace-out "scratch/gemma4_agent_chrome_trace.json"
    :quiet false})
 
+(def ^:private default-reader-ctx (sci/init {}))
+
+(defn- try-parse-sci-reader
+  "Attempts to parse the first form from string `s` using SCI's reader.
+   If parsing fails due to EOF (e.g. truncated closing parens), tries appending closing parens."
+  [s]
+  (try
+    (second (sci/parse-next+string default-reader-ctx (sci/source-reader s)))
+    (catch Throwable _
+      (loop [depth 1]
+        (when (<= depth 8)
+          (if-let [res (try
+                         (second (sci/parse-next+string default-reader-ctx
+                                                        (sci/source-reader (str s (apply str (repeat depth ")"))))))
+                         (catch Throwable _ nil))]
+            res
+            (recur (inc depth))))))))
+
 (defn extract-balanced-sexpr
-  "Finds the first balanced s-expression string starting with `(` in text."
+  "Finds the first balanced s-expression string starting with `(` in text using SCI's reader.
+   Correctly handles strings with parentheses and comments without naive paren counting."
   [text]
-  (let [start (.indexOf ^String text "(")]
-    (when (>= start 0)
-      (loop [i start depth 0]
-        (if (>= i (count text))
-          (when (pos? depth) (str (subs text start) (apply str (repeat depth ")"))))
-          (let [ch (.charAt ^String text i)]
-            (cond
-              (= ch \() (recur (inc i) (inc depth))
-              (= ch \)) (if (= depth 1)
-                          (subs text start (inc i))
-                          (recur (inc i) (dec depth)))
-              :else (recur (inc i) depth))))))))
+  (when (string? text)
+    (loop [offset 0]
+      (let [start (.indexOf ^String text "(" offset)]
+        (when (>= start 0)
+          (let [candidate (subs text start)]
+            (if-let [parsed (try-parse-sci-reader candidate)]
+              parsed
+              (recur (inc start)))))))))
 
 (defn extract-thinking-trace
   "Extracts reasoning thoughts from model output text.
@@ -79,8 +96,20 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
       (str/trim (reduce (fn [acc pat] (str/replace acc pat "")) text patterns)))
     text))
 
+(defn- unescape-json-string
+  "Unescapes standard JSON string escape sequences."
+  [s]
+  (if (string? s)
+    (-> s
+        (str/replace #"\\\"" "\"")
+        (str/replace #"\\n" "\n")
+        (str/replace #"\\t" "\t")
+        (str/replace #"\\\\" "\\"))
+    s))
+
 (defn parse-tool-call-code
-  "Extracts the Clojure code string from a Gemma 4 tool call argument block."
+  "Extracts the Clojure code string from a Gemma 4 tool call argument block.
+   Employs reader-based balanced extraction to prevent greedy swallowing of subsequent fields."
   [args-str]
   (let [trimmed (str/trim (or args-str ""))
         unbraced (-> trimmed
@@ -89,28 +118,26 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                      str/trim)]
     (cond
       ;; 1. Gemma 4 native string delimiter: code:<|"|>...<|"|>
-      (re-find #"(?s)code\s*:\s*<\|\"\|>(.*?)<\|\"\|>" unbraced)
-      (second (re-find #"(?s)code\s*:\s*<\|\"\|>(.*?)<\|\"\|>" unbraced))
+      (re-find #"(?s)code\s*:\s*<\|\"\|>(.*?)(?:<\|\"\|>|$)" unbraced)
+      (second (re-find #"(?s)code\s*:\s*<\|\"\|>(.*?)(?:<\|\"\|>|$)" unbraced))
 
-      ;; 2. Standard JSON quotes: code:"..."
-      (re-find #"(?s)code\s*:\s*\"(.*?)\"(?:\s*\}|$)" unbraced)
-      (second (re-find #"(?s)code\s*:\s*\"(.*?)\"(?:\s*\}|$)" unbraced))
+      ;; 2. Standard JSON quotes with escaped string support: code:"..."
+      (re-find #"(?s)code\s*:\s*\"([^\"\\]*(?:\\.[^\"\\]*)*)\"" unbraced)
+      (unescape-json-string (second (re-find #"(?s)code\s*:\s*\"([^\"\\]*(?:\\.[^\"\\]*)*)\"" unbraced)))
 
       ;; 3. Single quotes: code:'...'
-      (re-find #"(?s)code\s*:\s*\'(.*?)\'(?:\s*\}|$)" unbraced)
-      (second (re-find #"(?s)code\s*:\s*\'(.*?)\'(?:\s*\}|$)" unbraced))
+      (re-find #"(?s)code\s*:\s*\'([^\']*)\'" unbraced)
+      (second (re-find #"(?s)code\s*:\s*\'([^\']*)\'" unbraced))
 
-      ;; 4. code: bare s-expression: code:(+ 1 2)
-      (re-find #"(?s)code\s*:\s*(\(.*\))" unbraced)
-      (second (re-find #"(?s)code\s*:\s*(\(.*\))" unbraced))
+      ;; 4. code: followed by an s-expression
+      (re-find #"(?s)code\s*:\s*\(" unbraced)
+      (let [code-idx (.indexOf ^String unbraced "code:")
+            after-code (subs unbraced (+ code-idx 5))]
+        (extract-balanced-sexpr after-code))
 
-      ;; 5. Any bare s-expression within the tool call argument block
-      (re-find #"(?s)(\(.*\))" unbraced)
-      (second (re-find #"(?s)(\(.*\))" unbraced))
-
-      ;; 6. If unbraced is a valid s-expression starting with '(' and ending with ')'
-      (and (str/starts-with? unbraced "(") (str/ends-with? unbraced ")"))
-      unbraced
+      ;; 5. Any bare s-expression within the tool call argument block (Reader-based balanced extractor)
+      (extract-balanced-sexpr unbraced)
+      (extract-balanced-sexpr unbraced)
 
       :else nil)))
 
@@ -178,11 +205,24 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
       stripped-blocks
       (extract-raw text false))))
 
-(defn create-agent-sci-ctx
-  "Creates a safe SCI sandbox context populated with useful Clojure agent helper functions."
+(defn create-benchmark-sci-ctx
+  "Creates a hermetic, deterministic SCI sandbox context for benchmarking and grading.
+   Strictly isolated: math and core pure Clojure logic only.
+   No file I/O (slurp, spit, list-files), no system inspection (system-info, System/), and no reflection."
   []
   (sci/init
-   {:bindings {'println println
+   {:classes {'Math Math}
+    :bindings {'println println
+               'print print
+               'prn prn
+               'str str}}))
+
+(defn create-agent-sci-ctx
+  "Creates a safe SCI sandbox context for the general coding agent, populated with safe file and system introspection helpers."
+  []
+  (sci/init
+   {:classes {'Math Math}
+    :bindings {'println println
                'print print
                'prn prn
                'str str
@@ -223,7 +263,12 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 (defn parse-agent-cli-args
   "Parses CLI flags for gemma4_agent."
   [args]
-  (cli/parse-cli-args args DEFAULT_AGENT_OPTS))
+  (let [opts (cli/parse-cli-args args DEFAULT_AGENT_OPTS)]
+    (cond-> opts
+      (string? (:max-consecutive-errors opts))
+      (update :max-consecutive-errors #(Long/parseLong %))
+      (string? (:sandbox opts))
+      (update :sandbox #(keyword (str/replace % #"^:+" ""))))))
 
 (defn format-agent-chat-prompt
   "Formats conversation history into Gemma 4 Turn syntax, placing tool declarations and system instructions in native Gemma 4 turns.
@@ -335,122 +380,194 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                         "<|turn>model\n")]
      (str "<bos>" system-turn turns-str model-prefix))))
 
+(defn print-and-save-telemetry!
+  "Prints multi-turn telemetry report including prompt/new token counts, decode speeds, and latencies,
+   and writes summary EDN to `profile-out` if specified."
+  [turn-telemetry loop-start-t quiet? profile-out]
+  (let [telemetry-vec @turn-telemetry
+        total-loop-ms (/ (- (System/nanoTime) loop-start-t) 1e6)
+        total-model-ms (reduce + 0.0 (map :model-ms telemetry-vec))
+        total-tool-ms (reduce + 0.0 (map :tool-ms telemetry-vec))
+        total-prompt-tokens (reduce + 0 (map :prompt-tokens telemetry-vec))
+        total-new-tokens (reduce + 0 (map :new-tokens telemetry-vec))
+        avg-tok-per-sec (if (pos? total-model-ms)
+                          (/ (* total-new-tokens 1000.0) total-model-ms)
+                          0.0)]
+    (when-not quiet?
+      (println "\n==================================================")
+      (println "=== Gemma 4 Agent Multi-Turn Telemetry Report ===")
+      (println "==================================================")
+      (doseq [{:keys [turn prompt-tokens new-tokens tok-per-sec model-ms tool-ms total-turn-ms]} telemetry-vec]
+        (println (format "  Turn %d: Prompt=%4d tok | Gen=%4d tok (%5.1f tok/s) | Model=%8.2f ms | Tool=%8.2f ms | Turn Total=%8.2f ms"
+                         turn (or prompt-tokens 0) (or new-tokens 0) (or tok-per-sec 0.0)
+                         (or model-ms 0.0) (or tool-ms 0.0) (or total-turn-ms 0.0))))
+      (println "--------------------------------------------------")
+      (println (format "  Total Turns           : %d" (count telemetry-vec)))
+      (println (format "  Total Prompt Tokens   : %d tok" total-prompt-tokens))
+      (println (format "  Total Generated Tokens: %d tok" total-new-tokens))
+      (println (format "  Average Decode Speed  : %5.1f tok/s" avg-tok-per-sec))
+      (println (format "  Total Model Inference : %8.2f ms" total-model-ms))
+      (println (format "  Total Tool Execution  : %8.2f ms" total-tool-ms))
+      (println (format "  Total Agent Session   : %8.2f ms" total-loop-ms))
+      (println "=================================================="))
+    (when (seq profile-out)
+      (spit profile-out (pr-str {:turns telemetry-vec
+                                 :total-turns (count telemetry-vec)
+                                 :total-prompt-tokens total-prompt-tokens
+                                 :total-new-tokens total-new-tokens
+                                 :avg-tok-per-sec avg-tok-per-sec
+                                 :total-model-ms total-model-ms
+                                 :total-tool-ms total-tool-ms
+                                 :total-session-ms total-loop-ms})))))
+
 (defn run-agent-loop
   "Runs autonomous agent loop with SCI Clojure tool calling across multiple turns."
-  [session initial-prompt]
-  (let [{:keys [opts]} session
-        {:keys [system max-turns out quiet profile-out thinking tool-declaration]} opts
-        thinking? (boolean thinking)
-        tool-decl (or tool-declaration DEFAULT_TOOL_DECLARATION)
-        sci-ctx (create-agent-sci-ctx)
-        history (atom [{:role :user :content initial-prompt}])
-        transcript (atom [])
-        turn-telemetry (atom [])
-        loop-start-t (System/nanoTime)]
-    (loop [turn 1]
-      (if (> turn max-turns)
-        (do
-          (when-not quiet (println (format "\n[Agent] Reached max-turns limit (%d)." max-turns)))
-          (when (seq out)
-            (spit out (str/join "\n\n" (map :content @transcript)))
-            (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
-          @transcript)
-        (do
-          (when-not quiet (println "\n=================================================="))
-          (when-not quiet (println (format "=== Agent Turn %d/%d ===" turn max-turns)))
-          (when-not quiet (println "=================================================="))
-          (let [formatted-prompt (format-agent-chat-prompt system @history 8 thinking? tool-decl)
-                _ (when-not quiet (println "Executing Gemma 4 Agent Forward Pass..."))
-                t-gen-0 (System/nanoTime)
-                new-gen (gemma4-inf/generate-new-text-string session formatted-prompt)
-                t-gen-1 (System/nanoTime)
-                gen-ms (/ (- t-gen-1 t-gen-0) 1e6)
-                model-reply (str/trim (str/replace (or new-gen "") #"<bos>|<eos>|<turn\|>|<\|turn>" ""))
-                thinking-trace (extract-thinking-trace model-reply)
-                final-response (strip-thinking-trace model-reply)
-                tool-call (extract-tool-call model-reply)]
+  ([session initial-prompt]
+   (run-agent-loop session initial-prompt nil))
+  ([session initial-prompt custom-sci-ctx]
+   (let [{:keys [opts]} session
+         {:keys [system max-turns out quiet profile-out thinking tool-declaration max-consecutive-errors sandbox]} opts
+         thinking? (boolean thinking)
+         tool-decl (or tool-declaration DEFAULT_TOOL_DECLARATION)
+         sci-ctx (or custom-sci-ctx
+                     (case sandbox
+                       :benchmark (create-benchmark-sci-ctx)
+                       (create-agent-sci-ctx)))
+         consecutive-error-limit (long (or max-consecutive-errors 3))
+         history (atom [{:role :user :content initial-prompt}])
+         transcript (atom [])
+         turn-telemetry (atom [])
+         loop-start-t (System/nanoTime)]
+     (loop [turn 1
+            consecutive-errors 0]
+       (if (> turn max-turns)
+         (do
+           (when-not quiet (println (format "\n[Agent] Reached max-turns limit (%d)." max-turns)))
+           (print-and-save-telemetry! turn-telemetry loop-start-t quiet profile-out)
+           (when (seq out)
+             (spit out (str/join "\n\n" (map :content @transcript)))
+             (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
+           @transcript)
+         (do
+           (when-not quiet (println "\n=================================================="))
+           (when-not quiet (println (format "=== Agent Turn %d/%d ===" turn max-turns)))
+           (when-not quiet (println "=================================================="))
+           (let [formatted-prompt (format-agent-chat-prompt system @history 8 thinking? tool-decl)
+                 _ (when-not quiet (println "Executing Gemma 4 Agent Forward Pass..."))
+                 t-gen-0 (System/nanoTime)
+                 gen-res (gemma4-inf/generate-new-tokens-and-text session formatted-prompt)
+                 t-gen-1 (System/nanoTime)
+                 gen-ms (/ (- t-gen-1 t-gen-0) 1e6)
+                 new-gen (:text gen-res)
+                 prompt-tokens (long (or (:prompt-tokens gen-res) 0))
+                 new-tokens (long (or (:new-tokens gen-res) 0))
+                 tok-per-sec (if (pos? gen-ms) (/ (* new-tokens 1000.0) gen-ms) 0.0)
+                 model-reply (str/trim (str/replace (or new-gen "") #"<bos>|<eos>|<turn\|>|<\|turn>" ""))
+                 thinking-trace (extract-thinking-trace model-reply)
+                 final-response (strip-thinking-trace model-reply)
+                 tool-call (extract-tool-call model-reply)]
 
-            (when (and thinking? (seq thinking-trace) (not quiet))
-              (println "\n--------------------------------------------------")
-              (println "[Agent Thought Process]:")
-              (println thinking-trace)
-              (println "--------------------------------------------------"))
+             (when (and thinking? (seq thinking-trace) (not quiet))
+               (println "\n--------------------------------------------------")
+               (println "[Agent Thought Process]:")
+               (println thinking-trace)
+               (println "--------------------------------------------------"))
 
-            (let [history-content (if tool-call
-                                    (:raw tool-call)
-                                    (if (seq final-response) final-response model-reply))]
-              (swap! history conj {:role :model :content history-content}))
+             (let [history-content (if tool-call
+                                     (:raw tool-call)
+                                     (if (seq final-response) final-response model-reply))]
+               (swap! history conj {:role :model :content history-content}))
 
-            (swap! transcript conj {:turn turn
-                                    :role :model
-                                    :content (if (seq thinking-trace)
-                                               (str "[Thought Process]\n" thinking-trace "\n\n[Model Response]\n" final-response)
-                                               model-reply)
-                                    :thought thinking-trace})
+             (swap! transcript conj {:turn turn
+                                     :role :model
+                                     :content (if (seq thinking-trace)
+                                                (str "[Thought Process]\n" thinking-trace "\n\n[Model Response]\n" final-response)
+                                                model-reply)
+                                     :thought thinking-trace})
 
-            (if-not tool-call
-              (do
-                (swap! turn-telemetry conj {:turn turn :model-ms gen-ms :tool-ms 0.0 :total-turn-ms gen-ms})
-                (when-not quiet
-                  (when (seq final-response)
-                    (println "\n[Agent Response]:")
-                    (println final-response))
-                  (println "\n[Agent] No further tool calls requested. Task completed!"))
-                (let [total-loop-ms (/ (- (System/nanoTime) loop-start-t) 1e6)
-                      total-model-ms (reduce + (map :model-ms @turn-telemetry))
-                      total-tool-ms (reduce + (map :tool-ms @turn-telemetry))]
-                  (when-not quiet
-                    (println "\n==================================================")
-                    (println "=== Gemma 4 Agent Multi-Turn Telemetry Report ===")
-                    (println "==================================================")
-                    (doseq [{:keys [turn model-ms tool-ms total-turn-ms]} @turn-telemetry]
-                      (println (format "  Turn %d: Model=%8.2f ms | Tool=%8.2f ms | Turn Total=%8.2f ms"
-                                       turn model-ms tool-ms total-turn-ms)))
-                    (println "--------------------------------------------------")
-                    (println (format "  Total Turns           : %d" (count @turn-telemetry)))
-                    (println (format "  Total Model Inference : %8.2f ms" total-model-ms))
-                    (println (format "  Total Tool Execution  : %8.2f ms" total-tool-ms))
-                    (println (format "  Total Agent Session   : %8.2f ms" total-loop-ms))
-                    (println "=================================================="))
-                  (when (seq profile-out)
-                    (spit profile-out (pr-str {:turns @turn-telemetry
-                                               :total-turns (count @turn-telemetry)
-                                               :total-model-ms total-model-ms
-                                               :total-tool-ms total-tool-ms
-                                               :total-session-ms total-loop-ms}))))
-                (when (seq out)
-                  (spit out (str/join "\n\n" (map :content @transcript)))
-                  (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
-                @transcript)
+             (if-not tool-call
+               (do
+                 (swap! turn-telemetry conj {:turn turn
+                                             :prompt-tokens prompt-tokens
+                                             :new-tokens new-tokens
+                                             :tok-per-sec tok-per-sec
+                                             :model-ms gen-ms
+                                             :tool-ms 0.0
+                                             :total-turn-ms gen-ms})
+                 (when-not quiet
+                   (when (seq final-response)
+                     (println "\n[Agent Response]:")
+                     (println final-response))
+                   (println "\n[Agent] No further tool calls requested. Task completed!"))
+                 (print-and-save-telemetry! turn-telemetry loop-start-t quiet profile-out)
+                 (when (seq out)
+                   (spit out (str/join "\n\n" (map :content @transcript)))
+                   (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
+                 @transcript)
 
-              (let [tool-code (:code tool-call)
-                    tool-name (:name tool-call)
-                    _ (when-not quiet
-                        (println "\n--------------------------------------------------")
-                        (println (format "[Agent Tool Call (%s -> SCI Clojure)]:" tool-name))
-                        (println (or tool-code "<no code>"))
-                        (println "--------------------------------------------------"))
-                    t-tool-0 (System/nanoTime)
-                    eval-res (if (seq tool-code)
-                               (eval-tool-code sci-ctx tool-code)
-                               {:status :error :output "Error: No code provided to eval_clojure."})
-                    t-tool-1 (System/nanoTime)
-                    tool-ms (/ (- t-tool-1 t-tool-0) 1e6)
-                    turn-total-ms (+ gen-ms tool-ms)
-                    obs-str (format-tool-response tool-name eval-res)]
+               (if (>= consecutive-errors consecutive-error-limit)
+                 ;; Model attempted another tool call after error budget was exhausted
+                 (do
+                   (when-not quiet
+                     (println (format "\n[Agent] Consecutive tool error budget exhausted (%d/%d consecutive errors). Halting loop."
+                                      consecutive-errors consecutive-error-limit)))
+                   (swap! turn-telemetry conj {:turn turn
+                                               :prompt-tokens prompt-tokens
+                                               :new-tokens new-tokens
+                                               :tok-per-sec tok-per-sec
+                                               :model-ms gen-ms
+                                               :tool-ms 0.0
+                                               :total-turn-ms gen-ms})
+                   (print-and-save-telemetry! turn-telemetry loop-start-t quiet profile-out)
+                   (when (seq out)
+                     (spit out (str/join "\n\n" (map :content @transcript)))
+                     (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
+                   @transcript)
 
-                (swap! turn-telemetry conj {:turn turn :model-ms gen-ms :tool-ms tool-ms :total-turn-ms turn-total-ms})
-                (when-not quiet
-                  (println "\n[Tool Observation Output]:")
-                  (println (:output eval-res))
-                  (println (format "  ↳ [Turn %d Latency: Model=%.2f ms, Tool=%.2f ms, Total=%.2f ms]"
-                                   turn gen-ms tool-ms turn-total-ms)))
+                 (let [tool-code (:code tool-call)
+                       tool-name (:name tool-call)
+                       _ (when-not quiet
+                           (println "\n--------------------------------------------------")
+                           (println (format "[Agent Tool Call (%s -> SCI Clojure)]:" tool-name))
+                           (println (or tool-code "<no code>"))
+                           (println "--------------------------------------------------"))
+                       t-tool-0 (System/nanoTime)
+                       eval-res (if (seq tool-code)
+                                  (eval-tool-code sci-ctx tool-code)
+                                  {:status :error :output "Error: No code provided to eval_clojure."})
+                       t-tool-1 (System/nanoTime)
+                       tool-ms (/ (- t-tool-1 t-tool-0) 1e6)
+                       turn-total-ms (+ gen-ms tool-ms)
+                       new-consecutive-errors (if (= (:status eval-res) :error)
+                                                (inc consecutive-errors)
+                                                0)
+                       error-budget-reached? (and (= (:status eval-res) :error)
+                                                  (>= new-consecutive-errors consecutive-error-limit))
+                       base-obs (format-tool-response tool-name eval-res)
+                       obs-str (if error-budget-reached?
+                                 (str base-obs
+                                      (format "\n[System: Consecutive tool error limit (%d) reached. Tool execution is now disabled. Provide your final answer in plain text based on the observations collected so far without calling further tools.]"
+                                              consecutive-error-limit))
+                                 base-obs)]
 
-                (swap! history conj {:role :tool :content obs-str})
-                (swap! transcript conj {:turn turn :role :tool :content obs-str})
-                (when (seq out)
-                  (spit out (str/join "\n\n" (map :content @transcript))))
-                (recur (inc turn))))))))))
+                   (swap! turn-telemetry conj {:turn turn
+                                               :prompt-tokens prompt-tokens
+                                               :new-tokens new-tokens
+                                               :tok-per-sec tok-per-sec
+                                               :model-ms gen-ms
+                                               :tool-ms tool-ms
+                                               :total-turn-ms turn-total-ms})
+                   (when-not quiet
+                     (println "\n[Tool Observation Output]:")
+                     (println (:output eval-res))
+                     (println (format "  ↳ [Turn %d Latency: Model=%.2f ms (%d tok, %.1f tok/s), Tool=%.2f ms, Total=%.2f ms]"
+                                      turn gen-ms new-tokens tok-per-sec tool-ms turn-total-ms)))
+
+                   (swap! history conj {:role :tool :content obs-str})
+                   (swap! transcript conj {:turn turn :role :tool :content obs-str})
+                   (when (seq out)
+                     (spit out (str/join "\n\n" (map :content @transcript))))
+                   (recur (inc turn) new-consecutive-errors)))))))))))
 
 (defn -main
   "CLI Entrypoint for Gemma 4 Agent."

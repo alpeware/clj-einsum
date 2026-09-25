@@ -158,8 +158,12 @@
         final-context (generate-text session prompt)]
     (decode tokenizer final-context)))
 
-(defn generate-new-text-string
-  "Generates text response using Gemma 4 model session and returns ONLY newly generated text string without prompt prefix."
+(defn generate-new-tokens-and-text
+  "Generates text response using Gemma 4 model session and returns a map:
+   {:text <decoded-new-text>
+    :prompt-tokens <int>
+    :new-tokens <int>
+    :new-token-ids <vec>}."
   [session prompt]
   (let [{:keys [tokenizer]} session
         raw-ids (encode tokenizer prompt)
@@ -169,7 +173,15 @@
         prompt-len (count prompt-ids)
         final-context (generate-text session prompt)
         new-ids (subvec (vec final-context) prompt-len)]
-    (decode tokenizer new-ids)))
+    {:text (decode tokenizer new-ids)
+     :prompt-tokens prompt-len
+     :new-tokens (count new-ids)
+     :new-token-ids (vec new-ids)}))
+
+(defn generate-new-text-string
+  "Generates text response using Gemma 4 model session and returns ONLY newly generated text string without prompt prefix."
+  [session prompt]
+  (:text (generate-new-tokens-and-text session prompt)))
 
 ;; ==============================================================================
 ;; Backward-Compatible Re-Exports for Existing Callers
