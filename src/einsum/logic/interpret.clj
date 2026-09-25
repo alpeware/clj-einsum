@@ -773,6 +773,14 @@
 
 (def ^:dynamic *force-scalar?* false)
 (def ^:dynamic *parallel-enabled?* true)
+(def ^:dynamic *min-flops-per-chunk*
+  "Minimum M*N*K FLOPs per parallel chunk before the SIMD SGEMM fans out.
+   Chunk count = min(cores, flops / *min-flops-per-chunk*); fewer than 2 chunks
+   runs serial. Calibrated 2026-09-25 on a 2-vCPU box: below ~4M FLOPs the
+   invokeAll dispatch overhead (~0.1ms) dominates, so M=1 decode shapes
+   (0.6-2.4M FLOPs) run serial; every GPT-2 graph matmul (75M+ FLOPs) still
+   gets one chunk per core."
+  4000000)
 
 (def simd-available?
   "True if Panama Vector API (jdk.incubator.vector) is available at runtime."
@@ -785,6 +793,15 @@
 (def ^:private simd-sgemm-fn
   (when simd-available?
     (resolve 'einsum.logic.interpret-simd/simd-sgemm!)))
+
+(def ^:private simd-invoke-chunks-fn
+  "Cached handle to the persistent pool dispatcher in interpret-simd.
+   Lets batched ops fan out on the dedicated pool (one thread per core).
+   Measured faster than the common ForkJoinPool on the 2-core dev box
+   for the B=12 attention path (2026-09-25); mechanism not isolated,
+   so this is a measured choice, not a claim about pool internals."
+  (when simd-available?
+    (resolve 'einsum.logic.interpret-simd/invoke-chunks!)))
 
 (defn p-dotimes
   "Executes (f i) for i in 0..(n-1) in parallel using ForkJoinPool when n >= min-chunk.
@@ -865,12 +882,28 @@
         lf (as-floats (op-reshape lp [B M K]))
         rf (as-floats (op-reshape rp [B K N]))
         out (float-array (* B M N))]
-    (p-dotimes B 2
-               (fn [b]
-                 (let [coff (long (* b M N))
-                       aoff (long (* b M K))
-                       boff (long (* b K N))]
-                   (sgemm! out coff lf aoff rf boff M N K))))
+    ;; Anti-nesting: when the outer batch loop parallelizes, the inner sgemm!
+    ;; must stay serial (parallelize the outermost level only). The outer fans
+    ;; out on the dedicated pool when SIMD is available (it is sized to the
+    ;; core count; the common ForkJoinPool has only cores-1 workers).
+    (let [outer-parallel? (and *parallel-enabled?* (>= B 2))
+          batch! (fn [b]
+                   (let [coff (long (* b M N))
+                         aoff (long (* b M K))
+                         boff (long (* b K N))]
+                     (if outer-parallel?
+                       (binding [*parallel-enabled?* false]
+                         (sgemm! out coff lf aoff rf boff M N K))
+                       (sgemm! out coff lf aoff rf boff M N K))))]
+      (cond
+        (and outer-parallel? simd-invoke-chunks-fn)
+        (simd-invoke-chunks-fn (mapv (fn [b] (fn [] (batch! b))) (range B)))
+
+        outer-parallel?
+        (p-dotimes B 2 batch!)
+
+        :else
+        (dotimes [b B] (batch! b))))
     (let [out-shape (vec (concat batch-shape m-shape n-shape))
           out-dtype (:dtype lhs)]
       {:dtype out-dtype :shape out-shape :data (pack-floats out-dtype out)})))

@@ -397,4 +397,59 @@
         (binding [interp/*parallel-enabled?* false]
           (is (false? @simd-var)))))))
 
+;; ---------------------------------------------------------------------------
+;; P-chunk static partitioning tests
+;; ---------------------------------------------------------------------------
+
+(deftest test-parallel-sgemm-bit-exact
+  (testing "parallel and serial SIMD sgemm produce bit-identical results"
+    (when interp/simd-available?
+      (let [simd-fn (resolve 'einsum.logic.interpret-simd/simd-sgemm!)]
+        (doseq [[M N K] [[1 768 768] [1 3072 768] [1 768 3072]
+                         [8 512 256] [64 128 64] [3 100 70] [5 40 33]]]
+          (let [A (float-array (map #(float (/ (mod % 17) 10.0)) (range (* M K))))
+                B (float-array (map #(float (/ (mod % 19) 10.0)) (range (* K N))))
+                C-ser (float-array (* M N))
+                C-par (float-array (* M N))]
+            (binding [interp/*parallel-enabled?* false]
+              (simd-fn C-ser 0 A 0 B 0 M N K))
+            ;; Force the parallel path on every shape, however small
+            (binding [interp/*parallel-enabled?* true
+                      interp/*min-flops-per-chunk* 1]
+              (simd-fn C-par 0 A 0 B 0 M N K))
+            (is (= (vec C-ser) (vec C-par))
+                (str "parallel/serial mismatch at shape " [M N K]))))))))
+
+(deftest test-parallel-sgemm-threshold-disables
+  (testing "a huge *min-flops-per-chunk* forces the serial path even with parallelism enabled"
+    (when interp/simd-available?
+      (let [simd-fn (resolve 'einsum.logic.interpret-simd/simd-sgemm!)
+            M 1 N 768 K 768
+            A (float-array (map #(float (/ (mod % 17) 10.0)) (range (* M K))))
+            B (float-array (map #(float (/ (mod % 19) 10.0)) (range (* K N))))
+            C-par (float-array (* M N))
+            C-ser (float-array (* M N))]
+        (binding [interp/*parallel-enabled?* true
+                  interp/*min-flops-per-chunk* Long/MAX_VALUE]
+          (simd-fn C-par 0 A 0 B 0 M N K))
+        (binding [interp/*parallel-enabled?* false]
+          (simd-fn C-ser 0 A 0 B 0 M N K))
+        (is (= (vec C-ser) (vec C-par)))))))
+
+(deftest test-nested-parallel-batched-exact
+  (testing "batched dot_general under parallel binding is bit-exact vs fully serial (inner stays serial)"
+    (let [B 4 M 32 K 64 N 32
+          a-vals (mapv float (range (* B M K)))
+          b-vals (mapv float (range (* B K N)))
+          a (interp/tensor :f32 [B M K] a-vals)
+          b (interp/tensor :f32 [B K N] b-vals)
+          attrs {:contracting_dims {:lhs [2] :rhs [1]} :batch_dims {:lhs [0] :rhs [0]}}
+          res-ser (binding [interp/*parallel-enabled?* false]
+                    (interp/op-dot-general a b attrs))
+          ;; Force inner parallelism eligibility; outer must still suppress it
+          res-par (binding [interp/*parallel-enabled?* true
+                            interp/*min-flops-per-chunk* 1]
+                    (interp/op-dot-general a b attrs))]
+      (is (= (vec (:data res-ser)) (vec (:data res-par)))))))
+
 

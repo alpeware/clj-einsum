@@ -1,10 +1,15 @@
 (ns einsum.logic.interpret-simd
   "Panama Vector API (jdk.incubator.vector) accelerated SGEMM kernel for pure-JVM StableHLO.
-   Requires --add-modules=jdk.incubator.vector at JVM launch."
-  (:require [einsum.logic.interpret :refer [*parallel-enabled?*]])
+   Requires --add-modules=jdk.incubator.vector at JVM launch.
+
+   Parallel strategy: P-chunk static partitioning. One persistent daemon thread
+   pool (one thread per core); each sgemm! call is split into exactly
+   n = min(cores, M*N*K / *min-flops-per-chunk*) coarse chunks, dispatched with
+   a single invokeAll. Row bands when M >= n, column bands otherwise (decode)."
+  (:require [einsum.logic.interpret :refer [*parallel-enabled?*
+                                            *min-flops-per-chunk*]])
   (:import [java.util Arrays]
-           [java.util.function IntConsumer]
-           [java.util.stream IntStream]
+           [java.util.concurrent Executors ThreadFactory]
            [jdk.incubator.vector FloatVector VectorSpecies]))
 
 ;; ---------------------------------------------------------------------------
@@ -16,14 +21,40 @@
 (def ^:private simd-jb (* 4 simd-vl))
 (def ^:private simd-kb 128)
 
-(defn- p-for-range
-  "Runs (f i) for i in 0..(n-1) in parallel using ForkJoinPool when parallel? is true and n >= min-chunk."
-  [^long n ^long min-chunk f]
-  (if (or (not *parallel-enabled?*) (<= n 1) (< n min-chunk))
-    (dotimes [i n] (f i))
-    (.forEach (.parallel (IntStream/range 0 n))
-              (reify IntConsumer
-                (accept [_ i] (f (long i)))))))
+;; ---------------------------------------------------------------------------
+;; Persistent parallel dispatch
+;; ---------------------------------------------------------------------------
+
+(defonce ^:private sgemm-pool
+  (Executors/newFixedThreadPool
+   (int (max 1 (.availableProcessors (Runtime/getRuntime))))
+   (reify ThreadFactory
+     (^Thread newThread [_ ^Runnable r]
+       (doto (Thread. r "interp-sgemm-worker")
+         (.setDaemon true))))))
+
+(defn- n-chunks
+  "Number of parallel chunks for an MxK @ KxN multiply: min(cores, flops/min-per-chunk),
+   at least 1. Fewer than 2 chunks means run serial."
+  [^long M ^long N ^long K]
+  (let [p (long (.availableProcessors (Runtime/getRuntime)))
+        flops (* (long M) (long N) (long K))]
+    (if (or (not *parallel-enabled?*) (<= p 1))
+      1
+      (max 1 (min p (quot flops (long *min-flops-per-chunk*)))))))
+
+(defn invoke-chunks!
+  "Runs each thunk in `thunks` on the persistent pool, blocking until all complete.
+   Public so einsum.logic.interpret can route batched-matmul outer loops here."
+  [thunks]
+  (when (seq thunks)
+    (.invokeAll sgemm-pool
+                ^java.util.Collection
+                (mapv (fn [thunk]
+                        (reify java.util.concurrent.Callable
+                          (call [_] (thunk) nil)))
+                      thunks))
+    nil))
 
 ;; ---------------------------------------------------------------------------
 ;; SIMD Micro-Kernels
@@ -123,7 +154,9 @@
 
 (defn simd-sgemm!
   "Computes C = A @ B, OVERWRITING C. A is MxK, B is KxN, C is MxN, row-major.
-   Supports arbitrary buffer offsets and automatic parallelization across CPU cores."
+   Supports arbitrary buffer offsets. Parallelizes over a persistent daemon pool
+   into exactly n = min(cores, M*N*K / *min-flops-per-chunk*) coarse chunks:
+   row bands when M >= n, column bands otherwise. Runs serial when n < 2."
   ([^floats C ^floats A ^floats B M N K]
    (simd-sgemm! C 0 A 0 B 0 M N K))
   ([^floats C coff ^floats A aoff ^floats B boff M N K]
@@ -133,25 +166,24 @@
      ;; Clear destination region
      (Arrays/fill C (int coff) (int (+ coff total-elems)) (float 0))
 
-     (cond
-       ;; Strategy A: Parallelize across rows M when M >= 4 and total work is significant
-       (and (>= M 4) (>= (* M N K) 32768))
-       (let [chunk-size (long (max 1 (quot M (.availableProcessors (Runtime/getRuntime)))))]
-         (p-for-range M chunk-size
-                      (fn [i]
-                        (simd-sgemm-slice! C coff A aoff B boff i (inc i) N K))))
-
-       ;; Strategy B: Parallelize across column blocks N when M < 4, N >= 512, and K is significant
-       (and (< M 4) (>= N 512) (>= (* M N K) 32768))
-       (let [num-blocks (long (Math/ceil (/ (double N) simd-jb)))]
-         (p-for-range num-blocks 2
-                      (fn [b-idx]
-                        (let [j-start (* b-idx simd-jb)
-                              j-end (min N (+ j-start simd-jb))]
-                          (dotimes [i M]
-                            (simd-sgemm-col-slice! C (+ coff (* i N)) A (+ aoff (* i K)) B boff
-                                                   j-start j-end N K))))))
-
-       ;; Strategy C: Single-threaded SIMD execution
-       :else
-       (simd-sgemm-slice! C coff A aoff B boff 0 M N K)))))
+     (let [n (long (n-chunks M N K))]
+       (if (< n 2)
+         ;; Serial path
+         (simd-sgemm-slice! C coff A aoff B boff 0 M N K)
+         (if (>= M n)
+           ;; Row bands: chunk t owns rows [t*M/n, (t+1)*M/n)
+           (invoke-chunks!
+            (for [t (range n)
+                  :let [r0 (quot (* t M) n)
+                        r1 (quot (* (inc t) M) n)]
+                  :when (< r0 r1)]
+              (fn [] (simd-sgemm-slice! C coff A aoff B boff r0 r1 N K))))
+           ;; Column bands (decode shapes): chunk t owns cols [t*N/n, (t+1)*N/n)
+           (invoke-chunks!
+            (for [t (range n)
+                  :let [c0 (quot (* t N) n)
+                        c1 (quot (* (inc t) N) n)]
+                  :when (< c0 c1)]
+              (fn [] (dotimes [i M]
+                       (simd-sgemm-col-slice! C (+ coff (* i N)) A (+ aoff (* i K))
+                                              B boff c0 c1 N K)))))))))))
