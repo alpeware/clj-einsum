@@ -1,13 +1,16 @@
 (ns einsum.core
   "High-level Public Clojure API for OpenXLA PJRT backend initialization, compilation, and execution."
-  (:require [einsum.compiler.compile :as compile]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [einsum.compiler.compile :as compile]
+            [einsum.compiler.fuse :as fuse]
             [einsum.compiler.kernel :as kernel]
             [einsum.compiler.pjrt :as pjrt]
             [einsum.compiler.pjrt.version :as v]
+            [einsum.logic.interpret :as interpret]
             [einsum.runtime.arena :as arena]
-            [einsum.runtime.weights :as weights]
-            [clojure.java.io :as io]
-            [clojure.string :as str]))
+            [einsum.runtime.weights :as weights])
+  (:import [java.lang.foreign MemorySegment ValueLayout]))
 
 (def ^:dynamic *default-context* nil)
 
@@ -166,49 +169,67 @@
           :cache-dir cache-dir})))))
 
 (defn init-backend!
-  "Initializes PJRT C API client runtime for specified target (:cpu, :sycl, :rocm, :cuda12, or a custom string path).
+  "Initializes PJRT C API client runtime for specified target (:cpu, :sycl, :rocm, :cuda12, :interpreter, :interp, or a custom string path).
    Accepts optional `client-opts` map (defaults to `{:allocator \"platform\"}`).
    Sets and returns the thread-root default context *default-context*."
   ([] (init-backend! :cpu))
   ([target] (init-backend! target {:allocator "platform"}))
   ([target client-opts]
-   (let [probe-info (try (v/probe-system-driver) (catch Exception _ {}))
-         flag-config (determine-optimal-xla-flags target probe-info client-opts)
-         {:keys [xla-flags env-vars]} flag-config]
-     (doseq [[k v] env-vars]
-       (System/setProperty k v)
-       (setenv-native k v))
-     (when-not (str/blank? xla-flags)
-       (System/setProperty "XLA_FLAGS" xla-flags)
-       (setenv-native "XLA_FLAGS" xla-flags))
-
-     (let [lib-path (cond
-                      (string? target) target
-                      (keyword? target) (let [{:keys [default env]} (get BACKEND-LIBRARY-MAP target)]
-                                          (or (when env (System/getenv env))
-                                              default
-                                              (throw (ex-info "Unknown backend target" {:target target}))))
-                      :else (throw (ex-info "Invalid backend target specifier" {:target target})))
-           api-ctx (pjrt/load-plugin! lib-path)
-           client (pjrt/create-client api-ctx (or client-opts {}))
-           pname (pjrt/platform-name api-ctx client)
-           ctx (assoc api-ctx
-                      :client client
-                      :platform pname
-                      :target target
-                      :probe probe-info
-                      :xla-flags flag-config)]
+   (cond
+     (contains? #{:interpreter :interp} target)
+     (let [ctx {:backend :interpreter
+                :target :interpreter
+                :platform "interpreter"
+                :client nil
+                :destroy-fn (fn [_ _] nil)}]
        (alter-var-root #'*default-context* (constantly ctx))
        (when-not (or (Boolean/getBoolean "clj-xla.quiet") (:quiet? client-opts))
-         (println (format "clj-xla initialized PJRT Backend: [%s] via plugin [%s]" pname lib-path))
-         (when-not (str/blank? xla-flags)
-           (println (format "  ↳ Autotuned XLA_FLAGS: %s" xla-flags))))
-       ctx))))
+         (println "clj-xla initialized Pure-JVM Interpreter Backend: [interpreter] (no native PJRT required)"))
+       ctx)
+
+     :else
+     (let [probe-info (try (v/probe-system-driver) (catch Exception _ {}))
+           flag-config (determine-optimal-xla-flags target probe-info client-opts)
+           {:keys [xla-flags env-vars]} flag-config]
+       (doseq [[k v] env-vars]
+         (System/setProperty k v)
+         (setenv-native k v))
+       (when-not (str/blank? xla-flags)
+         (System/setProperty "XLA_FLAGS" xla-flags)
+         (setenv-native "XLA_FLAGS" xla-flags))
+
+       (let [lib-path (cond
+                        (string? target) target
+                        (keyword? target) (let [{:keys [default env]} (get BACKEND-LIBRARY-MAP target)]
+                                            (or (when env (System/getenv env))
+                                                default
+                                                (throw (ex-info "Unknown backend target" {:target target}))))
+                        :else (throw (ex-info "Invalid backend target specifier" {:target target})))
+             api-ctx (pjrt/load-plugin! lib-path)
+             client (pjrt/create-client api-ctx (or client-opts {}))
+             pname (pjrt/platform-name api-ctx client)
+             ctx (assoc api-ctx
+                        :client client
+                        :platform pname
+                        :target target
+                        :probe probe-info
+                        :xla-flags flag-config)]
+         (alter-var-root #'*default-context* (constantly ctx))
+         (when-not (or (Boolean/getBoolean "clj-xla.quiet") (:quiet? client-opts))
+           (println (format "clj-xla initialized PJRT Backend: [%s] via plugin [%s]" pname lib-path))
+           (when-not (str/blank? xla-flags)
+             (println (format "  ↳ Autotuned XLA_FLAGS: %s" xla-flags))))
+         ctx)))))
 
 (defn init-cpu! [] (init-backend! :cpu))
 (defn init-sycl! [] (init-backend! :sycl))
 (defn init-rocm! [] (init-backend! :rocm))
 (defn init-cuda! [] (init-backend! :cuda12))
+(defn init-interpreter!
+  "Initializes the pure-JVM StableHLO interpreter backend (zero native PJRT required).
+   Sets and returns the thread-root default context *default-context*."
+  ([] (init-backend! :interpreter))
+  ([opts] (init-backend! :interpreter opts)))
 
 (defn get-context
   "Returns current default PJRT context or initializes CPU client."
@@ -216,14 +237,20 @@
   (or *default-context* (init-cpu!)))
 
 (defn compile-graph
-  "Compiles EDN SSA graph to a native PJRT loaded executable."
+  "Compiles EDN SSA graph to a native PJRT loaded executable or pure-JVM interpreter executable."
   ([graph]
    (compile-graph (get-context) graph))
   ([ctx graph]
-   (let [exec (compile/compile-graph ctx (:client ctx) graph)]
-     (if (map? exec)
-       (assoc exec :ctx ctx)
-       exec))))
+   (if (= (:backend ctx) :interpreter)
+     (let [fused (fuse/fuse-graph graph)]
+       {:handle fused
+        :graph fused
+        :backend :interpreter
+        :ctx ctx})
+     (let [exec (compile/compile-graph ctx (:client ctx) graph)]
+       (if (map? exec)
+         (assoc exec :ctx ctx)
+         exec)))))
 
 (defn buffer-from-host-buffer
   "Transfers host primitive array/buffer into native PJRT device memory buffer."
@@ -234,7 +261,7 @@
    (pjrt/buffer-from-host-buffer ctx client host-data shape dtype-enum)))
 
 (defn execute
-  "Executes a compiled StableHLO graph executable on the PJRT device runtime via native Panama FFM C API downcalls."
+  "Executes a compiled StableHLO graph executable on the PJRT device runtime or pure-JVM interpreter."
   [exec & inputs]
   (let [flat-inputs (if (and (= 1 (count inputs)) (vector? (first inputs)))
                       (first inputs)
@@ -242,27 +269,48 @@
         ctx (or (when (map? exec) (:ctx exec)) (get-context))
         exec-handle (cond
                       (map? exec) (or (:handle exec) exec)
-                      :else exec)
-        num-outputs (if (map? exec) (count (get-in exec [:graph :outvars] [1])) 1)]
+                      :else exec)]
     (if-not exec-handle
       (throw (ex-info "Invalid executable handle" {:exec exec}))
-      (let [invars (or (get-in exec [:graph :invars]) [])
-            all-segs? (every? #(instance? java.lang.foreign.MemorySegment %) flat-inputs)
-            device-buffers (if all-segs?
-                             flat-inputs
-                             (mapv (fn [idx input-data]
-                                     (if (instance? java.lang.foreign.MemorySegment input-data)
-                                       input-data
-                                       (let [[_var-name [_kw shape dtype]] (nth invars idx)
-                                             dtype-enum (case dtype :i1 1 :bool 1 :pred 1 :i8 2 :i32 4 :f32 11 :bf16 13 :f16 10 11)]
-                                         (pjrt/buffer-from-host-buffer ctx (:client ctx) input-data shape dtype-enum))))
-                                   (range (count flat-inputs))
-                                   flat-inputs))
-            out-buf (pjrt/execute-executable ctx exec-handle device-buffers num-outputs)]
-        out-buf))))
+      (if (= (:backend ctx) :interpreter)
+        (let [invars (or (get-in exec [:graph :invars]) [])
+              input-tensors (mapv (fn [idx input-data]
+                                    (if (and (map? input-data) (contains? input-data :data))
+                                      input-data
+                                      (let [[_var-name [_kw shape dtype]] (nth invars idx)
+                                            shape-vec (vec shape)
+                                            dt (or dtype :f32)]
+                                        {:dtype (weights/normalize-dtype dt)
+                                         :shape shape-vec
+                                         :data input-data})))
+                                  (range (count flat-inputs))
+                                  flat-inputs)
+              bindings (zipmap (map first invars) input-tensors)
+              out-map (interpret/execute (:graph exec) bindings)]
+          (if (= 1 (count (get-in exec [:graph :outvars])))
+            (val (first out-map))
+            out-map))
+        (let [invars (or (get-in exec [:graph :invars]) [])
+              all-segs? (every? #(instance? MemorySegment %) flat-inputs)
+              device-buffers (if all-segs?
+                               flat-inputs
+                               (mapv (fn [idx input-data]
+                                       (if (instance? MemorySegment input-data)
+                                         input-data
+                                         (let [[_var-name [_kw shape dtype]] (nth invars idx)
+                                               dtype-enum (case dtype :i1 1 :bool 1 :pred 1 :i8 2 :i32 4 :f32 11 :bf16 13 :f16 10 11)]
+                                           (pjrt/buffer-from-host-buffer ctx (:client ctx) input-data shape dtype-enum))))
+                                     (range (count flat-inputs))
+                                     flat-inputs))
+              num-outputs (if (map? exec) (count (get-in exec [:graph :outvars] [1])) 1)
+              out-buf (pjrt/execute-executable ctx exec-handle device-buffers num-outputs)]
+          out-buf)))))
+
+(def ^:private ^Class FLOAT-ARRAY-CLASS (Class/forName "[F"))
+(def ^:private ^Class SHORT-ARRAY-CLASS (Class/forName "[S"))
 
 (defn to-host-slice
-  "Transfers a slice of PJRT output device buffer back to host float array.
+  "Transfers a slice of PJRT output device buffer or interpreter tensor back to host float array.
    Supports optional `dtype` parameter (:f32 or :bf16), converting bfloat16 to float32 on transfer."
   ([out-buf]
    (to-host-slice out-buf 0 256000 (* 128 256000) :f32))
@@ -275,8 +323,56 @@
   ([out-buf slice-idx vocab-size total-elements dtype]
    (let [ctx (get-context)
          n-elements (max (long total-elements) (long (* (inc slice-idx) vocab-size)))
-         all-floats (pjrt/buffer-to-host-buffer ctx out-buf n-elements (or dtype :f32))
-         offset (* slice-idx vocab-size)]
+         all-floats (cond
+                      ;; 1. Direct float array
+                      (instance? FLOAT-ARRAY-CLASS out-buf)
+                      ^floats out-buf
+
+                      ;; 2. Interpreter tensor map {:dtype ... :shape ... :data ...}
+                      (and (map? out-buf) (contains? out-buf :data))
+                      (let [data (:data out-buf)
+                            dt (or (:dtype out-buf) dtype :f32)]
+                        (cond
+                          (instance? FLOAT-ARRAY-CLASS data)
+                          ^floats data
+
+                          (instance? SHORT-ARRAY-CLASS data)
+                          (let [^shorts s-arr data
+                                len (alength s-arr)
+                                f-arr (float-array len)]
+                            (dotimes [i len]
+                              (aset f-arr i (interpret/bf16->f32 (aget s-arr i))))
+                            f-arr)
+
+                          (instance? MemorySegment data)
+                          (let [^MemorySegment seg data
+                                elem-size (if (= dt :bf16) 2 4)
+                                len (long (min (quot (.byteSize seg) elem-size) n-elements))
+                                f-arr (float-array len)]
+                            (if (= dt :bf16)
+                              (dotimes [i len]
+                                (let [s (.getAtIndex seg ValueLayout/JAVA_SHORT (long i))]
+                                  (aset f-arr i (interpret/bf16->f32 s))))
+                              (dotimes [i len]
+                                (aset f-arr i (.getAtIndex seg ValueLayout/JAVA_FLOAT (long i)))))
+                            f-arr)
+
+                          :else
+                          (float-array (map float data))))
+
+                      ;; 3. MemorySegment in interpreter mode
+                      (and (instance? MemorySegment out-buf) (= (:backend ctx) :interpreter))
+                      (let [^MemorySegment seg out-buf
+                            len (long (min (quot (.byteSize seg) 4) n-elements))
+                            f-arr (float-array len)]
+                        (dotimes [i len]
+                          (aset f-arr i (.getAtIndex seg ValueLayout/JAVA_FLOAT (long i))))
+                        f-arr)
+
+                      ;; 4. PJRT native device buffer
+                      :else
+                      (pjrt/buffer-to-host-buffer ctx out-buf n-elements (or dtype :f32)))
+         offset (* (long slice-idx) (long vocab-size))]
      (if (and (>= offset 0) (<= (+ offset vocab-size) (alength ^floats all-floats)))
        (let [slice (float-array vocab-size)]
          (System/arraycopy all-floats offset slice 0 vocab-size)

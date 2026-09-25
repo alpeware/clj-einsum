@@ -91,3 +91,102 @@
                     (let [res (k {:x (float-array input-vec)})
                           floats (xla/to-host-slice (:y res) 0 4 4 :f32)]
                       (= expected (vec floats)))))))
+
+(deftest test-interpreter-compile-kernel-map-invocation
+  (testing "compile-kernel on interpreter backend produces a callable function with map input/output"
+    (let [ctx (xla/init-backend! :interpreter {:quiet? true})
+          ast [:= [:y :b :d] [:x :b :k] [:w :k :d]]
+          k (kernel/compile-kernel ctx "gemm_interp_kernel" ast
+                                   {:in {:x [:tensor [1 2] :f32]
+                                         :w [:tensor [2 2] :f32]}
+                                    :out [:y]})]
+      (is (ifn? k))
+      (is (= [:y] (:out-spec k)))
+      (let [x-data (float-array [1.0 2.0])
+            w-data (float-array [1.0 0.0
+                                 0.0 1.0])
+            res (k {:x x-data :w w-data})]
+        (is (map? res))
+        (is (contains? res :y))
+        (let [out-buf (:y res)
+              floats (xla/to-host-slice out-buf 0 2 2 :f32)]
+          (is (= [1.0 2.0] (vec floats))))))))
+
+(deftest test-interpreter-compile-kernel-positional-invocation
+  (testing "compile-kernel on interpreter backend supports positional vector and vararg invocation"
+    (let [ctx (xla/init-backend! :interpreter {:quiet? true})
+          ast [:= [:y :b :d] [:x :b :k] [:w :k :d]]
+          k (kernel/compile-kernel ctx "gemm_interp_pos" ast
+                                   {:in [[:x [:tensor [1 2] :f32]]
+                                         [:w [:tensor [2 2] :f32]]]
+                                    :out [:y]})
+          x-data (float-array [2.0 3.0])
+          w-data (float-array [1.0 0.0
+                               0.0 1.0])
+          res-vec (k [x-data w-data])
+          res-args (k x-data w-data)]
+      (is (= [2.0 3.0] (vec (xla/to-host-slice res-vec 0 2 2 :f32))))
+      (is (= [2.0 3.0] (vec (xla/to-host-slice res-args 0 2 2 :f32)))))))
+
+(deftest test-interpreter-compile-kernel-with-device-arena
+  (testing "compile-kernel on interpreter backend works inside with-device-arena with no leaks or errors"
+    (let [ctx (xla/init-backend! :interpreter {:quiet? true})
+          ast [:= [:y :b :d] [:x :b :k] [:w :k :d]]
+          k (kernel/compile-kernel ctx "gemm_interp_arena" ast
+                                   {:in {:x [:tensor [1 2] :f32]
+                                         :w [:tensor [2 2] :f32]}
+                                    :out [:y]})
+          x-data (float-array [2.0 3.0])
+          w-data (float-array [2.0 0.0
+                               0.0 2.0])
+          captured-arena (atom nil)
+          output-result (atom nil)]
+      (arena/with-device-arena [a ctx]
+        (reset! captured-arena a)
+        (let [res (k {:x x-data :w w-data})]
+          (is (= 3 (count (arena/tracked-buffers a))))
+          (let [floats (xla/to-host-slice (:y res) 0 2 2 :f32)]
+            (reset! output-result (vec floats)))))
+      (is (true? (arena/closed? @captured-arena)))
+      (is (= [4.0 6.0] @output-result)))))
+
+(deftest test-interpreter-compile-kernel-with-weight-store
+  (testing "compile-kernel on interpreter automatically resolves weights from WeightStore"
+    (let [ctx (xla/init-backend! :interpreter {:quiet? true})
+          ast [:= [:y :b :d] [:x :b :k] [:w :k :d]]
+          w-data (float-array [1.0 2.0
+                               3.0 4.0])]
+      (with-open [ar (arena/create-arena ctx)]
+        (let [store (weights/create-weight-store ctx
+                                                 {"w" {:shape [2 2] :dtype :f32}}
+                                                 {:aliases {:w "w"}
+                                                  :arena ar})
+              _ (swap! (:device-buffers store) assoc :w {:dtype :f32 :shape [2 2] :data w-data})
+              k (kernel/compile-kernel ctx "gemm_interp_weight_store" ast
+                                       {:in {:x [:tensor [1 2] :f32]}
+                                        :weights store
+                                        :out [:y]})]
+          (is (= [:x :w] (:in-keys k)))
+          (arena/with-device-arena [_step ar]
+            (let [x-data (float-array [1.0 1.0])
+                  res (k {:x x-data})]
+              (is (map? res))
+              (let [out-buf (:y res)
+                    floats (xla/to-host-slice out-buf 0 2 2 :f32)]
+                (is (= [4.0 6.0] (vec floats)))))))))))
+
+(defspec prop-interpreter-compile-kernel-linear-scaling
+  20
+  (prop/for-all [scale (gen/choose 1 10)]
+                (let [ctx (xla/init-backend! :interpreter {:quiet? true})
+                      ast [:= [:y :b :d] {:scale (double scale)} [:x :b :d]]
+                      k (kernel/compile-kernel ctx "scale_interp_kernel" ast
+                                               {:in {:x [:tensor [1 4] :f32]}
+                                                :out [:y]})
+                      input-vec [1.0 2.0 3.0 4.0]
+                      expected (mapv #(float (* (float scale) %)) input-vec)]
+                  (arena/with-device-arena [_a ctx]
+                    (let [res (k {:x (float-array input-vec)})
+                          floats (xla/to-host-slice (:y res) 0 4 4 :f32)]
+                      (= expected (vec floats)))))))
+

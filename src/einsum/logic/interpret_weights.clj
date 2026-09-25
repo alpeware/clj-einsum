@@ -19,16 +19,13 @@
    "I64"      :i32
    "BOOL"     :pred})
 
-(defn- slice-aligned?
+(defn slice-aligned?
   "Checks if a MemorySegment slice is aligned for the given dtype's element size."
   [^MemorySegment slice elem-size]
-  ;; A slice is aligned if its address is a multiple of elem-size.
-  ;; We check by trying to access the first element; if it fails, it's unaligned.
-  ;; Actually, we can check the address directly.
   (let [addr (.address slice)]
     (zero? (mod addr elem-size))))
 
-(defn- copy-slice-to-array
+(defn copy-slice-to-array
   "Copies a MemorySegment slice to a heap array (for unaligned data).
    Uses byte-level access to avoid alignment faults."
   [^MemorySegment slice dtype n-elems]
@@ -52,18 +49,22 @@
         (.get bb arr)
         arr))))
 
+(defn align-slice
+  "Ensures a MemorySegment slice is aligned for its dtype, copying to a heap array only if unaligned."
+  [^MemorySegment slice dtype shape]
+  (let [elem-size (case dtype :f32 4 :bf16 2 :i32 4 :i8 1 :pred 1 4)
+        n-elems (reduce * 1 shape)]
+    (if (and (> elem-size 1) (not (slice-aligned? slice elem-size)))
+      (copy-slice-to-array slice dtype n-elems)
+      slice)))
+
 (defn- header->tensor
   "Builds an interpreter tensor from safetensors header info and a segment slice.
    If the slice is not aligned for the dtype, copies to a heap array."
   [t-name t-info ^MemorySegment slice]
   (let [dtype (get dtype-map (get t-info "dtype") :f32)
         shape (mapv long (get t-info "shape"))
-        n-elems (reduce * 1 shape)
-        elem-size (case dtype :f32 4 :bf16 2 :i32 4 :i8 1 :pred 1 4)
-        data (if (and (> elem-size 1) (not (slice-aligned? slice elem-size)))
-               (do (println "  (copying unaligned tensor" t-name ")")
-                   (copy-slice-to-array slice dtype n-elems))
-               slice)]
+        data (align-slice slice dtype shape)]
     {:dtype dtype
      :shape shape
      :data data

@@ -109,7 +109,8 @@
 
 (defn parse-cli-args
   "Parses command-line flags against `default-opts` (defaulting to DEFAULT_INFERENCE_OPTS).
-   Supports optional `custom-handlers` map of {flag-str (fn [opts remaining-args]) -> [new-opts consumed-count]}."
+   Supports optional `custom-handlers` map of {flag-str (fn [opts remaining-args]) -> [new-opts consumed-count]}.
+   Supported backend targets include :cpu, :rocm, :sycl, :cuda12, and :interpreter (pure-JVM StableHLO)."
   ([args]
    (parse-cli-args args DEFAULT_INFERENCE_OPTS {}))
   ([args default-opts]
@@ -178,7 +179,8 @@
 
              ;; Keyword flags (strip leading colons)
              (= arg "--backend")
-             (recur (subvec remaining 2) (assoc opts :backend (keyword (str/replace val #"^:+" ""))))
+             (let [b (keyword (str/replace val #"^:+" ""))]
+               (recur (subvec remaining 2) (assoc opts :backend (if (= b :interp) :interpreter b))))
 
              (= arg "--precision")
              (recur (subvec remaining 2) (assoc opts :precision (keyword (str/replace val #"^:+" ""))))

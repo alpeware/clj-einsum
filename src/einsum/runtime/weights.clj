@@ -5,6 +5,7 @@
             [einsum.compiler.pjrt :as pjrt]
             [einsum.logic.dce :as dce]
             [einsum.logic.expand :as expand]
+            [einsum.logic.interpret-weights :as iw]
             [einsum.runtime.arena :as arena]
             [einsum.runtime.safetensors :as st])
   (:import [java.lang.foreign Arena MemorySegment]))
@@ -130,24 +131,46 @@
               shape (:shape info)
               dtype (:dtype info)
               buf (cond
+                    ;; 0. Pre-wrapped interpreter tensor map in source map
+                    (and (map? source) (contains? source k) (map? (get source k)) (contains? (get source k) :data))
+                    (get source k)
+
                     ;; 1. MemorySegment already in source map (caller-owned buffer or host segment, never auto-tracked)
                     (and (map? source) (contains? source k) (instance? MemorySegment (get source k)))
-                    (get source k)
+                    (if (= (:backend ctx) :interpreter)
+                      {:dtype dtype :shape shape :data (iw/align-slice (get source k) dtype shape) :name (str canonical-name)}
+                      (get source k))
 
                     ;; 2. Safetensors mapped weights
                     (and (map? source) (or (:segment source) (:tensors source)))
                     (let [c-str (if (keyword? canonical-name) (name canonical-name) (str canonical-name))
                           slice (st/get-tensor-slice source c-str)]
-                      (if arena
+                      (cond
+                        (= (:backend ctx) :interpreter)
+                        (let [t-buf {:dtype dtype :shape shape :data (iw/align-slice slice dtype shape) :name c-str}]
+                          (when arena (arena/track! arena t-buf))
+                          t-buf)
+
+                        arena
                         (arena/device-buffer arena slice shape dtype)
+
+                        :else
                         (let [dt-enum (arena/dtype->enum dtype)]
                           (pjrt/buffer-from-host-buffer ctx cli slice shape dt-enum))))
 
                     ;; 3. Host array in source map
                     (and (map? source) (or (contains? source k) (contains? source canonical-name)))
                     (let [arr (or (get source k) (get source canonical-name))]
-                      (if arena
+                      (cond
+                        (= (:backend ctx) :interpreter)
+                        (let [t-buf {:dtype dtype :shape shape :data arr :name (str canonical-name)}]
+                          (when arena (arena/track! arena t-buf))
+                          t-buf)
+
+                        arena
                         (arena/device-buffer arena arr shape dtype)
+
+                        :else
                         (let [dt-enum (arena/dtype->enum dtype)]
                           (pjrt/buffer-from-host-buffer ctx cli arr shape dt-enum))))
 

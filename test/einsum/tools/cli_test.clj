@@ -61,7 +61,12 @@
       (is (true? (:verbose parsed)))
       (is (true? (:chat parsed)))
       (is (= #{1 2 3} (:skip-layers parsed)))
-      (is (= "custom-val" (:custom-flag parsed)))))
+      (is (= "custom-val" (:custom-flag parsed))))
+
+    (let [p1 (cli/parse-cli-args ["--backend" "interpreter"])
+          p2 (cli/parse-cli-args ["--backend" "interp"])]
+      (is (= :interpreter (:backend p1)))
+      (is (= :interpreter (:backend p2)))))
 
   (testing "Supports custom handlers"
     (let [custom-handler (fn [opts remaining]

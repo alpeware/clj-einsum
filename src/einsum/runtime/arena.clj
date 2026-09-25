@@ -135,19 +135,25 @@
    nil))
 
 (defn device-buffer
-  "Transfers host data into a PJRT device buffer and tracks it in `arena` (or `*active-arena*`)."
+  "Transfers host data into a PJRT device buffer or interpreter tensor and tracks it in `arena` (or `*active-arena*`)."
   ([host-data shape dtype]
    (device-buffer *active-arena* host-data shape dtype))
   ([^DeviceArena arena host-data shape dtype]
    (let [ctx (or (:ctx arena)
                  (when-let [v (resolve 'einsum.core/*default-context*)] @v)
                  (when-let [f (resolve 'einsum.core/get-context)] (f))
-                 {})
-         cli (or (:client ctx) (:client arena))
-         dt-enum (dtype->enum dtype)
-         buf (pjrt/buffer-from-host-buffer ctx cli host-data shape dt-enum)]
-     (track! arena buf)
-     buf)))
+                 {})]
+     (if (= (:backend ctx) :interpreter)
+       (let [buf {:dtype (or dtype :f32)
+                  :shape (vec shape)
+                  :data host-data}]
+         (when arena (track! arena buf))
+         buf)
+       (let [cli (or (:client ctx) (:client arena))
+             dt-enum (dtype->enum dtype)
+             buf (pjrt/buffer-from-host-buffer ctx cli host-data shape dt-enum)]
+         (when arena (track! arena buf))
+         buf)))))
 
 (defmacro with-device-arena
   "Executes `body` in a scoped DeviceArena. Automatically and deterministically

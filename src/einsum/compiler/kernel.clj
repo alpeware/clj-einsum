@@ -3,7 +3,9 @@
    Wraps AST lowering, compilation, device buffer marshaling, and execution
    into an idiomatic, invokable Clojure function (clojure.lang.IFn)."
   (:require [einsum.compiler.compile :as compile]
+            [einsum.compiler.fuse :as fuse]
             [einsum.compiler.pjrt :as pjrt]
+            [einsum.logic.interpret :as interpret]
             [einsum.logic.lower :as lower]
             [einsum.runtime.arena :as arena]
             [einsum.runtime.weights :as weights])
@@ -39,13 +41,31 @@
 
   java.lang.AutoCloseable
   (close [_this]
-    (when-let [handle (or (:handle exec) exec)]
-      (try
-        (pjrt/destroy-loaded-executable! ctx handle)
-        (catch Exception _ nil)))))
+    (when-not (= (:backend ctx) :interpreter)
+      (when-let [handle (or (:handle exec) exec)]
+        (try
+          (pjrt/destroy-loaded-executable! ctx handle)
+          (catch Exception _ nil))))))
 
 (defn- to-device-buffer [ctx _in-var spec val]
   (cond
+    (= (:backend ctx) :interpreter)
+    (let [tensor-spec (if (and (vector? spec) (= (count spec) 2) (keyword? (first spec)) (vector? (second spec)))
+                        (second spec)
+                        spec)
+          [_tag shape dtype] tensor-spec
+          buf (cond
+                (and (map? val) (contains? val :data))
+                val
+
+                :else
+                {:dtype (or dtype :f32)
+                 :shape (vec (or shape []))
+                 :data val})]
+      (when arena/*active-arena*
+        (arena/track! arena/*active-arena* buf))
+      buf)
+
     (instance? MemorySegment val)
     val
 
@@ -67,9 +87,9 @@
    - Positional vector `(kernel [x w1 w2 ...])`: High-throughput, zero-overhead manual assembly fast-path."
   [kernel inputs call-style]
   (let [{:keys [exec in-spec in-keys out-spec ctx opts]} kernel
-        exec-handle (or (:handle exec) exec)
         spec-map (into {} in-spec)
         weights-store (or (:weights opts) (:weight-store opts))
+        interpreter? (= (:backend ctx) :interpreter)
 
         ;; 1. Collect inputs in the exact canonical invars order
         input-buffers (if (= call-style :map)
@@ -86,28 +106,45 @@
                                       spec (nth in-spec idx)]
                                   (to-device-buffer ctx k spec val)))
                               (range (count inputs))
-                              inputs))
+                              inputs))]
 
-        ;; 2. Execute on PJRT device
-        num-outs (max 1 (count out-spec))
-        raw-outs (pjrt/execute-executable ctx exec-handle input-buffers num-outs)
-        outs-vec (if (vector? raw-outs) raw-outs [raw-outs])]
+    (if interpreter?
+      ;; 2a. Execute on pure-JVM StableHLO interpreter
+      (let [bindings (zipmap in-keys input-buffers)
+            out-map (interpret/execute (:graph exec) bindings)
+            outs-vec (mapv #(get out-map %) out-spec)]
+        ;; Register outputs in active arena if bound
+        (when arena/*active-arena*
+          (doseq [b outs-vec]
+            (arena/track! arena/*active-arena* b)))
+        (cond
+          (= call-style :map)
+          (into {} (map vector out-spec outs-vec))
 
-    ;; 3. Register outputs in active arena if bound
-    (when arena/*active-arena*
-      (doseq [b outs-vec]
-        (arena/track! arena/*active-arena* b)))
+          (= 1 (count out-spec))
+          (first outs-vec)
 
-    ;; 4. Package return value based on call-style and output spec
-    (cond
-      (= call-style :map)
-      (into {} (map vector out-spec outs-vec))
+          :else
+          outs-vec))
 
-      (= 1 (count out-spec))
-      (first outs-vec)
+      ;; 2b. Execute on PJRT device
+      (let [exec-handle (or (:handle exec) exec)
+            num-outs (max 1 (count out-spec))
+            raw-outs (pjrt/execute-executable ctx exec-handle input-buffers num-outs)
+            outs-vec (if (vector? raw-outs) raw-outs [raw-outs])]
+        ;; Register outputs in active arena if bound
+        (when arena/*active-arena*
+          (doseq [b outs-vec]
+            (arena/track! arena/*active-arena* b)))
+        (cond
+          (= call-style :map)
+          (into {} (map vector out-spec outs-vec))
 
-      :else
-      outs-vec)))
+          (= 1 (count out-spec))
+          (first outs-vec)
+
+          :else
+          outs-vec)))))
 
 (defn compile-kernel
   "Compiles a Tensor Logic Hiccup AST into an invokable, callable CompiledKernel.
@@ -149,9 +186,15 @@
          ;; Lower AST to validated StableHLO graph
          graph (lower/ast->graph name-str in-spec ast out-spec)
 
-         ;; Compile graph to native PJRT executable
-         cli (or (:client ctx) ctx)
-         exec (compile/compile-graph ctx cli graph)]
+         ;; Compile graph to native PJRT executable or pure-JVM interpreter executable
+         exec (if (= (:backend ctx) :interpreter)
+                (let [fused (fuse/fuse-graph graph)]
+                  {:handle fused
+                   :graph fused
+                   :backend :interpreter
+                   :ctx ctx})
+                (let [cli (or (:client ctx) ctx)]
+                  (compile/compile-graph ctx cli graph)))]
      (->CompiledKernel name-str ast graph exec in-spec in-keys out-spec ctx opts))))
 
 (defmacro defkernel
