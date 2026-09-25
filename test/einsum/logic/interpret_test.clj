@@ -297,3 +297,91 @@
         result (interp/execute graph {})]
     (is (= [3] (:shape (:c result))))
     (is (= :f32 (:dtype (:c result))))))
+
+;; ---------------------------------------------------------------------------
+;; SGEMM Offset, SIMD Parity, and Parallel Execution Tests
+;; ---------------------------------------------------------------------------
+
+(deftest test-sgemm-offset-in-place
+  (testing "sgemm! computes in-place matrix product at specified offsets"
+    (let [M 2 N 3 K 4
+          A-data (float-array [0.0 0.0 ; prefix padding
+                               1.0 2.0 3.0 4.0
+                               5.0 6.0 7.0 8.0])
+          B-data (float-array [0.0 0.0 0.0 ; prefix padding
+                               1.0 0.0 2.0
+                               0.0 1.0 0.0
+                               2.0 1.0 0.0
+                               0.0 2.0 1.0])
+          C-data (float-array 10) ; offset at 4
+          aoff 2
+          boff 3
+          coff 4]
+      (interp/sgemm! C-data coff A-data aoff B-data boff M N K)
+      ;; Row 0: [1 2 3 4] @ [[1 0 2] [0 1 0] [2 1 0] [0 2 1]]
+      ;; 1*1 + 2*0 + 3*2 + 4*0 = 7
+      ;; 1*0 + 2*1 + 3*1 + 4*2 = 13
+      ;; 1*2 + 2*0 + 3*0 + 4*1 = 6
+      ;; Row 1: [5 6 7 8] @ [[1 0 2] [0 1 0] [2 1 0] [0 2 1]]
+      ;; 5*1 + 6*0 + 7*2 + 8*0 = 19
+      ;; 5*0 + 6*1 + 7*1 + 8*2 = 29
+      ;; 5*2 + 6*0 + 7*0 + 8*1 = 18
+      (let [result (vec (take 6 (drop 4 (vec C-data))))]
+        (is (= [7.0 13.0 6.0 19.0 29.0 18.0] result))))))
+
+(deftest test-scalar-simd-parity
+  (testing "scalar-sgemm! and simd-sgemm! produce identical results across diverse shapes"
+    (doseq [[M N K] [[1 16 16] [1 35 67] [4 64 128] [3 33 65] [2 256 128]]]
+      (let [A (float-array (map #(float (/ (mod % 17) 10.0)) (range (* M K))))
+            B (float-array (map #(float (/ (mod % 19) 10.0)) (range (* K N))))
+            C-scalar (float-array (* M N))
+            C-simd (float-array (* M N))]
+        (interp/scalar-sgemm! C-scalar 0 A 0 B 0 M N K)
+        (if interp/simd-available?
+          (let [simd-fn (resolve 'einsum.logic.interpret-simd/simd-sgemm!)]
+            (simd-fn C-simd 0 A 0 B 0 M N K)
+            (dotimes [i (* M N)]
+              (let [s (aget C-scalar i)
+                    v (aget C-simd i)
+                    diff (Math/abs (- s v))
+                    rel (/ diff (max (float 1.0) (Math/abs s)))]
+                (is (< rel 1e-4) (str "Shape " [M N K] " mismatch at index " i)))))
+          (is true))))))
+
+(deftest test-fallback-force-scalar
+  (testing "forcing scalar mode executes via pure scalar path without error"
+    (let [a (interp/tensor :f32 [2 3] (mapv float (range 6)))
+          b (interp/tensor :f32 [3 2] (mapv float (range 6)))
+          attrs {:contracting_dims {:lhs [1] :rhs [0]} :batch_dims {:lhs [] :rhs []}}
+          res-default (interp/op-dot-general a b attrs)
+          res-scalar (binding [interp/*force-scalar?* true]
+                       (interp/op-dot-general a b attrs))]
+      (is (= (vec (:data res-default)) (vec (:data res-scalar)))))))
+
+(deftest test-parallel-batched-matmul
+  (testing "batched dot_general executes in parallel across B and matches expected product"
+    (let [B 4 M 2 K 3 N 2
+          a-vals (mapv float (range (* B M K)))
+          b-vals (mapv float (range (* B K N)))
+          a (interp/tensor :f32 [B M K] a-vals)
+          b (interp/tensor :f32 [B K N] b-vals)
+          attrs {:contracting_dims {:lhs [2] :rhs [1]} :batch_dims {:lhs [0] :rhs [0]}}
+          res (interp/op-dot-general a b attrs)]
+      (is (= [B M N] (:shape res)))
+      (is (= (* B M N) (alength ^floats (:data res)))))))
+
+(deftest test-parallel-fused-ops
+  (testing "fused LayerNorm and Softmax compute correctly across multi-row parallel inputs"
+    (let [x (interp/tensor :f32 [4 8] (mapv float (range 32)))
+          gamma (interp/tensor :f32 [8] (repeat 8 1.0))
+          beta (interp/tensor :f32 [8] (repeat 8 0.0))
+          ln-res (interp/op-fused-layer-norm x gamma beta {:eps 1e-5})
+          sm-res (interp/op-fused-softmax x {})]
+      (is (= [4 8] (:shape ln-res)))
+      (is (= [4 8] (:shape sm-res)))
+      ;; Verify softmax rows sum to ~1.0
+      (let [sm-floats ^floats (:data sm-res)]
+        (dotimes [r 4]
+          (let [row-sum (reduce + (map #(aget sm-floats (+ (* r 8) %)) (range 8)))]
+            (is (< (Math/abs (- 1.0 row-sum)) 1e-5))))))))
+

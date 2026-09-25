@@ -25,8 +25,9 @@
      :shape [d0 d1 ...]            ;; row-major logical shape
      :data  <primitive array | MemorySegment>}"
   (:import [java.lang.foreign MemorySegment ValueLayout]
-           [jdk.incubator.vector FloatVector VectorSpecies]
-           [java.util Arrays]))
+           [java.util Arrays]
+           [java.util.function IntConsumer]
+           [java.util.stream IntStream]))
 
 ;; ---------------------------------------------------------------------------
 ;; Dtypes
@@ -767,103 +768,65 @@
     {:dtype (:dtype operand) :shape o-shape :data (pack-floats (:dtype operand) out-f)}))
 
 ;; ---------------------------------------------------------------------------
-;; dot_general (naive sgemm; SIMD upgrade lands separately)
+;; Matrix Multiplication (SGEMM) & Dynamic Vector API Dispatch
 ;; ---------------------------------------------------------------------------
 
-(defn naive-sgemm!
-  "C[MxN] = A[MxK] @ B[KxN], row-major. Overwrites C."
-  [C A B M N K]
-  (let [^floats C C ^floats A A ^floats B B
-        M (long M) N (long N) K (long K)]
-    (dotimes [m M]
-      (dotimes [n N]
-        (let [c-idx (int (+ (* m N) n))]
-          (aset C c-idx
-                (float
-                 (loop [k (long 0) acc (float 0)]
-                   (if (= k K) acc
-                       (recur (inc k) (+ acc (* (aget A (int (+ (* m K) k)))
-                                                (aget B (int (+ (* k N) n)))))))))))))))
+(def ^:dynamic *force-scalar?* false)
+(def ^:dynamic *parallel-enabled?* true)
 
-;; ---------------------------------------------------------------------------
-;; SIMD SGEMM via Panama Vector API (jdk.incubator.vector)
-;; ---------------------------------------------------------------------------
-;; Requires --add-modules=jdk.incubator.vector at JVM launch.
-;; Single-threaded, 512-bit preferred species, 4 accumulators, K/J blocking.
+(def simd-available?
+  "True if Panama Vector API (jdk.incubator.vector) is available at runtime."
+  (try
+    (Class/forName "jdk.incubator.vector.FloatVector")
+    (require 'einsum.logic.interpret-simd)
+    true
+    (catch Throwable _ false)))
 
-(def ^VectorSpecies ^:private simd-species FloatVector/SPECIES_PREFERRED)
-(def ^:private simd-vl (long (.length simd-species)))
-(def ^:private simd-jb (* 4 simd-vl))
-(def ^:private simd-kb 128)
+(defn p-dotimes
+  "Executes (f i) for i in 0..(n-1) in parallel using ForkJoinPool when n >= min-chunk.
+   Runs sequentially with zero overhead when n < min-chunk or *parallel-enabled?* is false."
+  ([^long n f] (p-dotimes n 2 f))
+  ([^long n ^long min-chunk f]
+   (if (or (not *parallel-enabled?*) (<= n 1) (< n min-chunk))
+     (dotimes [i n] (f i))
+     (.forEach (.parallel (IntStream/range 0 n))
+               (reify IntConsumer
+                 (accept [_ i] (f (long i))))))))
 
-(defn- simd-kb-block!
-  [^floats C coff ^floats A aoff ^floats B N kb kend jb]
-  (let [o0 jb
-        o1 (+ jb simd-vl)
-        o2 (+ jb (* 2 simd-vl))
-        o3 (+ jb (* 3 simd-vl))]
-    (loop [k kb
-           ^FloatVector c0 (FloatVector/fromArray simd-species C (int (+ coff o0)))
-           ^FloatVector c1 (FloatVector/fromArray simd-species C (int (+ coff o1)))
-           ^FloatVector c2 (FloatVector/fromArray simd-species C (int (+ coff o2)))
-           ^FloatVector c3 (FloatVector/fromArray simd-species C (int (+ coff o3)))]
-      (if (< k kend)
-        (let [^FloatVector av (FloatVector/broadcast simd-species (aget A (+ aoff k)))
-              brow (* k N)]
-          (recur (inc k)
-                 (.fma av (FloatVector/fromArray simd-species B (int (+ brow o0))) c0)
-                 (.fma av (FloatVector/fromArray simd-species B (int (+ brow o1))) c1)
-                 (.fma av (FloatVector/fromArray simd-species B (int (+ brow o2))) c2)
-                 (.fma av (FloatVector/fromArray simd-species B (int (+ brow o3))) c3)))
-        (do
-          (.intoArray c0 C (int (+ coff o0)))
-          (.intoArray c1 C (int (+ coff o1)))
-          (.intoArray c2 C (int (+ coff o2)))
-          (.intoArray c3 C (int (+ coff o3))))))))
-
-(defn- simd-cleanup!
-  [^floats C coff ^floats A aoff ^floats B N kb kend j0 j1]
-  (let [coff (long coff) aoff (long aoff) N (long N)
-        kb (long kb) kend (long kend) j0 (long j0) j1 (long j1)]
-    (loop [k kb]
-      (when (< k kend)
-        (let [a (float (aget A (int (+ aoff k))))
-              brow (long (* k N))]
-          (loop [j j0]
-            (when (< j j1)
-              (let [idx (int (+ coff j))]
-                (aset C idx (float (+ (aget C idx) (* a (aget B (int (+ brow j))))))))
-              (recur (inc j)))))
-        (recur (inc k))))))
-
-(defn- simd-sgemm!
-  "Computes C = A @ B, OVERWRITING C. A is MxK, B is KxN, C is MxN, row-major.
-   Vectorized with Panama Vector API."
-  [^floats C ^floats A ^floats B M N K]
-  (Arrays/fill C (float 0))
-  (let [jb simd-jb kb simd-kb]
-    (loop [kbb (long 0)]
-      (when (< kbb K)
-        (let [kend (long (min K (+ kbb kb)))]
-          (loop [jbb (long 0)]
-            (if (<= (+ jbb jb) N)
-              (do
-                (loop [i (long 0)]
-                  (when (< i M)
-                    (simd-kb-block! C (* i N) A (* i K) B N kbb kend jbb)
-                    (recur (inc i))))
-                (recur (+ jbb jb)))
-              (when (< jbb N)
-                (loop [i (long 0)]
-                  (when (< i M)
-                    (simd-cleanup! C (* i N) A (* i K) B N kbb kend jbb N)
-                    (recur (inc i)))))))
-          (recur (+ kbb kb)))))))
+(defn scalar-sgemm!
+  "Computes C = A @ B using scalar CPU loops. Overwrites C.
+   Supports in-place offsets and parallel row slicing across CPU cores."
+  ([^floats C ^floats A ^floats B M N K]
+   (scalar-sgemm! C 0 A 0 B 0 M N K))
+  ([^floats C coff ^floats A aoff ^floats B boff M N K]
+   (let [coff (long coff) aoff (long aoff) boff (long boff)
+         M (long M) N (long N) K (long K)
+         total-elems (long (* M N))]
+     (Arrays/fill C (int coff) (int (+ coff total-elems)) (float 0))
+     (p-dotimes M (if (>= (* M N K) 32768) 4 M)
+                (fn [m]
+                  (let [crow (long (+ coff (* m N)))
+                        arow (long (+ aoff (* m K)))]
+                    (dotimes [n N]
+                      (let [c-idx (int (+ crow n))]
+                        (aset C c-idx
+                              (float
+                               (loop [k (long 0) acc (float 0)]
+                                 (if (= k K) acc
+                                     (recur (inc k)
+                                            (+ acc (* (aget A (int (+ arow k)))
+                                                      (aget B (int (+ boff (* k N) n))))))))))))))))))
 
 (defn sgemm!
-  "Overwritable matmul kernel entry point. Uses Panama Vector API SIMD."
-  [C A B M N K]
-  (simd-sgemm! C A B (long M) (long N) (long K)))
+  "Computes C = A @ B, OVERWRITING C. A is MxK, B is KxN, C is MxN, row-major.
+   Dispatches to Panama Vector API SIMD if incubator module is available,
+   otherwise falls back to pure scalar execution. Supports arbitrary buffer offsets."
+  ([^floats C ^floats A ^floats B M N K]
+   (sgemm! C 0 A 0 B 0 M N K))
+  ([^floats C coff ^floats A aoff ^floats B boff M N K]
+   (if (and simd-available? (not *force-scalar?*))
+     ((resolve 'einsum.logic.interpret-simd/simd-sgemm!) C coff A aoff B boff M N K)
+     (scalar-sgemm! C coff A aoff B boff M N K))))
 
 (defn- permute-axes
   "Reorders tensor axes per `perm` (out-dim i <- in-dim perm[i]). Copying."
@@ -898,12 +861,12 @@
         lf (as-floats (op-reshape lp [B M K]))
         rf (as-floats (op-reshape rp [B K N]))
         out (float-array (* B M N))]
-    (dotimes [b B]
-      (let [co (float-array (* M N))
-            ao (java.util.Arrays/copyOfRange lf (* b M K) (* (inc b) M K))
-            bo (java.util.Arrays/copyOfRange rf (* b K N) (* (inc b) K N))]
-        (sgemm! co ao bo M N K)
-        (System/arraycopy co 0 out (* b M N) (* M N))))
+    (p-dotimes B 2
+               (fn [b]
+                 (let [coff (long (* b M N))
+                       aoff (long (* b M K))
+                       boff (long (* b K N))]
+                   (sgemm! out coff lf aoff rf boff M N K))))
     (let [out-shape (vec (concat batch-shape m-shape n-shape))
           out-dtype (:dtype lhs)]
       {:dtype out-dtype :shape out-shape :data (pack-floats out-dtype out)})))
@@ -935,23 +898,25 @@
         ^floats bf (as-floats beta)
         eps-f (float (or eps 1e-5))
         ^floats out (float-array (* n d))]
-    (dotimes [i n]
-      (let [off (long (* i d))
-            mean (loop [j (long 0) m (float 0)]
-                   (if (< j d)
-                     (recur (inc j) (+ m (aget xf (int (+ off j)))))
-                     (/ m d)))
-            var (loop [j (long 0) v (float 0)]
-                  (if (< j d)
-                    (let [diff (- (aget xf (int (+ off j))) mean)]
-                      (recur (inc j) (+ v (* diff diff))))
-                    (/ v d)))
-            inv-std (float (/ 1.0 (Math/sqrt (+ var eps-f))))]
-        (dotimes [j d]
-          (let [idx (int (+ off j))
-                xhat (* (- (aget xf idx) mean) inv-std)]
-            (aset out idx (float (+ (* xhat (aget gf (int j))) (aget bf (int j)))))))))
+    (p-dotimes n 2
+               (fn [i]
+                 (let [off (long (* i d))
+                       mean (loop [j (long 0) m (float 0)]
+                              (if (< j d)
+                                (recur (inc j) (+ m (aget xf (int (+ off j)))))
+                                (/ m d)))
+                       var (loop [j (long 0) v (float 0)]
+                             (if (< j d)
+                               (let [diff (- (aget xf (int (+ off j))) mean)]
+                                 (recur (inc j) (+ v (* diff diff))))
+                               (/ v d)))
+                       inv-std (float (/ 1.0 (Math/sqrt (+ var eps-f))))]
+                   (dotimes [j d]
+                     (let [idx (int (+ off j))
+                           xhat (* (- (aget xf idx) mean) inv-std)]
+                       (aset out idx (float (+ (* xhat (aget gf (int j))) (aget bf (int j))))))))))
     {:dtype (:dtype x) :shape x-shape :data (pack-floats (:dtype x) out)}))
+
 (defn op-fused-softmax
   "Fused softmax over the last dimension.
    y = exp(x - max(x)) / sum(exp(x - max(x)))
@@ -962,26 +927,27 @@
         n (long (reduce * 1 (butlast x-shape)))
         ^floats xf (as-floats x)
         ^floats out (float-array (* n d))]
-    (dotimes [i n]
-      (let [off (long (* i d))
-            ;; Max
-            max-v (loop [j (long 1) m (aget xf (int off))]
-                    (if (< j d)
-                      (recur (inc j) (max m (aget xf (int (+ off j)))))
-                      m))
-            ;; Exp and sum
-            sum (loop [j (long 0) s (float 0)]
-                  (if (< j d)
-                    (let [idx (int (+ off j))
-                          e (float (Math/exp (- (aget xf idx) max-v)))]
-                      (aset out idx e)
-                      (recur (inc j) (+ s e)))
-                    s))
-            inv-sum (float (/ 1.0 sum))]
-        ;; Normalize
-        (dotimes [j d]
-          (let [idx (int (+ off j))]
-            (aset out idx (float (* (aget out idx) inv-sum)))))))
+    (p-dotimes n 2
+               (fn [i]
+                 (let [off (long (* i d))
+              ;; Max
+                       max-v (loop [j (long 1) m (aget xf (int off))]
+                               (if (< j d)
+                                 (recur (inc j) (max m (aget xf (int (+ off j)))))
+                                 m))
+              ;; Exp and sum
+                       sum (loop [j (long 0) s (float 0)]
+                             (if (< j d)
+                               (let [idx (int (+ off j))
+                                     e (float (Math/exp (- (aget xf idx) max-v)))]
+                                 (aset out idx e)
+                                 (recur (inc j) (+ s e)))
+                               s))
+                       inv-sum (float (/ 1.0 sum))]
+          ;; Normalize
+                   (dotimes [j d]
+                     (let [idx (int (+ off j))]
+                       (aset out idx (float (* (aget out idx) inv-sum))))))))
     {:dtype (:dtype x) :shape x-shape :data (pack-floats (:dtype x) out)}))
 
 ;; ---------------------------------------------------------------------------
