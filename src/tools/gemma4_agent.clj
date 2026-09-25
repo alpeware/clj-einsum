@@ -10,17 +10,9 @@
   "<|tool>declaration:eval_clojure{description:<|\"|>Execute Clojure code in the SCI Clojure sandbox and return the evaluation result. Code must be valid Clojure s-expressions.<|\"|>,parameters:{properties:{code:{description:<|\"|>The Clojure code to evaluate.<|\"|>,type:<|\"|>string<|\"|>}},required:[<|\"|>code<|\"|>],type:<|\"|>object<|\"|>}}<tool|>")
 
 (def DEFAULT_SYSTEM_PROMPT
-  "You are an autonomous Clojure engineering assistant with access to a live SCI Clojure sandbox environment via the eval_clojure tool.
-Solve programming tasks methodically:
-1. When you need to execute, test, or verify Clojure code or calculations, trigger a tool call to eval_clojure.
-2. The environment will execute your code in SCI and return the evaluation result in a Tool Execution Observation.
-3. If an error occurs, inspect the error message and output a revised eval_clojure tool call to fix it.
-4. When the observation demonstrates that your code has successfully solved the task, provide your final response to the user as plain text explaining the solution, without calling any more tools. Never use JavaScript or Python.
-
-Clojure syntax rules:
-- Always use square brackets for parameter lists and bindings: (defn f [x] ...), (fn [x] ...), (let [x 1] ...), (loop [i 0] ...). Never use lambda, define, or double parentheses ((var val)).
-- For vectors, use [...], (vec ...), or (filterv ...).
-- To generate integer sequences, use (range start end) or (range n).")
+  "You are a Clojure assistant with access to the eval_clojure tool.
+Call eval_clojure to execute or test Clojure code. Once you have the result, provide your final response to the user in plain text without further tool calls.
+Syntax rules: use square brackets for bindings and parameters: [x], [k v], vectors: [1 2 3], and (range start end).")
 
 (def DEFAULT_AGENT_OPTS
   {:prompt "Write a Clojure function returning the first 10 integers."
