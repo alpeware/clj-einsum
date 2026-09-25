@@ -782,6 +782,10 @@
     true
     (catch Throwable _ false)))
 
+(def ^:private simd-sgemm-fn
+  (when simd-available?
+    (resolve 'einsum.logic.interpret-simd/simd-sgemm!)))
+
 (defn p-dotimes
   "Executes (f i) for i in 0..(n-1) in parallel using ForkJoinPool when n >= min-chunk.
    Runs sequentially with zero overhead when n < min-chunk or *parallel-enabled?* is false."
@@ -824,8 +828,8 @@
   ([^floats C ^floats A ^floats B M N K]
    (sgemm! C 0 A 0 B 0 M N K))
   ([^floats C coff ^floats A aoff ^floats B boff M N K]
-   (if (and simd-available? (not *force-scalar?*))
-     ((resolve 'einsum.logic.interpret-simd/simd-sgemm!) C coff A aoff B boff M N K)
+   (if (and simd-sgemm-fn (not *force-scalar?*))
+     (simd-sgemm-fn C coff A aoff B boff M N K)
      (scalar-sgemm! C coff A aoff B boff M N K))))
 
 (defn- permute-axes

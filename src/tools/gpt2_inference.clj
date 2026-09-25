@@ -82,7 +82,9 @@
                   pos-array (int-array (range max-seq-len))
                   pos-buf (xla/device-buffer session-arena pos-array [1 max-seq-len] :i32)]
 
-              (println "Successfully compiled model to native XLA PjRtLoadedExecutable handle.")
+              (if (= :interpreter (:backend ctx))
+                (println "Successfully lowered model for Pure-JVM Interpreter execution.")
+                (println (format "Successfully compiled model to native XLA [%s] executable handle." (name (or (:backend ctx) :cpu)))))
               (println "\nGenerating tokens autoregressively...")
               (print prompt)
               (flush)

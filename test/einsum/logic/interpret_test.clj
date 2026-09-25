@@ -385,3 +385,16 @@
           (let [row-sum (reduce + (map #(aget sm-floats (+ (* r 8) %)) (range 8)))]
             (is (< (Math/abs (- 1.0 row-sum)) 1e-5))))))))
 
+(deftest test-shared-parallel-enabled-var
+  (testing "*parallel-enabled?* dynamically controls parallelism in both interpret and interpret-simd"
+    (when interp/simd-available?
+      (let [simd-ns (find-ns 'einsum.logic.interpret-simd)
+            simd-var (ns-resolve simd-ns '*parallel-enabled?*)]
+        ;; Assert both namespaces resolve to the exact same Var object
+        (is (identical? #'interp/*parallel-enabled?* simd-var))
+        ;; Assert dynamic binding in interpret propagates to interpret-simd
+        (is (true? @simd-var))
+        (binding [interp/*parallel-enabled?* false]
+          (is (false? @simd-var)))))))
+
+

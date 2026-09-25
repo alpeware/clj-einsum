@@ -1,6 +1,7 @@
 (ns einsum.logic.interpret-simd
   "Panama Vector API (jdk.incubator.vector) accelerated SGEMM kernel for pure-JVM StableHLO.
    Requires --add-modules=jdk.incubator.vector at JVM launch."
+  (:require [einsum.logic.interpret :refer [*parallel-enabled?*]])
   (:import [java.util Arrays]
            [java.util.function IntConsumer]
            [java.util.stream IntStream]
@@ -14,8 +15,6 @@
 (def ^:private simd-vl (long (.length simd-species)))
 (def ^:private simd-jb (* 4 simd-vl))
 (def ^:private simd-kb 128)
-
-(def ^:dynamic *parallel-enabled?* true)
 
 (defn- p-for-range
   "Runs (f i) for i in 0..(n-1) in parallel using ForkJoinPool when parallel? is true and n >= min-chunk."
