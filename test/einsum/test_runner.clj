@@ -3,6 +3,7 @@
   (:require [einsum.agent-test]
             [einsum.compiler.autodiff-test]
             [einsum.compiler.compile-test]
+            [einsum.compiler.fuse-test]
             [einsum.compiler.kernel-test]
             [einsum.compiler.pjrt-test]
             [einsum.compiler.pjrt-version-test]
@@ -26,6 +27,8 @@
             [einsum.logic.exl3-test]
             [einsum.logic.expand-test]
             [einsum.logic.index-test]
+            [einsum.logic.interpret-test]
+            [einsum.logic.interpret-diff-test]
             [einsum.logic.lower-test]
             [einsum.logic.memory.anchored-memory-test]
             [einsum.logic.memory.camp-test]
@@ -89,8 +92,10 @@
 (def fast-namespaces
   "Pure, fast unit and generative property tests with zero hardware dependencies (<3s)."
   ['einsum.compiler.stablehlo-test
+   'einsum.compiler.fuse-test
    'einsum.compiler.kernel-test
    'einsum.compiler.pjrt-version-test
+   'einsum.logic.interpret-test
    'einsum.test-helpers.generators-test
    'einsum.test-helpers.parity-test
    'einsum.test-helpers.telemetry-test
@@ -122,6 +127,7 @@
    'einsum.logic.dce-test
    'einsum.logic.expand-test
    'einsum.logic.index-test
+   'einsum.logic.interpret-test
    'einsum.logic.lower-test
    'einsum.logic.nn-test
    'einsum.logic.quip-test
@@ -169,6 +175,7 @@
    'einsum.compiler.compile-test
    'einsum.compiler.autodiff-test
    'einsum.hardware-test
+   'einsum.logic.interpret-diff-test
    'einsum.runtime.c2c-test
    'einsum.runtime.benchmark.workloads-test
    'einsum.runtime.benchmark.runner-test
