@@ -23,6 +23,59 @@
       (is (= :error (:status res)))
       (is (str/includes? (:output res) "cannot be cast to")))))
 
+(deftest test-extract-tool-call
+  (testing "Extracting native Gemma 4 tool call with <|\"|> string delimiter"
+    (let [text "<|tool_call>call:eval_clojure{code:<|\"|>(+ 10 20)<|\"|>}<tool_call|>"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(+ 10 20)" (:code tc)))))
+
+  (testing "Extracting tool call with standard quotes"
+    (let [text "<|tool_call>call:eval_clojure{code:\"(range 10)\"}<tool_call|>"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(range 10)" (:code tc)))))
+
+  (testing "Extracting tool call with bare s-expression"
+    (let [text "<|tool_call>call:eval_clojure{(println \"hello\")}<tool_call|>"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(println \"hello\")" (:code tc)))))
+
+  (testing "Extracting tool call when stopped at EOF without closing token"
+    (let [text "<|tool_call>call:eval_clojure{code:<|\"|>(mapv inc [1 2 3])<|\"|>}"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(mapv inc [1 2 3])" (:code tc)))))
+
+  (testing "Extracting tool call with thinking trace present"
+    (let [text "<|channel>thought\nWe should compute 2+2.\n<channel|>\n<|tool_call>call:eval_clojure{code:<|\"|>(+ 2 2)<|\"|>}<tool_call|>"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(+ 2 2)" (:code tc)))))
+
+  (testing "Returns nil when response is plain text without a tool call"
+    (let [text "The sum of 10 and 20 is 30. You can also write (+ 10 20)."]
+      (is (nil? (agent/extract-tool-call text)))))
+
+  (testing "Returns nil when response has markdown code block but no tool call tag"
+    (let [text "Here is the solution:\n```clojure\n(defn square [x] (* x x))\n```\nEnjoy!"]
+      (is (nil? (agent/extract-tool-call text))))))
+
+(deftest test-format-tool-response
+  (testing "Formatting success execution result with native tool response tokens"
+    (let [res {:status :success :output "30"}
+          resp (agent/format-tool-response "eval_clojure" res)]
+      (is (str/starts-with? resp "<|tool_response>response:eval_clojure{output:<|\"|>"))
+      (is (str/includes? resp "30"))
+      (is (str/ends-with? resp "<|\"|>}<tool_response|>"))))
+
+  (testing "Formatting error execution result"
+    (let [res {:status :error :output "Execution Exception: Divide by zero"}
+          resp (agent/format-tool-response "eval_clojure" res)]
+      (is (str/includes? resp "Divide by zero"))
+      (is (str/ends-with? resp "<|\"|>}<tool_response|>")))))
+
 (deftest test-eval-tool-code-success
   (testing "Evaluating math expressions in SCI sandbox"
     (let [sci-ctx (agent/create-agent-sci-ctx)
@@ -133,7 +186,23 @@
           prompt (agent/format-agent-chat-prompt "" history 8 true)]
       (is (str/starts-with? prompt "<bos><|turn>system\n<|think|><turn|>\n"))
       (is (str/includes? prompt "<|turn>user\nCalculate 2+2<turn|>\n"))
-      (is (str/ends-with? prompt "<|turn>model\n")))))
+      (is (str/ends-with? prompt "<|turn>model\n"))))
+
+  (testing "Formatting prompt with tool call and tool response in history"
+    (let [history [{:role :user :content "Calculate 2+2"}
+                   {:role :model :content "<|tool_call>call:eval_clojure{code:\"(+ 2 2)\"}<tool_call|>"}
+                   {:role :tool :content "<|tool_response>response:eval_clojure{output:<|\"|>4<|\"|>}<tool_response|>"}]
+          prompt (agent/format-agent-chat-prompt "You are an assistant." history)]
+      (is (str/includes? prompt "<|turn>model\n<|tool_call>call:eval_clojure{code:\"(+ 2 2)\"}<tool_call|><|tool_response>response:eval_clojure{output:<|\"|>4<|\"|>}<tool_response|>"))
+      (is (not (str/includes? prompt "<turn|>\n<|turn>user\n<|tool_response>")))
+      (is (str/ends-with? prompt "<tool_response|>\n"))))
+
+  (testing "Formatting prompt consolidates tool declaration inside system turn"
+    (let [decl "<|tool>declaration:eval_clojure{...}<tool|>"
+          history [{:role :user :content "Hi"}]
+          prompt (agent/format-agent-chat-prompt "You are a bot." history 8 false decl)]
+      (is (str/starts-with? prompt "<bos><|turn>system\nYou are a bot.\n<|tool>declaration:eval_clojure{...}<tool|><turn|>\n"))
+      (is (not (str/starts-with? prompt "<bos><|tool>"))))))
 
 (defspec prop-format-agent-chat-prompt-invariants
   50
@@ -166,3 +235,19 @@
                        (= (str/trim response) (str/trim stripped))
                        (not (str/includes? stripped "<|channel>"))
                        (not (str/includes? stripped "<channel|>"))))))
+
+(defspec prop-extract-tool-call-roundtrip
+  50
+  (prop/for-all [a (gen/choose 1 1000)
+                 b (gen/choose 1 1000)]
+                (let [code (format "(+ %d %d)" a b)
+                      text (format "<|tool_call>call:eval_clojure{code:<|\"|>%s<|\"|>}<tool_call|>" code)
+                      tc (agent/extract-tool-call text)]
+                  (and (= "eval_clojure" (:name tc))
+                       (= code (:code tc))))))
+
+(defspec prop-plain-text-no-tool-call
+  50
+  (prop/for-all [text (gen/not-empty gen/string-alphanumeric)]
+                (nil? (agent/extract-tool-call text))))
+

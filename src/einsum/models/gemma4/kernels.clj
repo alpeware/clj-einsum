@@ -314,9 +314,15 @@
                   [:+ [:next_step] [:cur_step] [:c_one]]
                   [:constant [:eos_c] {:value 1 :type [:tensor [1] :i32] :shape [1]}]
                   [:constant [:eot_c] {:value 106 :type [:tensor [1] :i32] :shape [1]}]
+                  [:constant [:etc_c] {:value 49 :type [:tensor [1] :i32] :shape [1]}]
+                  [:constant [:str_c] {:value 50 :type [:tensor [1] :i32] :shape [1]}]
                   [:compare [:c_eos] [:next_tok] [:eos_c] {:direction "EQ"}]
                   [:compare [:c_eot] [:next_tok] [:eot_c] {:direction "EQ"}]
-                  [:or [:or_stop] [:c_eos] [:c_eot]]
+                  [:compare [:c_etc] [:next_tok] [:etc_c] {:direction "EQ"}]
+                  [:compare [:c_str] [:next_tok] [:str_c] {:direction "EQ"}]
+                  [:or [:or_stop_0] [:c_eos] [:c_eot]]
+                  [:or [:or_stop_1] [:c_etc] [:c_str]]
+                  [:or [:or_stop] [:or_stop_0] [:or_stop_1]]
                   [:reshape [:is_stop] [:or_stop] {:shape []}]]
 
         init-loop-args (into [:init_step :max_step :init_tokens :false_c] kv-init-names)
