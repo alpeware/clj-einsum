@@ -136,4 +136,12 @@
           store (weights/create-weight-store header {})]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo
                             #"Failed to load device buffers for 1 weights"
-                            (weights/load-device-buffers! store [:w1 :missing_w]))))))
+                            (weights/load-device-buffers! store [:w1 :missing_w])))
+      (try
+        (weights/load-device-buffers! store [:w1 :missing_w])
+        (is false "Expected ExceptionInfo to be thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (let [d (ex-data e)]
+            (is (= 1 (:failed-count d)))
+            (is (= [:missing_w] (:failed-keys d)))
+            (is (nil? (:store d)))))))))

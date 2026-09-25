@@ -106,7 +106,8 @@
             (normalize-header-entry v))))))
 
 (defn get-device-buffer
-  "Retrieves or lazily loads and transfers device buffer for tensor key `k` into `store`'s arena.
+  "Retrieves existing buffer or lazily transfers tensor key `k` into `store`'s arena.
+   Caller-supplied MemorySegments in source maps are returned as-is without arena tracking.
    Caches the device buffer in `@(:device-buffers store)`."
   [store k]
   (when (weight-store? store)
@@ -189,8 +190,8 @@
        (throw (ex-info (str "Failed to load device buffers for " (count failures) " weights: "
                             (vec (map :key failures)))
                        {:failed-count (count failures)
-                        :failures failures
-                        :store store})))
+                        :failed-keys (vec (map :key failures))
+                        :failures failures})))
      store)))
 
 (defn infer-invars
