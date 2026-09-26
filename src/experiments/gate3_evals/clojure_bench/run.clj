@@ -94,7 +94,7 @@
 
 (defn run-single-shot-task
   "Runs single-shot Clojure generation:
-   Generates once, extracts balanced s-expression, grades against sealed tests in clean SCI sandbox."
+   Generates once, extracts candidate code, grades against sealed tests in clean SCI sandbox."
   [session task hidden-tests sealed-sha opts]
   (let [{:keys [dry-run quiet]} opts
         task-id (:id task)
@@ -114,18 +114,19 @@
          {:model model-name
           :task task-id
           :mode :single-shot
-          :passed? (:all-passed? grade-res)
+          :candidate-code mock-code
+          :grade-res grade-res
           :n-submissions 1
           :tokens-in 120
           :tokens-out 45
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
-          :stop-reason :complete}))
+          :dry-run? true}))
 
       ;; Actual model inference
       (let [chat-prompt (agent/format-agent-chat-prompt
-                         agent/DEFAULT_SYSTEM_PROMPT
+                         bench-core/SINGLE-SHOT-SYSTEM-PROMPT
                          [{:role :user :content prompt}]
                          8
                          (boolean (:thinking opts))
@@ -135,31 +136,35 @@
             gen-text (:text gen-res)
             prompt-tokens (long (or (:prompt-tokens gen-res) 0))
             new-tokens (long (or (:new-tokens gen-res) 0))
-            blocks (agent/extract-clojure-code-blocks gen-text)
-            candidate-code (or (first (filter #(bench-core/submission-form? % fn-name) blocks))
-                               (first blocks)
-                               (agent/extract-balanced-sexpr (agent/strip-thinking-trace gen-text)))
+            candidate-code (bench-core/extract-candidate-code gen-text fn-name)
             grade-res (if (seq candidate-code)
                         (bench-core/grade-submission candidate-code hidden-tests)
-                        {:all-passed? false :passed-count 0 :total-count (count hidden-tests) :error "No code extracted"})]
+                        {:all-passed? false :passed-count 0 :total-count (count hidden-tests) :error "No code extracted"})
+            error-msg (when-not (seq candidate-code) "No Clojure code extracted from model generation")]
         (when-not quiet
           (println (format "  ↳ Result: %s (Pass: %d/%d, %.1f ms)"
                            (if (:all-passed? grade-res) "PASS" "FAIL")
                            (:passed-count grade-res)
                            (:total-count grade-res)
-                           wall-ms)))
+                           wall-ms))
+          (when-not (:all-passed? grade-res)
+            (if candidate-code
+              (println (format "    ↳ Candidate Code: %s" (str/replace candidate-code #"\n" " ")))
+              (println "    ↳ No candidate code extracted."))))
         (bench-core/format-results-row
          {:model model-name
           :task task-id
           :mode :single-shot
-          :passed? (:all-passed? grade-res)
+          :candidate-code candidate-code
+          :grade-res grade-res
+          :error error-msg
           :n-submissions 1
           :tokens-in prompt-tokens
           :tokens-out new-tokens
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
-          :stop-reason (if (:all-passed? grade-res) :complete :test-failure)})))))
+          :dry-run? false})))))
 
 (defn run-agentic-task
   "Runs agentic evaluation with eval_clojure tool and submission hook:
@@ -188,24 +193,26 @@
          {:model model-name
           :task task-id
           :mode :agentic
-          :passed? (:all-passed? hidden-res)
+          :candidate-code (:code best-sub)
+          :grade-res hidden-res
           :n-submissions (count @submissions)
           :tokens-in 240
           :tokens-out 90
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
-          :stop-reason :passed-all}))
+          :dry-run? true}))
 
       ;; Actual agentic loop execution
       (let [submission-tool-hook
             (fn [sci-ctx tool-code]
               (let [eval-res (agent/eval-tool-code sci-ctx tool-code)
-                    is-sub? (bench-core/submission-form? tool-code fn-name)]
+                    candidate (bench-core/extract-candidate-code tool-code fn-name)
+                    is-sub? (and (seq candidate) (bench-core/submission-form? candidate fn-name))]
                 (if is-sub?
-                  (let [pub-res (bench-core/grade-submission sci-ctx tool-code (:public-tests task))
+                  (let [pub-res (bench-core/grade-submission sci-ctx candidate (:public-tests task))
                         feedback (bench-core/format-public-feedback pub-res)]
-                    (swap! submissions conj {:code tool-code :public-res pub-res})
+                    (swap! submissions conj {:code candidate :public-res pub-res})
                     (update eval-res :output #(str % "\n" feedback)))
                   eval-res)))
 
@@ -223,17 +230,17 @@
             ;; Fallback if agent provided code in response text rather than tool call
             _ (when (empty? @submissions)
                 (let [last-text (or (:content (last transcript)) "")
-                      blocks (agent/extract-clojure-code-blocks last-text)
-                      candidate (or (first (filter #(bench-core/submission-form? % fn-name) blocks))
-                                    (first blocks))]
-                  (when (seq candidate)
+                      candidate (bench-core/extract-candidate-code last-text fn-name)]
+                  (when (and (seq candidate) (bench-core/submission-form? candidate fn-name))
                     (let [pub-res (bench-core/grade-submission candidate (:public-tests task))]
                       (swap! submissions conj {:code candidate :public-res pub-res})))))
 
             best-sub (bench-core/pick-best-public-submission @submissions)
-            hidden-res (if best-sub
-                         (bench-core/grade-submission (:code best-sub) hidden-tests)
-                         {:all-passed? false :passed-count 0 :total-count (count hidden-tests) :error "No submission found"})]
+            candidate-code (:code best-sub)
+            hidden-res (if (seq candidate-code)
+                         (bench-core/grade-submission candidate-code hidden-tests)
+                         {:all-passed? false :passed-count 0 :total-count (count hidden-tests) :error "No submission found"})
+            error-msg (when-not (seq candidate-code) "No candidate submission found during agent loop")]
 
         (when-not quiet
           (println (format "  ↳ Result: %s (Pass: %d/%d, %d submissions, %.1f ms)"
@@ -241,22 +248,25 @@
                            (:passed-count hidden-res)
                            (:total-count hidden-res)
                            (count @submissions)
-                           wall-ms)))
+                           wall-ms))
+          (when-not (:all-passed? hidden-res)
+            (if candidate-code
+              (println (format "    ↳ Best Candidate: %s" (str/replace candidate-code #"\n" " ")))
+              (println "    ↳ No candidate submission found."))))
         (bench-core/format-results-row
          {:model model-name
           :task task-id
           :mode :agentic
-          :passed? (:all-passed? hidden-res)
+          :candidate-code candidate-code
+          :grade-res hidden-res
+          :error error-msg
           :n-submissions (count @submissions)
           :tokens-in total-in
           :tokens-out total-out
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
-          :stop-reason (cond
-                         (:all-passed? hidden-res) :passed-all
-                         (seq @submissions) :test-failure
-                         :else :no-submission)})))))
+          :dry-run? false})))))
 
 ;; =============================================================================
 ;; 4. Benchmark Orchestration & Reporting
@@ -273,10 +283,18 @@
 (defn run-benchmark
   "Executes the clojure_bench evaluation suite across specified tasks and modes."
   [opts]
-  (let [public-file (io/file (:public-tasks-file opts))
+  (let [dry-run? (boolean (:dry-run opts))
+        results-path (if (and dry-run? (= (:results-file opts) (:results-file DEFAULT-BENCH-OPTS)))
+                       "resources/proposals/gate3_evals/clojure_bench/results_dry_run.edn"
+                       (:results-file opts))
+        summary-path (if (and dry-run? (= (:summary-file opts) (:summary-file DEFAULT-BENCH-OPTS)))
+                       "resources/proposals/gate3_evals/clojure_bench/summary_dry_run.csv"
+                       (:summary-file opts))
+        opts (assoc opts :results-file results-path :summary-file summary-path)
+        public-file (io/file (:public-tasks-file opts))
         sealed-file (io/file (:sealed-tasks-file opts))
-        results-file (io/file (:results-file opts))
-        summary-file (io/file (:summary-file opts))
+        results-file (io/file results-path)
+        summary-file (io/file summary-path)
 
         _ (when-not (.exists public-file)
             (throw (IllegalArgumentException. (str "Public tasks file not found: " public-file))))
@@ -298,7 +316,7 @@
             (println (format "Sealed SHA-256       : %s" sealed-sha))
             (println (format "Evaluation Mode      : %s" run-mode))
             (println (format "Selected Tasks       : %d/%d" (count selected-tasks) (count public-tasks)))
-            (println (format "Dry Run Mode         : %s" (boolean (:dry-run opts))))
+            (println (format "Dry Run Mode         : %s" dry-run?))
             (println (format "Results File         : %s" (.getPath results-file)))
             (println (format "Summary File         : %s" (.getPath summary-file)))
             (println "=================================================="))
@@ -327,18 +345,24 @@
         (when (and (not (:dry-run opts)) (map? session))
           (try (gemma4-inf/close-agent-session! session) (catch Throwable _ nil)))))
 
-    ;; Summarize metrics and output CSV
-    (let [metrics (bench-core/calculate-metrics @all-results)
-          summary-csv (bench-core/format-summary-csv metrics)]
+    ;; Summarize cumulative metrics from results-file and output CSV
+    (let [cumulative-rows (bench-core/read-results-edn results-file)
+          metrics (bench-core/calculate-metrics cumulative-rows)
+          summary-csv (bench-core/format-summary-csv metrics)
+          run-metrics (bench-core/calculate-metrics @all-results)]
       (spit summary-file summary-csv)
       (when-not (:quiet opts)
         (println "\n==================================================")
         (println "=== clojure_bench Empirical Measurement Summary ==")
         (println "==================================================")
-        (println (format "Total Evaluations      : %d" (:total-evals metrics)))
-        (println (format "Total Passed           : %d" (:passed-evals metrics)))
-        (println (format "Mean Hidden Pass Rate  : %5.1f%%" (* 100.0 (:mean-hidden-pass-rate metrics))))
-        (println (format "Pass@1 Rate            : %5.1f%%" (* 100.0 (:pass-at-1 metrics))))
+        (println (format "This Run Evaluations   : %d" (:total-evals run-metrics)))
+        (println (format "This Run Passed        : %d" (:passed-evals run-metrics)))
+        (println (format "This Run Pass Rate     : %5.1f%%" (* 100.0 (:mean-hidden-pass-rate run-metrics))))
+        (println "--------------------------------------------------")
+        (println (format "Cumulative Evaluations : %d" (:total-evals metrics)))
+        (println (format "Cumulative Passed      : %d" (:passed-evals metrics)))
+        (println (format "Cumulative Pass Rate   : %5.1f%%" (* 100.0 (:mean-hidden-pass-rate metrics))))
+        (println (format "Cumulative Pass@1      : %5.1f%%" (* 100.0 (:pass-at-1 metrics))))
         (println (format "Median Submissions     : %5.2f" (:median-submissions metrics)))
         (println "--------------------------------------------------")
         (println (format "Single-Shot Pass Rate  : %5.1f%% (%d/%d)"
@@ -354,7 +378,7 @@
           (println (format "Delta Added by Loop    : %+5.1f%%" (* 100.0 delta))))
         (println "==================================================")
         (println (format "Saved results row(s) to [%s]" (.getPath results-file)))
-        (println (format "Saved summary metrics to [%s]" (.getPath summary-file))))
+        (println (format "Saved cumulative summary to [%s]" (.getPath summary-file))))
       metrics)))
 
 ;; =============================================================================

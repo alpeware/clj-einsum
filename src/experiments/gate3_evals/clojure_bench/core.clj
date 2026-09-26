@@ -3,8 +3,10 @@
    Provides prompt synthesis, submission detection, hermetic SCI sandbox grading,
    public test feedback formatting, best-submission selection, and telemetry metrics calculation."
   (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
-            [sci.core :as sci])
+            [sci.core :as sci]
+            [tools.gemma4-agent :as agent])
   (:import [java.io File]
            [java.security MessageDigest]))
 
@@ -64,6 +66,10 @@
 ;; 3. Prompt Synthesis
 ;; =============================================================================
 
+(def SINGLE-SHOT-SYSTEM-PROMPT
+  "You are an expert Clojure engineer. Implement the requested function or macro in pure, idiomatic Clojure.
+Output the complete definition in a ```clojure ... ``` code block without using tools or extra commentary.")
+
 (defn render-benchmark-prompt
   "Renders the formatted user prompt for a task, embedding public test examples.
    Never includes sealed/hidden tests to preserve evaluation integrity."
@@ -113,11 +119,43 @@
   [code-str fn-name]
   (let [target-name (name (or fn-name ""))
         top-syms (extract-top-level-symbols (or code-str ""))]
-    (if (some #(= % target-name) top-syms)
-      true
-      ;; Fallback regex in case of partial reader errors
-      (boolean (re-find (re-pattern (str "(?s)\\((?:defn|defmacro|def)\\s+" (java.util.regex.Pattern/quote target-name) "\\b"))
-                        (or code-str ""))))))
+    (cond
+      (some #(= % target-name) top-syms) true
+      (seq top-syms) false
+      ;; Fallback regex in case of partial reader errors on malformed forms
+      :else (boolean (re-find (re-pattern (str "(?s)\\((?:defn|defmacro|def)\\s+"
+                                               (java.util.regex.Pattern/quote target-name)
+                                               "(?![\\w\\-\\?\\!\\*\\+\\/])"))
+                              (or code-str ""))))))
+
+(defn extract-markdown-code-blocks
+  "Extracts all ```clojure ... ``` or ```clj ... ``` or bare ``` ... ``` code blocks from text."
+  [text]
+  (let [pattern #"(?s)```(?:clojure|clj)?\s*\n?(.*?)(?:```|$)"
+        raw-matches (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq pattern (or text "")))))]
+    (mapv (fn [block]
+            (-> block
+                (str/replace #"^```[a-z]*>?" "")
+                (str/replace #"```$" "")
+                str/trim))
+          raw-matches)))
+
+(defn extract-candidate-code
+  "Extracts candidate Clojure code for target `fn-name` from raw text.
+   Checks unwrapped tool calls, markdown code blocks, and raw s-expressions,
+   preferring forms that define or declare `fn-name`."
+  [text fn-name]
+  (let [target (name (or fn-name ""))
+        stripped (agent/strip-thinking-trace (or text ""))
+        tool-code (when-let [tc (agent/extract-tool-call stripped)]
+                    (:code tc))
+        blocks (extract-markdown-code-blocks stripped)
+        raw-sexpr (agent/extract-balanced-sexpr stripped)
+        candidates (vec (distinct (filter seq (concat (when tool-code [tool-code])
+                                                      blocks
+                                                      (when raw-sexpr [raw-sexpr])))))]
+    (or (first (filter #(submission-form? % target) candidates))
+        (first candidates))))
 
 ;; =============================================================================
 ;; 5. Hermetic Grading Engine
@@ -224,11 +262,13 @@
 (defn calculate-metrics
   "Computes summary metrics across a collection of evaluation rows."
   [rows]
-  (let [total-evals (count rows)
-        passed-evals (count (filter :passed? rows))
+  (let [real-rows (filterv #(not (:dry-run? %)) rows)
+        effective-rows (if (seq real-rows) real-rows (vec rows))
+        total-evals (count effective-rows)
+        passed-evals (count (filter :passed? effective-rows))
         mean-hidden-pass-rate (if (pos? total-evals) (double (/ passed-evals total-evals)) 0.0)
 
-        by-mode (group-by :mode rows)
+        by-mode (group-by :mode effective-rows)
         single-shot-rows (get by-mode :single-shot [])
         agentic-rows (get by-mode :agentic [])
 
@@ -281,19 +321,57 @@
      :by-task by-task}))
 
 (defn format-results-row
-  "Formats an individual task evaluation result map for results.edn."
-  [{:keys [model task mode passed? n-submissions tokens-in tokens-out wall-ms sealed-sha checkpoint-sha stop-reason]}]
-  {:model (str model)
-   :task (str task)
-   :mode (keyword mode)
-   :passed? (boolean passed?)
-   :n-submissions (long (or n-submissions 1))
-   :tokens-in (long (or tokens-in 0))
-   :tokens-out (long (or tokens-out 0))
-   :wall-ms (double (or wall-ms 0.0))
-   :sealed-sha (str sealed-sha)
-   :checkpoint-sha (str checkpoint-sha)
-   :stop-reason (keyword (or stop-reason :complete))})
+  "Formats an individual task evaluation result map for results.edn, persisting
+   rich diagnostics (candidate-code, error, test-summary, failure details, stop-reason)."
+  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out wall-ms sealed-sha checkpoint-sha dry-run?]}]
+  (let [all-passed? (boolean (:all-passed? grade-res))
+        has-error? (seq (or error (:error grade-res)))
+        err-msg (or error (:error grade-res))
+        has-candidate? (boolean (seq candidate-code))
+        raw-failures (when-not all-passed?
+                       (mapv (fn [{:keys [code expected actual error]}]
+                               (let [m {:code code
+                                        :expected (str expected)}]
+                                 (cond-> m
+                                   actual (assoc :actual (str actual))
+                                   error (assoc :error (str error)))))
+                             (filter #(not (:passed? %)) (or (:results grade-res) []))))
+        stop-reason (cond
+                      all-passed? :passed-all
+                      (not has-candidate?) :no-extraction
+                      (and has-error? (str/includes? (str err-msg) "Compilation/Execution Exception")) :compilation-error
+                      (and has-error? (not (seq raw-failures))) :error
+                      :else :test-failure)]
+    {:model (str model)
+     :task (str task)
+     :mode (keyword mode)
+     :passed? all-passed?
+     :n-submissions (long (or n-submissions 1))
+     :tokens-in (long (or tokens-in 0))
+     :tokens-out (long (or tokens-out 0))
+     :wall-ms (double (or wall-ms 0.0))
+     :sealed-sha (str sealed-sha)
+     :checkpoint-sha (str checkpoint-sha)
+     :stop-reason stop-reason
+     :dry-run? (boolean dry-run?)
+     :candidate-code candidate-code
+     :error err-msg
+     :test-summary {:passed (long (or (:passed-count grade-res) 0))
+                    :total (long (or (:total-count grade-res) 0))}
+     :failures (when (seq raw-failures) raw-failures)}))
+
+(defn read-results-edn
+  "Reads all EDN rows from results-file."
+  [results-file]
+  (let [f (io/file results-file)]
+    (if (.exists f)
+      (with-open [r (java.io.PushbackReader. (io/reader f))]
+        (loop [rows []]
+          (let [row (edn/read {:eof ::eof} r)]
+            (if (= row ::eof)
+              rows
+              (recur (conj rows row))))))
+      [])))
 
 (defn format-summary-csv
   "Formats summary metrics into a clean CSV string."

@@ -254,3 +254,117 @@
                        (= (count passed-flags) (:total-evals metrics))
                        (= pass-count (:passed-evals metrics))
                        (string? (bench-core/format-summary-csv metrics))))))
+
+(deftest test-extract-candidate-code
+  (testing "Unwraps native Gemma 4 tool call code into bare s-expression"
+    (let [text "<|tool_call>call:eval_clojure{code:<|\"|>(defn first-n [coll] (vec (take 10 coll)))<|\"|>}<tool_call|>"
+          code (bench-core/extract-candidate-code text "first-n")]
+      (is (= "(defn first-n [coll] (vec (take 10 coll)))" code))))
+
+  (testing "Unwraps markdown clojure code block"
+    (let [text "Here is my solution:\n```clojure\n(defn first-n [coll] (take 10 coll))\n```\nEnjoy!"
+          code (bench-core/extract-candidate-code text "first-n")]
+      (is (= "(defn first-n [coll] (take 10 coll))" code))))
+
+  (testing "Extracts raw s-expression matching target fn"
+    (let [text "Sure! (defn first-n [coll] (vec (take 10 coll))) is the function."
+          code (bench-core/extract-candidate-code text "first-n")]
+      (is (= "(defn first-n [coll] (vec (take 10 coll)))" code))))
+
+  (testing "Returns nil when no valid submission or code block exists"
+    (let [text "I don't know how to write Clojure."
+          code (bench-core/extract-candidate-code text "first-n")]
+      (is (nil? code)))))
+
+(deftest test-format-results-row-diagnostics
+  (testing "Formats diagnostic failure row with candidate-code, test-summary, and failure details"
+    (let [grade-res {:all-passed? false
+                     :passed-count 4
+                     :total-count 5
+                     :results [{:code "(vector? (first-n (range 100)))"
+                                :expected "true"
+                                :actual "false"
+                                :passed? false}]
+                     :error nil}
+          row (bench-core/format-results-row
+               {:model "gemma-4-E2B-it-int4"
+                :task "first-n"
+                :mode :single-shot
+                :candidate-code "(defn first-n [coll] (take 10 coll))"
+                :grade-res grade-res
+                :tokens-in 266
+                :tokens-out 512
+                :wall-ms 8229.7
+                :sealed-sha "dummy-sha"
+                :checkpoint-sha "dummy-cp"
+                :dry-run? false})]
+      (is (= :test-failure (:stop-reason row)))
+      (is (false? (:passed? row)))
+      (is (= "(defn first-n [coll] (take 10 coll))" (:candidate-code row)))
+      (is (= {:passed 4 :total 5} (:test-summary row)))
+      (is (= 1 (count (:failures row))))
+      (is (= "(vector? (first-n (range 100)))" (:code (first (:failures row)))))
+      (is (= "false" (:actual (first (:failures row)))))))
+
+  (testing "Formats no-extraction row with clear stop-reason and error"
+    (let [row (bench-core/format-results-row
+               {:model "gemma-4-E2B-it-int4"
+                :task "first-n"
+                :mode :single-shot
+                :candidate-code nil
+                :error "No Clojure code extracted from model generation"
+                :tokens-in 266
+                :tokens-out 512
+                :wall-ms 8000.0
+                :sealed-sha "dummy-sha"
+                :checkpoint-sha "dummy-cp"
+                :dry-run? false})]
+      (is (= :no-extraction (:stop-reason row)))
+      (is (false? (:passed? row)))
+      (is (nil? (:candidate-code row)))
+      (is (str/includes? (:error row) "No Clojure code extracted"))))
+
+  (testing "Formats compilation error row"
+    (let [grade-res {:all-passed? false
+                     :passed-count 0
+                     :total-count 5
+                     :results []
+                     :error "Compilation/Execution Exception: Unmatched delimiter )"}
+          row (bench-core/format-results-row
+               {:model "gemma-4-E2B-it-int4"
+                :task "first-n"
+                :mode :single-shot
+                :candidate-code "(defn first-n [coll] (take 10 coll)))"
+                :grade-res grade-res
+                :tokens-in 266
+                :tokens-out 512
+                :wall-ms 8000.0
+                :sealed-sha "dummy-sha"
+                :checkpoint-sha "dummy-cp"
+                :dry-run? false})]
+      (is (= :compilation-error (:stop-reason row)))
+      (is (str/includes? (:error row) "Unmatched delimiter"))))
+
+  (testing "Formats passing row with passed-all"
+    (let [grade-res {:all-passed? true
+                     :passed-count 5
+                     :total-count 5
+                     :results [{:code "(first-n [1])" :expected "[1]" :actual "[1]" :passed? true}]
+                     :error nil}
+          row (bench-core/format-results-row
+               {:model "gemma-4-E2B-it-int4"
+                :task "first-n"
+                :mode :single-shot
+                :candidate-code "(defn first-n [coll] (vec (take 10 coll)))"
+                :grade-res grade-res
+                :tokens-in 266
+                :tokens-out 512
+                :wall-ms 8000.0
+                :sealed-sha "dummy-sha"
+                :checkpoint-sha "dummy-cp"
+                :dry-run? false})]
+      (is (= :passed-all (:stop-reason row)))
+      (is (true? (:passed? row)))
+      (is (nil? (:failures row)))
+      (is (= {:passed 5 :total 5} (:test-summary row))))))
+
