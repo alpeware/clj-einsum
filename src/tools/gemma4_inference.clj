@@ -171,8 +171,12 @@
                      raw-ids
                      (vec (cons (bos-id tokenizer) raw-ids)))
         prompt-len (count prompt-ids)
-        final-context (generate-text session prompt)
-        new-ids (subvec (vec final-context) prompt-len)]
+        seq-len (long (or (:max-seq-len session) (get-in session [:config :max-seq-len]) 2048))
+        safe-prompt-len (min prompt-len (max 0 (- seq-len 2)))
+        final-context (vec (generate-text session prompt))
+        total-len (count final-context)
+        slice-start (min total-len safe-prompt-len)
+        new-ids (subvec final-context slice-start)]
     {:text (decode tokenizer new-ids)
      :prompt-tokens prompt-len
      :new-tokens (count new-ids)

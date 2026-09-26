@@ -492,6 +492,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 
              (if-not tool-call
                (if (and (< turn max-turns)
+                        (pos? new-tokens)
                         (:nudge-on-no-tool opts)
                         (not (some #(and (= (:role %) :user)
                                          (str/includes? (or (:content %) "") "Please test your Clojure implementation"))
