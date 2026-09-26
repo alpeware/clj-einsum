@@ -357,6 +357,53 @@
       (is (str/includes? obs-with-directive "Consecutive tool error limit (3) reached"))
       (is (str/includes? obs-with-directive "Tool execution is now disabled")))))
 
+(deftest test-format-agent-chat-prompt-pruning-thoughts-from-past-turns
+  (testing "Past model turns with closed thoughts have thoughts pruned from formatted prompt"
+    (let [history [{:role :user :content "Write (+ 1 2)"}
+                   {:role :model :content "<|channel>thought\nI will calculate 1+2.\n<channel|>\n<|tool_call>call:eval_clojure{code:<|\"|>(+ 1 2)<|\"|>}<tool_call|>"}
+                   {:role :tool :content "<|tool_response>response:eval_clojure{output:<|\"|>3<|\"|>}<tool_response|>"}
+                   {:role :user :content "Now multiply by 3"}]
+          prompt (agent/format-agent-chat-prompt "You are a Clojure assistant." history)]
+      (is (str/includes? prompt "<|tool_call>call:eval_clojure{code:<|\"|>(+ 1 2)<|\"|>}<tool_call|>"))
+      (is (not (str/includes? prompt "I will calculate 1+2.")))
+      (is (not (str/includes? prompt "<|channel>thought")))))
 
+  (testing "Past model turns with unclosed thoughts are sanitized and pruned"
+    (let [history [{:role :user :content "Do hard math"}
+                   {:role :model :content "<|channel>thought\nStill thinking endlessly and never closed..."}
+                   {:role :user :content "Please call eval_clojure"}]
+          prompt (agent/format-agent-chat-prompt "You are a Clojure assistant." history)]
+      (is (not (str/includes? prompt "Still thinking endlessly")))
+      (is (not (str/includes? prompt "<|channel>thought"))))))
 
+(deftest test-sanitize-history-model-content
+  (testing "Model reply with tool call returns compact raw tool call"
+    (let [tc {:name "eval_clojure" :code "(+ 1 2)" :raw "<|tool_call>call:eval_clojure{code:\"(+ 1 2)\"}<tool_call|>"}
+          res (agent/sanitize-history-model-content tc "" "<|channel>thought...<channel|><|tool_call>...")]
+      (is (= (:raw tc) res))))
 
+  (testing "Model reply with final response returns clean response without thoughts"
+    (let [res (agent/sanitize-history-model-content nil "The answer is 42." "<|channel>thought\nLet me think.\n<channel|>\nThe answer is 42.")]
+      (is (= "The answer is 42." res))))
+
+  (testing "Model reply with only truncated unclosed thought returns compact placeholder"
+    (let [truncated-raw "<|channel>thought\nThinking for 1536 tokens without closing..."
+          res (agent/sanitize-history-model-content nil "" truncated-raw)]
+      (is (not (str/includes? res "Thinking for 1536 tokens")))
+      (is (< (count res) 100)))))
+
+(defspec prop-format-agent-chat-prompt-prunes-past-thoughts
+  50
+  (prop/for-all [thought (gen/not-empty gen/string-alphanumeric)
+                 code (gen/not-empty gen/string-alphanumeric)]
+                (let [thought-str (str "THOUGHT_" thought)
+                      code-str (str "CODE_" code)
+                      model-turn (format "<|channel>thought\n%s\n<channel|>\n<|tool_call>call:eval_clojure{code:\"%s\"}<tool_call|>" thought-str code-str)
+                      history [{:role :user :content "Task"}
+                               {:role :model :content model-turn}
+                               {:role :tool :content "Result"}
+                               {:role :user :content "Next"}]
+                      prompt (agent/format-agent-chat-prompt "System" history)]
+                  (and (not (str/includes? prompt thought-str))
+                       (not (str/includes? prompt "<|channel>thought"))
+                       (str/includes? prompt code-str)))))

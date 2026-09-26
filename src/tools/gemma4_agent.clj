@@ -154,6 +154,22 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                 raw
                 (str raw "<tool_call|>"))}))))
 
+(defn sanitize-history-model-content
+  "Sanitizes model output before recording into conversation history.
+   Prioritizes tool calls, then stripped final responses.
+   When output consists solely of truncated, unclosed thoughts, substitutes a compact reminder
+   to prevent context window bloat and compounding prefill latency."
+  [tool-call final-response _model-reply]
+  (cond
+    tool-call
+    (:raw tool-call)
+
+    (and (string? final-response) (seq (str/trim final-response)))
+    (str/trim final-response)
+
+    :else
+    "[Incomplete generation: token limit reached without tool call]"))
+
 (defn format-tool-response
   "Formats the SCI execution result as a native Gemma 4 tool response observation."
   ([res]
@@ -338,7 +354,12 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                      (if (>= idx (count trimmed))
                        (.toString acc)
                        (let [{:keys [role content]} (nth trimmed idx)
-                             clean-content (str/trim (or content ""))
+                             clean-content (if (= role :model)
+                                             (let [stripped (strip-thinking-trace (or content ""))]
+                                               (if (seq (str/trim stripped))
+                                                 (str/trim stripped)
+                                                 "[Incomplete generation]"))
+                                             (str/trim (or content "")))
                              prev-role (when (pos? idx) (:role (nth trimmed (dec idx))))
                              next-role (when (< (inc idx) (count trimmed))
                                          (:role (nth trimmed (inc idx))))]
@@ -476,9 +497,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                (println thinking-trace)
                (println "--------------------------------------------------"))
 
-             (let [history-content (if tool-call
-                                     (:raw tool-call)
-                                     (if (seq final-response) final-response model-reply))]
+             (let [history-content (sanitize-history-model-content tool-call final-response model-reply)]
                (swap! history conj {:role :model :content history-content}))
 
              (swap! transcript conj {:turn turn
