@@ -36,6 +36,9 @@ elif [ "$1" = "train-catq" ] || [ "$1" = "--train-catq" ] || [ "$1" = "train-ter
 elif [ "$1" = "clj-bench" ] || [ "$1" = "--clj-bench" ] || [ "$1" = "clojure-bench" ]; then
   MODE="clj-bench"
   shift
+elif [ "$1" = "run" ] || [ "$1" = "--run" ] || [ "$1" = "exec" ]; then
+  MODE="run"
+  shift
 fi
 
 sleep 2
@@ -50,6 +53,8 @@ elif [ "$MODE" = "train-catq" ]; then
   exec clojure -M:tools -m tools.train-catq "$@"
 elif [ "$MODE" = "clj-bench" ]; then
   exec clojure -M:tools -m tools.clj-bench "$@"
+elif [ "$MODE" = "run" ]; then
+  exec clojure "$@"
 else
   exec clojure -M:tools -m tools.gemma4-inference "$@"
 fi
