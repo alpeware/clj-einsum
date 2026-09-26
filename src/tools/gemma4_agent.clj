@@ -470,7 +470,19 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
          history (atom [{:role :user :content initial-prompt}])
          transcript (atom [])
          turn-telemetry (atom [])
-         loop-start-t (System/nanoTime)]
+         loop-start-t (System/nanoTime)
+         scripted-atom (when-let [scripted (:scripted-responses opts)]
+                         (atom (vec scripted)))
+         gen-fn (or (:generate-fn opts)
+                    (when scripted-atom
+                      (fn [_sess _prompt]
+                        (let [resp (first @scripted-atom)]
+                          (when (seq @scripted-atom)
+                            (swap! scripted-atom subvec 1))
+                          (if (map? resp)
+                            resp
+                            {:text (or resp "") :prompt-tokens 10 :new-tokens 10}))))
+                    gemma4-inf/generate-new-tokens-and-text)]
      (loop [turn 1
             consecutive-errors 0]
        (if (> turn max-turns)
@@ -488,7 +500,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
            (let [formatted-prompt (format-agent-chat-prompt system @history 8 thinking? tool-decl)
                  _ (when-not quiet (println "Executing Gemma 4 Agent Forward Pass..."))
                  t-gen-0 (System/nanoTime)
-                 gen-res (gemma4-inf/generate-new-tokens-and-text session formatted-prompt)
+                 gen-res (gen-fn session formatted-prompt)
                  t-gen-1 (System/nanoTime)
                  gen-ms (/ (- t-gen-1 t-gen-0) 1e6)
                  new-gen (:text gen-res)
@@ -516,7 +528,8 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                                 model-reply)
                                      :thought thinking-trace
                                      :response final-response
-                                     :raw model-reply})
+                                     :raw model-reply
+                                     :tool-call tool-call})
 
              (if-not tool-call
                (if (and (< turn max-turns)
@@ -580,7 +593,12 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                            (println "--------------------------------------------------"))
                        t-tool-0 (System/nanoTime)
                        eval-res (if (seq tool-code)
-                                  (tool-eval sci-ctx tool-code)
+                                  (try
+                                    (tool-eval sci-ctx tool-code turn)
+                                    (catch clojure.lang.ArityException e
+                                      (if (= 3 (.actual e))
+                                        (tool-eval sci-ctx tool-code)
+                                        (throw e))))
                                   {:status :error :output "Error: No code provided to eval_clojure."})
                        t-tool-1 (System/nanoTime)
                        tool-ms (/ (- t-tool-1 t-tool-0) 1e6)

@@ -9,7 +9,8 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [experiments.gate3-evals.clojure-bench.core :as bench-core]))
+            [experiments.gate3-evals.clojure-bench.core :as bench-core]
+            [experiments.gate3-evals.clojure-bench.run :as bench-run]))
 
 ;; =============================================================================
 ;; 1. Verified Reference Solutions for all 10 Tasks
@@ -228,11 +229,61 @@
           best (bench-core/pick-best-public-submission [sub1 sub2 sub3])]
       (is (= (:code sub2) (:code best)))))
 
-  (testing "Falls back to last submission if pass counts are equal"
-    (let [sub1 {:code "(defn f [x] 1)" :public-res {:passed-count 1 :total-count 2}}
-          sub2 {:code "(defn f [x] 2)" :public-res {:passed-count 1 :total-count 2}}
+  (testing "Tie-breaks in favor of fewest turns (earliest submission) if pass counts are equal"
+    (let [sub1 {:code "(defn f [x] 1)" :public-res {:passed-count 1 :total-count 2} :turn 1}
+          sub2 {:code "(defn f [x] 2)" :public-res {:passed-count 1 :total-count 2} :turn 2}
           best (bench-core/pick-best-public-submission [sub1 sub2])]
-      (is (= (:code sub2) (:code best))))))
+      (is (= (:code sub1) (:code best))))))
+
+(deftest test-agentic-loop-ratchet-scripted-trajectory
+  (testing "Agentic loop ratchets to best submission: turn 1 passes 2/2 and turn 2 passes 1/2 -> turn 1 submission wins"
+    (let [task {:id "ratchet-test-task"
+                :fn-name 'ratchet-fn
+                :prompt "Write a function ratchet-fn that increments a number."
+                :public-tests [{:code "(ratchet-fn 1)" :expected "2"}
+                               {:code "(ratchet-fn 2)" :expected "3"}]}
+          hidden-tests [{:code "(ratchet-fn 3)" :expected "4"}
+                        {:code "(ratchet-fn 4)" :expected "5"}]
+          ;; Turn 1: passes 2/2 public tests (and hidden tests)
+          turn1-code "(defn ratchet-fn [x] (inc x))"
+          turn1-resp (format "<|tool_call>call:eval_clojure{code:<|\"|>%s<|\"|>}<tool_call|>" turn1-code)
+          ;; Turn 2: regresses, only passes 1/2 public tests
+          turn2-code "(defn ratchet-fn [x] (if (= x 1) 2 999))"
+          turn2-resp (format "<|tool_call>call:eval_clojure{code:<|\"|>%s<|\"|>}<tool_call|>" turn2-code)
+          ;; Turn 3: stops tool calls
+          turn3-resp "I am finished."
+          session {:opts {:max-turns 3
+                          :quiet true
+                          :scripted-responses [turn1-resp turn2-resp turn3-resp]}
+                   :model-dir "dummy-model"
+                   :checkpoint-sha "dummy-cp"}
+          opts {:quiet true :max-turns 3 :dry-run false}
+          row (bench-run/run-agentic-task session task hidden-tests "dummy-sha" opts)]
+      ;; The ratcheted candidate must be turn 1's 2/2 submission, NOT turn 2's 1/2 submission
+      (is (= turn1-code (:candidate-code row)))
+      (is (true? (:passed? row)))
+      (is (= {:passed 2 :total 2} (:test-summary row)))
+      (is (= 2 (:n-submissions row))))))
+
+(defspec prop-pick-best-public-submission-invariants 50
+  (prop/for-all [submissions-data (gen/not-empty
+                                   (gen/vector
+                                    (gen/tuple
+                                     gen/string-alphanumeric
+                                     (gen/choose 0 5)
+                                     (gen/choose 1 10))
+                                    1 15))]
+                (let [subs (mapv (fn [[code passed turn]]
+                                   {:code code
+                                    :public-res {:passed-count passed :total-count 5}
+                                    :turn turn})
+                                 submissions-data)
+                      best (bench-core/pick-best-public-submission subs)
+                      max-passed (apply max (map #(get-in % [:public-res :passed-count]) subs))
+                      top-candidates (filter #(= (get-in % [:public-res :passed-count]) max-passed) subs)
+                      min-turn (apply min (map :turn top-candidates))]
+                  (and (= max-passed (get-in best [:public-res :passed-count]))
+                       (= min-turn (:turn best))))))
 
 (defspec prop-metric-aggregation-invariants 50
   (prop/for-all [passed-flags (gen/vector gen/boolean 10)]

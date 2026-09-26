@@ -192,7 +192,7 @@
       ;; Dry run mode
       (let [mock-code (get MOCK-REFERENCE-SOLUTIONS task-id "(defn stub [x] x)")
             pub-res (bench-core/grade-submission mock-code (:public-tests task))
-            _ (swap! submissions conj {:code mock-code :public-res pub-res})
+            _ (swap! submissions conj {:code mock-code :public-res pub-res :turn 1})
             best-sub (bench-core/pick-best-public-submission @submissions)
             hidden-res (bench-core/grade-submission (:code best-sub) hidden-tests)
             wall-ms (/ (- (System/nanoTime) t0) 1e6)]
@@ -213,16 +213,19 @@
 
       ;; Actual agentic loop execution
       (let [submission-tool-hook
-            (fn [sci-ctx tool-code]
-              (let [eval-res (agent/eval-tool-code sci-ctx tool-code)
-                    candidate (bench-core/extract-candidate-code tool-code fn-name)
-                    is-sub? (and (seq candidate) (bench-core/submission-form? candidate fn-name))]
-                (if is-sub?
-                  (let [pub-res (bench-core/grade-submission sci-ctx candidate (:public-tests task))
-                        feedback (bench-core/format-public-feedback pub-res)]
-                    (swap! submissions conj {:code candidate :public-res pub-res})
-                    (update eval-res :output #(str % "\n" feedback)))
-                  eval-res)))
+            (fn submission-tool-hook
+              ([sci-ctx tool-code]
+               (submission-tool-hook sci-ctx tool-code (inc (count @submissions))))
+              ([sci-ctx tool-code turn]
+               (let [eval-res (agent/eval-tool-code sci-ctx tool-code)
+                     candidate (bench-core/extract-candidate-code tool-code fn-name)
+                     is-sub? (and (seq candidate) (bench-core/submission-form? candidate fn-name))]
+                 (if is-sub?
+                   (let [pub-res (bench-core/grade-submission sci-ctx candidate (:public-tests task))
+                         feedback (bench-core/format-public-feedback pub-res)]
+                     (swap! submissions conj {:code candidate :public-res pub-res :turn turn})
+                     (update eval-res :output #(str % "\n" feedback)))
+                   eval-res))))
 
             task-session (update session :opts assoc
                                  :sandbox :benchmark
@@ -235,13 +238,16 @@
             total-turn-ms (reduce + 0.0 (map #(double (or (:total-turn-ms %) 0.0)) telemetry))
             wall-ms (if (pos? total-turn-ms) total-turn-ms (/ (- (System/nanoTime) t0) 1e6))
 
-            ;; Fallback if agent provided code in response text rather than tool call
-            _ (when (empty? @submissions)
-                (let [last-text (or (:response (last transcript)) (:raw (last transcript)) (:content (last transcript)) "")
-                      candidate (bench-core/extract-candidate-code last-text fn-name)]
-                  (when (and (seq candidate) (bench-core/submission-form? candidate fn-name))
+            ;; Fallback / ratchet: extract and grade candidates from model turns in transcript if not already captured
+            _ (doseq [t transcript
+                      :when (= (:role t) :model)]
+                (let [text (or (:response t) (:raw t) (:content t) "")
+                      candidate (bench-core/extract-candidate-code text fn-name)]
+                  (when (and (seq candidate)
+                             (bench-core/submission-form? candidate fn-name)
+                             (not (some #(= (:code %) candidate) @submissions)))
                     (let [pub-res (bench-core/grade-submission candidate (:public-tests task))]
-                      (swap! submissions conj {:code candidate :public-res pub-res})))))
+                      (swap! submissions conj {:code candidate :public-res pub-res :turn (or (:turn t) 1)})))))
 
             best-sub (bench-core/pick-best-public-submission @submissions)
             candidate-code (:code best-sub)

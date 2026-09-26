@@ -308,20 +308,20 @@ Once your definition passes all public tests, provide your final response.")
 ;; =============================================================================
 
 (defn pick-best-public-submission
-  "Given a sequence of submission maps `[{:code ... :public-res ...}]`,
-   selects the candidate with the highest passed-count, breaking ties by later submission."
+  "Given a sequence of submission maps `[{:code ... :public-res ... :turn ...}]`,
+   selects the candidate with the highest passed-count, breaking ties by fewest turns (earliest submission)."
   [submissions]
   (when (seq submissions)
     (let [scored (map-indexed (fn [idx sub]
                                 (let [passed (long (get-in sub [:public-res :passed-count] 0))
-                                      total (long (get-in sub [:public-res :total-count] 1))
-                                      ratio (if (pos? total) (double (/ passed total)) 0.0)]
-                                  {:sub sub
+                                      turn (long (or (:turn sub) (inc idx)))]
+                                  {:sub (assoc sub :turn turn)
                                    :idx idx
                                    :passed passed
-                                   :ratio ratio}))
-                              submissions)]
-      (:sub (last (sort-by (juxt :ratio :passed :idx) scored))))))
+                                   :turn turn}))
+                              submissions)
+          sorted (sort-by (juxt (comp - :passed) :turn :idx) scored)]
+      (:sub (first sorted)))))
 
 ;; =============================================================================
 ;; 8. Metrics & Reporting
