@@ -486,27 +486,41 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                      :content (if (seq thinking-trace)
                                                 (str "[Thought Process]\n" thinking-trace "\n\n[Model Response]\n" final-response)
                                                 model-reply)
-                                     :thought thinking-trace})
+                                     :thought thinking-trace
+                                     :response final-response
+                                     :raw model-reply})
 
              (if-not tool-call
-               (do
-                 (swap! turn-telemetry conj {:turn turn
-                                             :prompt-tokens prompt-tokens
-                                             :new-tokens new-tokens
-                                             :tok-per-sec tok-per-sec
-                                             :model-ms gen-ms
-                                             :tool-ms 0.0
-                                             :total-turn-ms gen-ms})
-                 (when-not quiet
-                   (when (seq final-response)
-                     (println "\n[Agent Response]:")
-                     (println final-response))
-                   (println "\n[Agent] No further tool calls requested. Task completed!"))
-                 (print-and-save-telemetry! turn-telemetry loop-start-t quiet profile-out)
-                 (when (seq out)
-                   (spit out (str/join "\n\n" (map :content @transcript)))
-                   (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
-                 (with-meta @transcript {:turn-telemetry @turn-telemetry :history @history}))
+               (if (and (< turn max-turns)
+                        (:nudge-on-no-tool opts)
+                        (not (some #(and (= (:role %) :user)
+                                         (str/includes? (or (:content %) "") "Please test your Clojure implementation"))
+                                   @history))
+                        (zero? consecutive-errors))
+                 (let [nudge-msg (or (:nudge-prompt opts)
+                                     "Please test your Clojure implementation by calling the eval_clojure tool.")]
+                   (when-not quiet (println (format "\n[Agent Loop Nudge (Turn %d)]: Emitting tool reminder." turn)))
+                   (swap! history conj {:role :user :content nudge-msg})
+                   (swap! transcript conj {:turn turn :role :user :content nudge-msg})
+                   (recur (inc turn) consecutive-errors))
+                 (do
+                   (swap! turn-telemetry conj {:turn turn
+                                               :prompt-tokens prompt-tokens
+                                               :new-tokens new-tokens
+                                               :tok-per-sec tok-per-sec
+                                               :model-ms gen-ms
+                                               :tool-ms 0.0
+                                               :total-turn-ms gen-ms})
+                   (when-not quiet
+                     (when (seq final-response)
+                       (println "\n[Agent Response]:")
+                       (println final-response))
+                     (println "\n[Agent] No further tool calls requested. Task completed!"))
+                   (print-and-save-telemetry! turn-telemetry loop-start-t quiet profile-out)
+                   (when (seq out)
+                     (spit out (str/join "\n\n" (map :content @transcript)))
+                     (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
+                   (with-meta @transcript {:turn-telemetry @turn-telemetry :history @history})))
 
                (if (>= consecutive-errors consecutive-error-limit)
                  ;; Model attempted another tool call after error budget was exhausted

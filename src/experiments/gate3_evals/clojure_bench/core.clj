@@ -70,6 +70,11 @@
   "You are an expert Clojure engineer. Implement the requested function or macro in pure, idiomatic Clojure.
 Output the complete definition in a ```clojure ... ``` code block without using tools or extra commentary.")
 
+(def AGENT-SYSTEM-PROMPT
+  "You are an expert Clojure engineer with access to the eval_clojure tool.
+Always use eval_clojure to execute and test your function or macro definition against the public examples before providing your final answer.
+Once your definition passes all public tests, provide your final response.")
+
 (defn render-benchmark-prompt
   "Renders the formatted user prompt for a task, embedding public test examples.
    Never includes sealed/hidden tests to preserve evaluation integrity."
@@ -86,6 +91,35 @@ Output the complete definition in a ```clojure ... ``` code block without using 
 ;; =============================================================================
 ;; 4. Submission Detection
 ;; =============================================================================
+
+(defn sanitize-transcript-scaffolding
+  "Strips transcript formatting markers (e.g. [Thought Process], [Model Response], [Agent Response])
+   to avoid reader pollution."
+  [text]
+  (when (string? text)
+    (-> text
+        (str/replace #"(?s)\[Thought Process\].*?\[Model Response\]" "")
+        (str/replace #"\[(?:Thought Process|Model Response|Agent|Agent Response|System|User)\]" "")
+        str/trim)))
+
+(defn isolate-submission-forms
+  "Given candidate code string, extracts only the valid top-level s-expression forms,
+   dropping any non-form or trailing scaffolding tokens."
+  [code-str]
+  (when (string? code-str)
+    (let [reader-ctx (sci/init {})]
+      (try
+        (loop [reader (sci/source-reader code-str)
+               forms []]
+          (let [[form form-str] (try (sci/parse-next+string reader-ctx reader) (catch Throwable _ nil))]
+            (if (or (nil? form) (= form :sci.core/eof))
+              (if (seq forms) (str/join "\n\n" forms) code-str)
+              (if (and (seq? form) (symbol? (first form)))
+                (recur reader (conj forms form-str))
+                (if (seq forms)
+                  (str/join "\n\n" forms)
+                  (recur reader forms))))))
+        (catch Throwable _ code-str)))))
 
 (defn- extract-top-level-symbols
   "Extracts all top-level symbols defined or declared in Clojure code."
@@ -143,10 +177,12 @@ Output the complete definition in a ```clojure ... ``` code block without using 
 (defn extract-candidate-code
   "Extracts candidate Clojure code for target `fn-name` from raw text.
    Checks unwrapped tool calls, markdown code blocks, and raw s-expressions,
-   preferring forms that define or declare `fn-name`."
+   preferring forms that define or declare `fn-name`.
+   Returns nil if no candidate defining `fn-name` is found."
   [text fn-name]
   (let [target (name (or fn-name ""))
-        stripped (agent/strip-thinking-trace (or text ""))
+        clean-text (sanitize-transcript-scaffolding text)
+        stripped (agent/strip-thinking-trace (or clean-text ""))
         tool-code (when-let [tc (agent/extract-tool-call stripped)]
                     (:code tc))
         blocks (extract-markdown-code-blocks stripped)
@@ -154,20 +190,19 @@ Output the complete definition in a ```clojure ... ``` code block without using 
         candidates (vec (distinct (filter seq (concat (when tool-code [tool-code])
                                                       blocks
                                                       (when raw-sexpr [raw-sexpr])))))
-        best-stripped (or (first (filter #(submission-form? % target) candidates))
-                          (first candidates))]
-    (if (and best-stripped (submission-form? best-stripped target))
-      best-stripped
+        best-stripped (first (filter #(submission-form? % target) candidates))]
+    (if best-stripped
+      (isolate-submission-forms best-stripped)
       ;; Fallback to searching unstripped text if no matching submission found outside thinking
-      (let [fb-tool-code (when-let [tc (agent/extract-tool-call text)] (:code tc))
-            fb-blocks (extract-markdown-code-blocks text)
-            fb-sexpr (agent/extract-balanced-sexpr text)
+      (let [fb-tool-code (when-let [tc (agent/extract-tool-call clean-text)] (:code tc))
+            fb-blocks (extract-markdown-code-blocks clean-text)
+            fb-sexpr (agent/extract-balanced-sexpr clean-text)
             fb-candidates (vec (distinct (filter seq (concat (when fb-tool-code [fb-tool-code])
                                                              fb-blocks
-                                                             (when fb-sexpr [fb-sexpr])))))]
-        (or (first (filter #(submission-form? % target) fb-candidates))
-            best-stripped
-            (first fb-candidates))))))
+                                                             (when fb-sexpr [fb-sexpr])))))
+            best-fb (first (filter #(submission-form? % target) fb-candidates))]
+        (when best-fb
+          (isolate-submission-forms best-fb))))))
 
 ;; =============================================================================
 ;; 5. Hermetic Grading Engine
@@ -334,8 +369,8 @@ Output the complete definition in a ```clojure ... ``` code block without using 
 
 (defn format-results-row
   "Formats an individual task evaluation result map for results.edn, persisting
-   rich diagnostics (candidate-code, error, test-summary, failure details, stop-reason)."
-  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out wall-ms sealed-sha checkpoint-sha dry-run?]}]
+   rich diagnostics (candidate-code, error, test-summary, failure details, stop-reason, transcript on failure)."
+  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out wall-ms sealed-sha checkpoint-sha dry-run? transcript]}]
   (let [all-passed? (boolean (:all-passed? grade-res))
         has-error? (seq (or error (:error grade-res)))
         err-msg (or error (:error grade-res))
@@ -354,23 +389,25 @@ Output the complete definition in a ```clojure ... ``` code block without using 
                       (and has-error? (str/includes? (str err-msg) "Compilation/Execution Exception")) :compilation-error
                       (and has-error? (not (seq raw-failures))) :error
                       :else :test-failure)]
-    {:model (str model)
-     :task (str task)
-     :mode (keyword mode)
-     :passed? all-passed?
-     :n-submissions (long (or n-submissions 1))
-     :tokens-in (long (or tokens-in 0))
-     :tokens-out (long (or tokens-out 0))
-     :wall-ms (double (or wall-ms 0.0))
-     :sealed-sha (str sealed-sha)
-     :checkpoint-sha (str checkpoint-sha)
-     :stop-reason stop-reason
-     :dry-run? (boolean dry-run?)
-     :candidate-code candidate-code
-     :error err-msg
-     :test-summary {:passed (long (or (:passed-count grade-res) 0))
-                    :total (long (or (:total-count grade-res) 0))}
-     :failures (when (seq raw-failures) raw-failures)}))
+    (cond-> {:model (str model)
+             :task (str task)
+             :mode (keyword mode)
+             :passed? all-passed?
+             :n-submissions (long (or n-submissions 1))
+             :tokens-in (long (or tokens-in 0))
+             :tokens-out (long (or tokens-out 0))
+             :wall-ms (double (or wall-ms 0.0))
+             :sealed-sha (str sealed-sha)
+             :checkpoint-sha (str checkpoint-sha)
+             :stop-reason stop-reason
+             :dry-run? (boolean dry-run?)
+             :candidate-code candidate-code
+             :error err-msg
+             :test-summary {:passed (long (or (:passed-count grade-res) 0))
+                            :total (long (or (:total-count grade-res) 0))}
+             :failures (when (seq raw-failures) raw-failures)}
+      (and (not all-passed?) (seq transcript))
+      (assoc :transcript (vec transcript)))))
 
 (defn read-results-edn
   "Reads all EDN rows from results-file."

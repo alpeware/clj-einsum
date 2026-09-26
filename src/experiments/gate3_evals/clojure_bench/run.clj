@@ -19,14 +19,17 @@
    :backend :rocm
    :mode :all ;; :single-shot, :agentic, or :all
    :tasks "all"
+   :system bench-core/AGENT-SYSTEM-PROMPT
    :max-turns 5
    :max-consecutive-errors 3
-   :max-new-tokens 768
-   :max-seq-len 1024
+   :max-new-tokens 1536
+   :max-seq-len 2048
    :temperature 0.0
    :top-k 10
    :repetition-penalty 1.15
    :thinking true
+   :nudge-on-no-tool true
+   :overwrite false
    :dry-run false
    :quiet false
    :public-tasks-file "resources/proposals/gate3_evals/clojure_bench/tasks_public.edn"
@@ -229,7 +232,7 @@
 
             ;; Fallback if agent provided code in response text rather than tool call
             _ (when (empty? @submissions)
-                (let [last-text (or (:content (last transcript)) "")
+                (let [last-text (or (:response (last transcript)) (:raw (last transcript)) (:content (last transcript)) "")
                       candidate (bench-core/extract-candidate-code last-text fn-name)]
                   (when (and (seq candidate) (bench-core/submission-form? candidate fn-name))
                     (let [pub-res (bench-core/grade-submission candidate (:public-tests task))]
@@ -266,6 +269,7 @@
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
+          :transcript (vec transcript)
           :dry-run? false})))))
 
 ;; =============================================================================
@@ -320,6 +324,9 @@
             (println (format "Results File         : %s" (.getPath results-file)))
             (println (format "Summary File         : %s" (.getPath summary-file)))
             (println "=================================================="))
+
+        _ (when (:overwrite opts)
+            (spit results-file ""))
 
         session (init-benchmark-session opts)
         all-results (atom [])]
@@ -399,6 +406,8 @@
       (string? (:repetition-penalty opts)) (update :repetition-penalty #(Double/parseDouble %))
       (string? (:dry-run opts)) (update :dry-run #(Boolean/parseBoolean %))
       (string? (:thinking opts)) (update :thinking #(Boolean/parseBoolean %))
+      (string? (:overwrite opts)) (update :overwrite #(Boolean/parseBoolean %))
+      (string? (:nudge-on-no-tool opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
       (string? (:backend opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
       (string? (:mode opts)) (update :mode #(keyword (str/replace % #"^:+" ""))))))
 

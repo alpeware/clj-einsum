@@ -255,6 +255,28 @@
                        (= pass-count (:passed-evals metrics))
                        (string? (bench-core/format-summary-csv metrics))))))
 
+(deftest test-sanitize-transcript-scaffolding
+  (testing "Sanitizes transcript turn headers and thought process blocks"
+    (let [raw "[Thought Process]\nSome reasoning...\n\n[Model Response]\n(defn first-n [coll] (vec (take 10 coll)))"
+          cleaned (bench-core/sanitize-transcript-scaffolding raw)]
+      (is (= "(defn first-n [coll] (vec (take 10 coll)))" cleaned))))
+
+  (testing "Strips lone [Model Response] or [Agent Response] headers"
+    (let [raw "[Model Response]\n(defn first-n [coll] (vec (take 10 coll)))"
+          cleaned (bench-core/sanitize-transcript-scaffolding raw)]
+      (is (= "(defn first-n [coll] (vec (take 10 coll)))" cleaned)))))
+
+(deftest test-isolate-submission-forms
+  (testing "Isolates valid top-level definitions and drops trailing non-code or scaffolding"
+    (let [raw "(defmacro my-or [args]\n  (if (empty? args) nil (first args)))\n\n[Model Response]"
+          isolated (bench-core/isolate-submission-forms raw)]
+      (is (= "(defmacro my-or [args]\n  (if (empty? args) nil (first args)))" isolated))))
+
+  (testing "Preserves multiple valid top-level functions"
+    (let [raw "(defn helper [x] (inc x))\n\n(defn main-fn [x] (helper x))\n\n[Model Response]"
+          isolated (bench-core/isolate-submission-forms raw)]
+      (is (= "(defn helper [x] (inc x))\n\n(defn main-fn [x] (helper x))" isolated)))))
+
 (deftest test-extract-candidate-code
   (testing "Unwraps native Gemma 4 tool call code into bare s-expression"
     (let [text "<|tool_call>call:eval_clojure{code:<|\"|>(defn first-n [coll] (vec (take 10 coll)))<|\"|>}<tool_call|>"
@@ -271,13 +293,23 @@
           code (bench-core/extract-candidate-code text "first-n")]
       (is (= "(defn first-n [coll] (vec (take 10 coll)))" code))))
 
+  (testing "Isolates definition and discards unclosed markdown trailing scaffolding"
+    (let [text "```clojure\n(defmacro my-or [args]\n  (if (empty? args) nil (first args)))\n\n[Model Response]"
+          code (bench-core/extract-candidate-code text "my-or")]
+      (is (= "(defmacro my-or [args]\n  (if (empty? args) nil (first args)))" code))))
+
+  (testing "Returns nil when only non-defining s-expressions are found"
+    (let [text "In Clojure, or is a (short-circuiting logical OR) operator."
+          code (bench-core/extract-candidate-code text "my-or")]
+      (is (nil? code))))
+
   (testing "Returns nil when no valid submission or code block exists"
     (let [text "I don't know how to write Clojure."
           code (bench-core/extract-candidate-code text "first-n")]
       (is (nil? code)))))
 
 (deftest test-format-results-row-diagnostics
-  (testing "Formats diagnostic failure row with candidate-code, test-summary, and failure details"
+  (testing "Formats diagnostic failure row with candidate-code, test-summary, failure details, and transcript"
     (let [grade-res {:all-passed? false
                      :passed-count 4
                      :total-count 5
@@ -286,10 +318,11 @@
                                 :actual "false"
                                 :passed? false}]
                      :error nil}
+          transcript [{:turn 1 :role :model :content "(defn first-n [coll] (take 10 coll))"}]
           row (bench-core/format-results-row
                {:model "gemma-4-E2B-it-int4"
                 :task "first-n"
-                :mode :single-shot
+                :mode :agentic
                 :candidate-code "(defn first-n [coll] (take 10 coll))"
                 :grade-res grade-res
                 :tokens-in 266
@@ -297,6 +330,7 @@
                 :wall-ms 8229.7
                 :sealed-sha "dummy-sha"
                 :checkpoint-sha "dummy-cp"
+                :transcript transcript
                 :dry-run? false})]
       (is (= :test-failure (:stop-reason row)))
       (is (false? (:passed? row)))
@@ -304,7 +338,31 @@
       (is (= {:passed 4 :total 5} (:test-summary row)))
       (is (= 1 (count (:failures row))))
       (is (= "(vector? (first-n (range 100)))" (:code (first (:failures row)))))
-      (is (= "false" (:actual (first (:failures row)))))))
+      (is (= "false" (:actual (first (:failures row)))))
+      (is (= transcript (:transcript row)))))
+
+  (testing "Omits transcript on passing row"
+    (let [grade-res {:all-passed? true
+                     :passed-count 5
+                     :total-count 5
+                     :results [{:code "(first-n [1])" :expected "[1]" :actual "[1]" :passed? true}]
+                     :error nil}
+          row (bench-core/format-results-row
+               {:model "gemma-4-E2B-it-int4"
+                :task "first-n"
+                :mode :agentic
+                :candidate-code "(defn first-n [coll] (vec (take 10 coll)))"
+                :grade-res grade-res
+                :tokens-in 266
+                :tokens-out 512
+                :wall-ms 8000.0
+                :sealed-sha "dummy-sha"
+                :checkpoint-sha "dummy-cp"
+                :transcript [{:turn 1 :role :model :content "pass"}]
+                :dry-run? false})]
+      (is (= :passed-all (:stop-reason row)))
+      (is (true? (:passed? row)))
+      (is (nil? (:transcript row)))))
 
   (testing "Formats no-extraction row with clear stop-reason and error"
     (let [row (bench-core/format-results-row
