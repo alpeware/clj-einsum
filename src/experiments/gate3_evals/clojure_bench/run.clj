@@ -76,7 +76,9 @@
     {:opts opts
      :model-dir (:model opts)
      :checkpoint-sha "dry-run-checkpoint-sha"}
-    (let [model-dir (cli/find-model-dir (or (:model-dir opts) (:model opts)) :gemma-4)
+    (let [_ (when (= (keyword (:backend opts)) :rocm)
+              (Thread/sleep 3000))
+          model-dir (cli/find-model-dir (or (:model-dir opts) (:model opts)) :gemma-4)
           max-seq-len (long (or (:max-seq-len opts) 1024))
           checkpoint-sha (compute-checkpoint-hash model-dir)
           session-opts (assoc opts

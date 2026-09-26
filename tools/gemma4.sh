@@ -38,6 +38,8 @@ elif [ "$1" = "clj-bench" ] || [ "$1" = "--clj-bench" ] || [ "$1" = "clojure-ben
   shift
 fi
 
+sleep 2
+
 if [ "$MODE" = "agent" ]; then
   exec clojure -M:tools -m tools.gemma4-agent "$@"
 elif [ "$MODE" = "relational" ]; then
