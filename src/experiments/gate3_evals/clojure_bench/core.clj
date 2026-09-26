@@ -153,9 +153,21 @@ Output the complete definition in a ```clojure ... ``` code block without using 
         raw-sexpr (agent/extract-balanced-sexpr stripped)
         candidates (vec (distinct (filter seq (concat (when tool-code [tool-code])
                                                       blocks
-                                                      (when raw-sexpr [raw-sexpr])))))]
-    (or (first (filter #(submission-form? % target) candidates))
-        (first candidates))))
+                                                      (when raw-sexpr [raw-sexpr])))))
+        best-stripped (or (first (filter #(submission-form? % target) candidates))
+                          (first candidates))]
+    (if (and best-stripped (submission-form? best-stripped target))
+      best-stripped
+      ;; Fallback to searching unstripped text if no matching submission found outside thinking
+      (let [fb-tool-code (when-let [tc (agent/extract-tool-call text)] (:code tc))
+            fb-blocks (extract-markdown-code-blocks text)
+            fb-sexpr (agent/extract-balanced-sexpr text)
+            fb-candidates (vec (distinct (filter seq (concat (when fb-tool-code [fb-tool-code])
+                                                             fb-blocks
+                                                             (when fb-sexpr [fb-sexpr])))))]
+        (or (first (filter #(submission-form? % target) fb-candidates))
+            best-stripped
+            (first fb-candidates))))))
 
 ;; =============================================================================
 ;; 5. Hermetic Grading Engine

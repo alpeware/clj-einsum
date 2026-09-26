@@ -21,7 +21,7 @@
    :tasks "all"
    :max-turns 5
    :max-consecutive-errors 3
-   :max-new-tokens 512
+   :max-new-tokens 768
    :max-seq-len 1024
    :temperature 0.0
    :top-k 10
