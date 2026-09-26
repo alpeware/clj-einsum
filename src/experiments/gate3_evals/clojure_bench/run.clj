@@ -393,9 +393,12 @@
       (string? (:max-turns opts)) (update :max-turns #(Long/parseLong %))
       (string? (:max-consecutive-errors opts)) (update :max-consecutive-errors #(Long/parseLong %))
       (string? (:max-new-tokens opts)) (update :max-new-tokens #(Long/parseLong %))
+      (string? (:max-seq-len opts)) (update :max-seq-len #(Long/parseLong %))
       (string? (:temperature opts)) (update :temperature #(Double/parseDouble %))
       (string? (:top-k opts)) (update :top-k #(Long/parseLong %))
       (string? (:repetition-penalty opts)) (update :repetition-penalty #(Double/parseDouble %))
+      (string? (:dry-run opts)) (update :dry-run #(Boolean/parseBoolean %))
+      (string? (:thinking opts)) (update :thinking #(Boolean/parseBoolean %))
       (string? (:backend opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
       (string? (:mode opts)) (update :mode #(keyword (str/replace % #"^:+" ""))))))
 
