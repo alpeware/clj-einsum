@@ -40,23 +40,17 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 
 (defn- try-parse-sci-reader
   "Attempts to parse the first form from string `s` using SCI's reader.
-   If parsing fails due to EOF (e.g. truncated closing parens), tries appending closing parens."
+   Returns the string form if complete, or nil if incomplete or malformed.
+   Does not synthesize artificial closing parens on truncated code to avoid creating broken loops."
   [s]
   (try
     (second (sci/parse-next+string default-reader-ctx (sci/source-reader s)))
-    (catch Throwable _
-      (loop [depth 1]
-        (when (<= depth 8)
-          (if-let [res (try
-                         (second (sci/parse-next+string default-reader-ctx
-                                                        (sci/source-reader (str s (apply str (repeat depth ")"))))))
-                         (catch Throwable _ nil))]
-            res
-            (recur (inc depth))))))))
+    (catch Throwable _ nil)))
 
 (defn extract-balanced-sexpr
   "Finds the first balanced s-expression string starting with `(` in text using SCI's reader.
-   Correctly handles strings with parentheses and comments without naive paren counting."
+   Correctly handles strings with parentheses and comments without naive paren counting.
+   If a top-level definition form (defn, def, defmacro) is incomplete, returns nil to avoid extracting inner fragments."
   [text]
   (when (string? text)
     (loop [offset 0]
@@ -65,7 +59,9 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
           (let [candidate (subs text start)]
             (if-let [parsed (try-parse-sci-reader candidate)]
               parsed
-              (recur (inc start)))))))))
+              (if (re-find #"^\((?:defn|defn-|defmacro|def)\b" candidate)
+                nil
+                (recur (inc start))))))))))
 
 (defn extract-thinking-trace
   "Extracts reasoning thoughts from model output text.
@@ -261,20 +257,33 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                :free-mem (.freeMemory (Runtime/getRuntime))})}}))
 
 (defn eval-tool-code
-  "Evaluates `code-str` in the SCI sandbox and returns formatted execution result."
-  [sci-ctx code-str]
-  (try
-    (let [clean-code (str/trim code-str)
-          out-writer (java.io.StringWriter.)
-          eval-res (binding [*out* out-writer]
-                     (sci/eval-string* sci-ctx clean-code))
-          printed (str out-writer)
-          formatted-res (if (seq printed)
-                          (str printed "\n=> " (pr-str eval-res))
-                          (pr-str eval-res))]
-      {:status :success :output formatted-res})
-    (catch Throwable e
-      {:status :error :output (str "Execution Exception: " (.getMessage e) " -- Please output valid Clojure s-expressions.")})))
+  "Evaluates `code-str` in the SCI sandbox with an execution timeout guard and returns formatted execution result."
+  ([sci-ctx code-str]
+   (eval-tool-code sci-ctx code-str 5000))
+  ([sci-ctx code-str timeout-ms]
+   (try
+     (let [clean-code (str/trim code-str)
+           out-writer (java.io.StringWriter.)
+           limit (long (or timeout-ms 5000))
+           eval-fn (fn []
+                     (binding [*out* out-writer]
+                       (sci/eval-string* sci-ctx clean-code)))
+           f (future (try (eval-fn) (catch Throwable t t)))
+           res (deref f limit :timeout)]
+       (if (= res :timeout)
+         (do
+           (future-cancel f)
+           {:status :error
+            :output (format "Execution Exception: Tool evaluation timed out after %d ms (potential infinite loop)." limit)})
+         (if (instance? Throwable res)
+           (throw res)
+           (let [printed (str out-writer)
+                 formatted-res (if (seq printed)
+                                 (str printed "\n=> " (pr-str res))
+                                 (pr-str res))]
+             {:status :success :output formatted-res}))))
+     (catch Throwable e
+       {:status :error :output (str "Execution Exception: " (.getMessage e) " -- Please output valid Clojure s-expressions.")}))))
 
 (defn parse-agent-cli-args
   "Parses CLI flags for gemma4_agent."

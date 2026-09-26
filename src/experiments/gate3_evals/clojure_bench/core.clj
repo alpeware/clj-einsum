@@ -72,6 +72,7 @@ Output the complete definition in a ```clojure ... ``` code block without using 
 
 (def AGENT-SYSTEM-PROMPT
   "You are an expert Clojure engineer with access to the eval_clojure tool.
+Keep internal reasoning concise and emit the eval_clojure tool call promptly.
 Always use eval_clojure to execute and test your function or macro definition against the public examples before providing your final answer.
 Once your definition passes all public tests, provide your final response.")
 
@@ -208,6 +209,26 @@ Once your definition passes all public tests, provide your final response.")
 ;; 5. Hermetic Grading Engine
 ;; =============================================================================
 
+(defn eval-with-timeout
+  "Evaluates string `s` in `sci-ctx` with a timeout guard to prevent infinite loops."
+  ([sci-ctx s]
+   (eval-with-timeout sci-ctx s 5000))
+  ([sci-ctx s timeout-ms]
+   (let [limit (long (or timeout-ms 5000))
+         f (future
+             (try
+               (sci/eval-string* sci-ctx s)
+               (catch Throwable t t)))
+         res (deref f limit :timeout)]
+     (if (= res :timeout)
+       (do
+         (future-cancel f)
+         (throw (java.util.concurrent.TimeoutException.
+                 (format "Evaluation timed out after %d ms (potential infinite loop)" limit))))
+       (if (instance? Throwable res)
+         (throw res)
+         res)))))
+
 (defn grade-submission
   "Evaluates candidate `code-str` in a fresh tightened SCI context and executes `test-cases`.
    Each test case is a map `{:keys [code expected]}`.
@@ -224,13 +245,13 @@ Once your definition passes all public tests, provide your final response.")
         :results []
         :error "Empty candidate code"}
        (try
-         ;; 1. Evaluate candidate definition in the tightened context
-         (sci/eval-string* sci-ctx clean-code)
+         ;; 1. Evaluate candidate definition in the tightened context with timeout
+         (eval-with-timeout sci-ctx clean-code 5000)
 
-         ;; 2. Run each test case against the defined function
+         ;; 2. Run each test case against the defined function with timeout
          (let [results (mapv (fn [{:keys [code expected]}]
                                (try
-                                 (let [actual (sci/eval-string* sci-ctx code)
+                                 (let [actual (eval-with-timeout sci-ctx code 5000)
                                        expected-val (edn/read-string (str expected))
                                        passed? (= actual expected-val)]
                                    {:code code

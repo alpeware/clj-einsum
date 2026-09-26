@@ -104,7 +104,19 @@
     (let [sci-ctx (agent/create-agent-sci-ctx)
           res (agent/eval-tool-code sci-ctx "(/ 1 0)")]
       (is (= :error (:status res)))
-      (is (str/includes? (:output res) "Execution Exception")))))
+      (is (str/includes? (:output res) "Execution Exception"))))
+
+  (testing "Infinite loop in eval-tool-code triggers timeout error cleanly without hanging"
+    (let [sci-ctx (agent/create-agent-sci-ctx)
+          res (agent/eval-tool-code sci-ctx "(loop [x 0] (recur x))" 100)]
+      (is (= :error (:status res)))
+      (is (str/includes? (:output res) "timed out after 100 ms")))))
+
+(deftest test-try-parse-sci-reader-no-artificial-parens
+  (testing "Incomplete truncated forms return nil and do not synthesize infinite loops"
+    (let [incomplete "(defn my-range [x] (if (< x 5) (recur"
+          res (agent/extract-balanced-sexpr incomplete)]
+      (is (nil? res)))))
 
 (defspec prop-sci-arithmetic-eval-invariant
   50
