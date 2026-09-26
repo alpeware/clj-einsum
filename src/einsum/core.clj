@@ -6,6 +6,7 @@
             [einsum.compiler.fuse :as fuse]
             [einsum.compiler.kernel :as kernel]
             [einsum.compiler.pjrt :as pjrt]
+            [einsum.compiler.pjrt.custom-call :as custom-call]
             [einsum.compiler.pjrt.version :as v]
             [einsum.logic.interpret :as interpret]
             [einsum.runtime.arena :as arena]
@@ -215,6 +216,8 @@
                         :probe probe-info
                         :xla-flags flag-config)]
          (alter-var-root #'*default-context* (constantly ctx))
+         (when (= target :rocm)
+           (try (custom-call/register-w4a16-gemv-kernel! ctx) (catch Exception _ nil)))
          (when-not (or (Boolean/getBoolean "clj-xla.quiet") (:quiet? client-opts))
            (println (format "clj-xla initialized PJRT Backend: [%s] via plugin [%s]" pname lib-path))
            (when-not (str/blank? xla-flags)

@@ -191,53 +191,65 @@
   ([out-term x-term w-term is-int8? is-int4? scale-var norm-dtype attrs]
    (gemma4-linear-proj out-term x-term w-term is-int8? is-int4? false scale-var norm-dtype attrs))
   ([out-term x-term w-term is-int8? is-int4? is-ternary? scale-var norm-dtype attrs]
-   (cond
-     is-ternary?
-     (let [head-name (first out-term)
-           w-name (first w-term)
-           w-idxs (vec (rest w-term))
-           w-scaled (keyword (str (name w-name) "_scaled"))
-           scale-dim (first w-idxs)
-           quarter-in-dim (keyword (str (name (second w-idxs)) "_quarter"))
-           w-packed-term [w-name scale-dim quarter-in-dim]]
-       [:block {:name (keyword (str (name head-name) "_ternary_proj"))}
-        [:ternary-unpack (into [w-scaled] w-idxs) w-packed-term [scale-var scale-dim]]
-        (cond-> [:= out-term]
-          (seq attrs) (conj attrs)
-          :always (conj x-term (into [w-scaled] w-idxs)))])
+   (let [use-w4a16? (and is-int4? (:use-w4a16-gemv? attrs))
+         clean-attrs (dissoc attrs :use-w4a16-gemv?)]
+     (cond
+       is-ternary?
+       (let [head-name (first out-term)
+             w-name (first w-term)
+             w-idxs (vec (rest w-term))
+             w-scaled (keyword (str (name w-name) "_scaled"))
+             scale-dim (first w-idxs)
+             quarter-in-dim (keyword (str (name (second w-idxs)) "_quarter"))
+             w-packed-term [w-name scale-dim quarter-in-dim]]
+         [:block {:name (keyword (str (name head-name) "_ternary_proj"))}
+          [:ternary-unpack (into [w-scaled] w-idxs) w-packed-term [scale-var scale-dim]]
+          (cond-> [:= out-term]
+            (seq clean-attrs) (conj clean-attrs)
+            :always (conj x-term (into [w-scaled] w-idxs)))])
 
-     is-int4?
-     (let [head-name (first out-term)
-           w-name (first w-term)
-           w-idxs (vec (rest w-term))
-           w-scaled (keyword (str (name w-name) "_scaled"))
-           scale-dim (first w-idxs)
-           half-in-dim (keyword (str (name (second w-idxs)) "_half"))
-           w-packed-term [w-name scale-dim half-in-dim]]
-       [:block {:name (keyword (str (name head-name) "_int4_proj"))}
-        [:int4-unpack (into [w-scaled] w-idxs) w-packed-term [scale-var scale-dim]]
-        (cond-> [:= out-term]
-          (seq attrs) (conj attrs)
-          :always (conj x-term (into [w-scaled] w-idxs)))])
+       use-w4a16?
+       (let [head-name (first out-term)
+             w-name (first w-term)
+             w-idxs (vec (rest w-term))
+             out-dim (first w-idxs)
+             in-dim (second w-idxs)]
+         [:block {:name (keyword (str (name head-name) "_w4a16_proj"))}
+          (cond-> [:w4a16-gemv out-term x-term [w-name in-dim out-dim] [scale-var out-dim]]
+            (seq clean-attrs) (conj clean-attrs))])
 
-     is-int8?
-     (let [head-name (first out-term)
-           w-name (first w-term)
-           w-idxs (vec (rest w-term))
-           w-bf16 (keyword (str (name w-name) "_bf16"))
-           w-scaled (keyword (str (name w-name) "_scaled"))
-           scale-dim (first w-idxs)]
-       [:block {:name (keyword (str (name head-name) "_int8_proj"))}
-        [:convert (into [w-bf16] w-idxs) (into [w-name] w-idxs) {:target-dtype norm-dtype}]
-        [:= (into [w-scaled] w-idxs) (into [w-bf16] w-idxs) [scale-var scale-dim]]
-        (cond-> [:= out-term]
-          (seq attrs) (conj attrs)
-          :always (conj x-term (into [w-scaled] w-idxs)))])
+       is-int4?
+       (let [head-name (first out-term)
+             w-name (first w-term)
+             w-idxs (vec (rest w-term))
+             w-scaled (keyword (str (name w-name) "_scaled"))
+             scale-dim (first w-idxs)
+             half-in-dim (keyword (str (name (second w-idxs)) "_half"))
+             w-packed-term [w-name scale-dim half-in-dim]]
+         [:block {:name (keyword (str (name head-name) "_int4_proj"))}
+          [:int4-unpack (into [w-scaled] w-idxs) w-packed-term [scale-var scale-dim]]
+          (cond-> [:= out-term]
+            (seq clean-attrs) (conj clean-attrs)
+            :always (conj x-term (into [w-scaled] w-idxs)))])
 
-     :else
-     (cond-> [:= out-term]
-       (seq attrs) (conj attrs)
-       :always (conj x-term w-term)))))
+       is-int8?
+       (let [head-name (first out-term)
+             w-name (first w-term)
+             w-idxs (vec (rest w-term))
+             w-bf16 (keyword (str (name w-name) "_bf16"))
+             w-scaled (keyword (str (name w-name) "_scaled"))
+             scale-dim (first w-idxs)]
+         [:block {:name (keyword (str (name head-name) "_int8_proj"))}
+          [:convert (into [w-bf16] w-idxs) (into [w-name] w-idxs) {:target-dtype norm-dtype}]
+          [:= (into [w-scaled] w-idxs) (into [w-bf16] w-idxs) [scale-var scale-dim]]
+          (cond-> [:= out-term]
+            (seq clean-attrs) (conj clean-attrs)
+            :always (conj x-term (into [w-scaled] w-idxs)))])
+
+       :else
+       (cond-> [:= out-term]
+         (seq clean-attrs) (conj clean-attrs)
+         :always (conj x-term w-term))))))
 
 (defn gemma4-layer-ast
   "Generates Tensor Logic Hiccup AST for Gemma 4 Transformer layer block `layer-idx`."
@@ -280,6 +292,11 @@
          layer-is-int8? (and is-int8? (not skipped?))
          layer-is-int4? (and is-int4? (not skipped?))
          layer-is-ternary? (and is-ternary? (not skipped?))
+         use-w4a16? (boolean (and layer-is-int4?
+                                  (if (some? (:use-w4a16-gemv config))
+                                    (:use-w4a16-gemv config)
+                                    (or (= (:backend config) :rocm) (= (:target config) :rocm)))))
+         proj-attrs {:use-w4a16-gemv? use-w4a16?}
          norm-dtype (get config :norm-dtype (if (or is-int8? is-int4? is-ternary?) :bf16 (get config :weight-dtype :bf16)))
 
          actual-k-ro (if is-shared? shared-k [:k_ro i])
@@ -290,7 +307,7 @@
       [:rms-norm [:x_norm1 :b :p :d] [:h :b :p :d] [:input_ln_w :d] {:eps 1e-6}]
 
       ;; 2. Q Projection & Reshape
-      (gemma4-linear-proj [:q_raw :b :p :qd] [:x_norm1 :b :p :d] [:q_w :qd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :q_scale norm-dtype {})
+      (gemma4-linear-proj [:q_raw :b :p :qd] [:x_norm1 :b :p :d] [:q_w :qd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :q_scale norm-dtype proj-attrs)
       [:reshape [:q_heads_raw :b :p :h :dh] [:q_raw :b :p :qd] {:shape [1 max-seq-len num-heads head-dim]}]
       [:rms-norm [:q_normed_4d :b :p :h :dh] [:q_heads_raw :b :p :h :dh] [:q_norm_w :dh] {:eps 1e-6}]
       [:reshape [:q_normed_3d :b :p :qd] [:q_normed_4d :b :p :h :dh] {:shape [1 max-seq-len q-dim]}]
@@ -300,8 +317,8 @@
       ;; 3. K, V Projections (computed only if not shared)
       (when-not is-shared?
         [:block {:name :kv_proj}
-         (gemma4-linear-proj [:k_raw :b :p :kvd] [:x_norm1 :b :p :d] [:k_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :k_scale norm-dtype {})
-         (gemma4-linear-proj [:v_raw :b :p :kvd] [:x_norm1 :b :p :d] [:v_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :v_scale norm-dtype {})
+         (gemma4-linear-proj [:k_raw :b :p :kvd] [:x_norm1 :b :p :d] [:k_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :k_scale norm-dtype proj-attrs)
+         (gemma4-linear-proj [:v_raw :b :p :kvd] [:x_norm1 :b :p :d] [:v_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :v_scale norm-dtype proj-attrs)
          [:rms-norm [:v_normed :b :p :kvd] [:v_raw :b :p :kvd] {:eps 1e-6}]
          [:reshape [:k_heads_raw :b :p :kvh :dh] [:k_raw :b :p :kvd] {:shape [1 max-seq-len num-kv-heads head-dim]}]
          [:reshape [[:v_heads i] :b :p :kvh :dh] [:v_normed :b :p :kvd] {:shape [1 max-seq-len num-kv-heads head-dim]}]
@@ -329,7 +346,7 @@
       [:reshape [:ctx_flat :b :p :qd] [:ctx :b :p_q :h :dh] {:shape [1 max-seq-len q-dim]}]
 
       ;; 6. Output Projection & Post-Attention RMSNorm
-      (gemma4-linear-proj [:attn_raw :b :p :d] [:ctx_flat :b :p :qd] [:o_w :d :qd] layer-is-int8? layer-is-int4? layer-is-ternary? :o_scale norm-dtype {})
+      (gemma4-linear-proj [:attn_raw :b :p :d] [:ctx_flat :b :p :qd] [:o_w :d :qd] layer-is-int8? layer-is-int4? layer-is-ternary? :o_scale norm-dtype proj-attrs)
       [:rms-norm [:attn_normed :b :p :d] [:attn_raw :b :p :d] [:post_attn_ln_w :d] {:eps 1e-6}]
 
       ;; 7. Residual Connection 1
@@ -340,10 +357,10 @@
       [:rms-norm [:x_norm2 :b :p :d] [:res1 :b :p :d] [:pre_mlp_ln_w :d] {:eps 1e-6}]
 
       ;; 9. GeGLU MLP Block: down_proj(gelu(gate_proj(x)) * up_proj(x))
-      (gemma4-linear-proj [:gate :b :p :dff] [:x_norm2 :b :p :d] [:gate_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :gate_scale norm-dtype {:act :gelu})
-      (gemma4-linear-proj [:up :b :p :dff] [:x_norm2 :b :p :d] [:up_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :up_scale norm-dtype {})
+      (gemma4-linear-proj [:gate :b :p :dff] [:x_norm2 :b :p :d] [:gate_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :gate_scale norm-dtype (assoc proj-attrs :act :gelu))
+      (gemma4-linear-proj [:up :b :p :dff] [:x_norm2 :b :p :d] [:up_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :up_scale norm-dtype proj-attrs)
       [:= [:mlp_act :b :p :dff] [:gate :b :p :dff] [:up :b :p :dff]]
-      (gemma4-linear-proj [:mlp_raw :b :p :d] [:mlp_act :b :p :dff] [:down_w :d :dff] layer-is-int8? layer-is-int4? layer-is-ternary? :down_scale norm-dtype {})
+      (gemma4-linear-proj [:mlp_raw :b :p :d] [:mlp_act :b :p :dff] [:down_w :d :dff] layer-is-int8? layer-is-int4? layer-is-ternary? :down_scale norm-dtype proj-attrs)
       [:rms-norm [:mlp_normed :b :p :d] [:mlp_raw :b :p :d] [:post_mlp_ln_w :d] {:eps 1e-6}]
 
       ;; 10. Residual Connection 2
@@ -600,6 +617,11 @@
          layer-is-int8? (and is-int8? (not skipped?))
          layer-is-int4? (and is-int4? (not skipped?))
          layer-is-ternary? (and is-ternary? (not skipped?))
+         use-w4a16? (boolean (and layer-is-int4?
+                                  (if (some? (:use-w4a16-gemv config))
+                                    (:use-w4a16-gemv config)
+                                    (or (= (:backend config) :rocm) (= (:target config) :rocm)))))
+         proj-attrs {:use-w4a16-gemv? use-w4a16?}
          norm-dtype (get config :norm-dtype (if (or is-int8? is-int4? is-ternary?) :bf16 (get config :weight-dtype :bf16)))
 
          actual-k-cache (if is-shared? shared-k [:k_cache_out i])
@@ -610,7 +632,7 @@
       [:rms-norm [:x_norm1 :b :p :d] [:h :b :p :d] [:input_ln_w :d] {:eps 1e-6}]
 
       ;; 2. Q Projection & Reshape for single token
-      (gemma4-linear-proj [:q_raw :b :p :qd] [:x_norm1 :b :p :d] [:q_w :qd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :q_scale norm-dtype {})
+      (gemma4-linear-proj [:q_raw :b :p :qd] [:x_norm1 :b :p :d] [:q_w :qd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :q_scale norm-dtype proj-attrs)
       [:reshape [:q_heads_raw :b :p :h :dh] [:q_raw :b :p :qd] {:shape [1 1 num-heads head-dim]}]
       [:rms-norm [:q_normed_4d :b :p :h :dh] [:q_heads_raw :b :p :h :dh] [:q_norm_w :dh] {:eps 1e-6}]
       [:reshape [:q_normed_3d :b :p :qd] [:q_normed_4d :b :p :h :dh] {:shape [1 1 q-dim]}]
@@ -620,8 +642,8 @@
       ;; 3. K, V Projections & Dynamic Cache Update (if not shared)
       (when-not is-shared?
         [:block {:name :kv_proj_update}
-         (gemma4-linear-proj [:k_raw :b :p :kvd] [:x_norm1 :b :p :d] [:k_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :k_scale norm-dtype {})
-         (gemma4-linear-proj [:v_raw :b :p :kvd] [:x_norm1 :b :p :d] [:v_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :v_scale norm-dtype {})
+         (gemma4-linear-proj [:k_raw :b :p :kvd] [:x_norm1 :b :p :d] [:k_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :k_scale norm-dtype proj-attrs)
+         (gemma4-linear-proj [:v_raw :b :p :kvd] [:x_norm1 :b :p :d] [:v_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :v_scale norm-dtype proj-attrs)
          [:rms-norm [:v_normed :b :p :kvd] [:v_raw :b :p :kvd] {:eps 1e-6}]
          [:reshape [:k_heads_raw :b :p :kvh :dh] [:k_raw :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
          [:reshape [:v_heads :b :p :kvh :dh] [:v_normed :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
@@ -653,7 +675,7 @@
       [:reshape [:ctx_flat :b :p :qd] [:ctx :b :p :h :dh] {:shape [1 1 q-dim]}]
 
       ;; 6. Output Projection & Post-Attention RMSNorm
-      (gemma4-linear-proj [:attn_raw :b :p :d] [:ctx_flat :b :p :qd] [:o_w :d :qd] layer-is-int8? layer-is-int4? layer-is-ternary? :o_scale norm-dtype {})
+      (gemma4-linear-proj [:attn_raw :b :p :d] [:ctx_flat :b :p :qd] [:o_w :d :qd] layer-is-int8? layer-is-int4? layer-is-ternary? :o_scale norm-dtype proj-attrs)
       [:rms-norm [:attn_normed :b :p :d] [:attn_raw :b :p :d] [:post_attn_ln_w :d] {:eps 1e-6}]
 
       ;; 7. Residual Connection 1
@@ -664,10 +686,10 @@
       [:rms-norm [:x_norm2 :b :p :d] [:res1 :b :p :d] [:pre_mlp_ln_w :d] {:eps 1e-6}]
 
       ;; 9. GeGLU MLP Block: down_proj(gelu(gate_proj(x)) * up_proj(x))
-      (gemma4-linear-proj [:gate :b :p :dff] [:x_norm2 :b :p :d] [:gate_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :gate_scale norm-dtype {:act :gelu})
-      (gemma4-linear-proj [:up :b :p :dff] [:x_norm2 :b :p :d] [:up_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :up_scale norm-dtype {})
+      (gemma4-linear-proj [:gate :b :p :dff] [:x_norm2 :b :p :d] [:gate_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :gate_scale norm-dtype (assoc proj-attrs :act :gelu))
+      (gemma4-linear-proj [:up :b :p :dff] [:x_norm2 :b :p :d] [:up_w :dff :d] layer-is-int8? layer-is-int4? layer-is-ternary? :up_scale norm-dtype proj-attrs)
       [:= [:mlp_act :b :p :dff] [:gate :b :p :dff] [:up :b :p :dff]]
-      (gemma4-linear-proj [:mlp_raw :b :p :d] [:mlp_act :b :p :dff] [:down_w :d :dff] layer-is-int8? layer-is-int4? layer-is-ternary? :down_scale norm-dtype {})
+      (gemma4-linear-proj [:mlp_raw :b :p :d] [:mlp_act :b :p :dff] [:down_w :d :dff] layer-is-int8? layer-is-int4? layer-is-ternary? :down_scale norm-dtype proj-attrs)
       [:rms-norm [:mlp_normed :b :p :d] [:mlp_raw :b :p :d] [:post_mlp_ln_w :d] {:eps 1e-6}]
 
       ;; 10. Residual Connection 2
@@ -760,13 +782,22 @@
 (defn build-tensor-logic-invars
   "Constructs EDN SSA signature invars for full Gemma 4 model forward pass."
   [config max-seq-len]
-  (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size]} config
+  (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size backend target]} config
+        int4? (boolean (or is-int4 (= weight-dtype :int4)))
         is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
-        norm-dtype (if (or is-int8 is-int4 is-ternary) :bf16 weight-dtype)
+        norm-dtype (if (or is-int8 int4? is-ternary) :bf16 weight-dtype)
         has-ple? (pos? total-pl-dim)
+        use-w4a16? (and int4?
+                        (if (some? (:use-w4a16-gemv config))
+                          (boolean (:use-w4a16-gemv config))
+                          (or (= backend :rocm) (= target :rocm))))
+        scale-groups-fn (fn [in-dim]
+                          (if (and group-size (zero? (mod in-dim group-size)))
+                            (quot in-dim group-size)
+                            1))
         scale-shape-fn (fn [rows cols]
                          (cond
-                           (and is-int4 group-size (zero? (mod cols group-size)))
+                           (and int4? group-size (zero? (mod cols group-size)))
                            [rows (quot cols group-size)]
                            (and is-ternary group-size (zero? (mod cols group-size)))
                            [rows (quot cols group-size)]
@@ -798,8 +829,9 @@
                                  mlp-dim (long (or (:mlp-dim cfg) (:intermediate-dim config) 6144))
                                  skipped? (contains? (set (:skip-layers config)) i)
                                  layer-is-ternary (and is-ternary (not skipped?))
-                                 layer-is-int4 (and is-int4 (not skipped?))
-                                 layer-is-int8 (and is-int8 (not skipped?))]
+                                 layer-is-int4 (and int4? (not skipped?))
+                                 layer-is-int8 (and is-int8 (not skipped?))
+                                 layer-use-w4a16 (and use-w4a16? (not skipped?))]
                              (concat
                               [[(keyword (str "input_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]
                                [(keyword (str "layer_scalar_" i)) [:tensor [1] norm-dtype]]]
@@ -813,6 +845,15 @@
                                  [(keyword (str "v_scale_" i)) [:tensor (scale-shape-fn kv-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "o_w_" i)) [:tensor [hidden-dim (quot q-dim 4)] :i8]]
                                  [(keyword (str "o_scale_" i)) [:tensor (scale-shape-fn hidden-dim q-dim) norm-dtype]]]
+                                layer-use-w4a16
+                                [[(keyword (str "q_w_" i)) [:tensor [(quot hidden-dim 8) q-dim] :i32]]
+                                 [(keyword (str "q_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) q-dim] norm-dtype]]
+                                 [(keyword (str "k_w_" i)) [:tensor [(quot hidden-dim 8) kv-dim] :i32]]
+                                 [(keyword (str "k_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) kv-dim] norm-dtype]]
+                                 [(keyword (str "v_w_" i)) [:tensor [(quot hidden-dim 8) kv-dim] :i32]]
+                                 [(keyword (str "v_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) kv-dim] norm-dtype]]
+                                 [(keyword (str "o_w_" i)) [:tensor [(quot q-dim 8) hidden-dim] :i32]]
+                                 [(keyword (str "o_scale_" i)) [:tensor [(scale-groups-fn q-dim) hidden-dim] norm-dtype]]]
                                 layer-is-int4
                                 [[(keyword (str "q_w_" i)) [:tensor [q-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "q_scale_" i)) [:tensor (scale-shape-fn q-dim hidden-dim) norm-dtype]]
@@ -849,6 +890,13 @@
                                  [(keyword (str "up_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "down_w_" i)) [:tensor [hidden-dim (quot mlp-dim 4)] :i8]]
                                  [(keyword (str "down_scale_" i)) [:tensor (scale-shape-fn hidden-dim mlp-dim) norm-dtype]]]
+                                layer-use-w4a16
+                                [[(keyword (str "gate_w_" i)) [:tensor [(quot hidden-dim 8) mlp-dim] :i32]]
+                                 [(keyword (str "gate_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) mlp-dim] norm-dtype]]
+                                 [(keyword (str "up_w_" i)) [:tensor [(quot hidden-dim 8) mlp-dim] :i32]]
+                                 [(keyword (str "up_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) mlp-dim] norm-dtype]]
+                                 [(keyword (str "down_w_" i)) [:tensor [(quot mlp-dim 8) hidden-dim] :i32]]
+                                 [(keyword (str "down_scale_" i)) [:tensor [(scale-groups-fn mlp-dim) hidden-dim] norm-dtype]]]
                                 layer-is-int4
                                 [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "gate_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]

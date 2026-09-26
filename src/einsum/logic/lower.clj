@@ -1286,6 +1286,66 @@
                cat-eqn unscaled-eqn
                scale-bcast-eqn mul-eqn)))))
 
+(defn- lower-w4a16-gemv!
+  "Lowers fused W4A16 GEMV on AMD RDNA3 (gfx1100 / RX 7900 XTX) into OpenXLA PJRT custom call.
+   Bypasses in-graph dequantization by invoking the tuned native kernel directly."
+  [eqns-atom counter _head x-term w-term scale-term attrs final-out-var known-shapes default-dtype]
+  (let [x-name (first x-term)
+        w-name (first w-term)
+        scale-name (first scale-term)
+        norm-dtype (or default-dtype :bf16)
+
+        x-shape (get known-shapes x-name)
+        w-shape (get known-shapes w-name)
+        scale-shape (get known-shapes scale-name)
+
+        ;; Dimensions
+        ;; w-shape: [K/8, N]
+        k-words (first w-shape)
+        K (* (long (or k-words 32)) 8)
+        N (long (or (second w-shape) 512))
+        groups (if (and scale-shape (= (count scale-shape) 2)) (long (first scale-shape)) 1)
+
+        ;; x-shape: [b p K] or [m K]
+        m (if (and x-shape (= (count x-shape) 3))
+            (* (long (first x-shape)) (long (second x-shape)))
+            (if x-shape (long (first x-shape)) 1))
+        x-3d? (and x-shape (= (count x-shape) 3))
+
+        ;; 1. Reshape x to [m K] if 3D
+        x-2d-var (if x-3d?
+                   (let [v (gen-id "t_x_2d" counter)
+                         eqn {:op :stablehlo/reshape :invars [x-name] :outvars [v] :attrs {:shape [m K]}}]
+                     (swap! eqns-atom conj eqn)
+                     v)
+                   x-name)
+
+        ;; 2. Custom Call to w4a16_gemv_rocm
+        has-post? (has-post-act? attrs)
+        gemv-out (if (or x-3d? has-post?) (gen-id "t_gemv_out" counter) final-out-var)
+        custom-call-eqn {:op :stablehlo/custom_call
+                         :invars [x-2d-var w-name scale-name]
+                         :outvars [gemv-out]
+                         :attrs {:call_target_name "w4a16_gemv_rocm"
+                                 :api_version 1
+                                 :backend_config (str m "," N "," K "," groups ",0")
+                                 :type [:tensor [m N] norm-dtype]}}
+        _ (swap! eqns-atom conj custom-call-eqn)
+
+        ;; 3. Reshape back to 3D [b p N] if needed
+        out-3d-var (if x-3d?
+                     (let [v (if has-post? (gen-id "t_gemv_3d" counter) final-out-var)
+                           b (first x-shape)
+                           p (second x-shape)
+                           eqn {:op :stablehlo/reshape :invars [gemv-out] :outvars [v] :attrs {:shape [b p N]}}]
+                       (swap! eqns-atom conj eqn)
+                       v)
+                     gemv-out)]
+
+    ;; 4. Apply post-activation (e.g. :act :gelu) if present
+    (when has-post?
+      (emit-post-activation! eqns-atom counter out-3d-var final-out-var attrs norm-dtype))))
+
 (defn- lower-ternary-unpack! [eqns-atom counter _head packed-term scale-term _attrs final-out-var known-shapes default-dtype]
   (let [packed-name (first packed-term)
         scale-name (when scale-term (first scale-term))
@@ -1540,6 +1600,9 @@
 
            (= op :int4-unpack)
            (lower-int4-unpack! eqns-atom counter head (first body) (second body) attrs final-var known-shapes default-dtype)
+
+           (= op :w4a16-gemv)
+           (lower-w4a16-gemv! eqns-atom counter head (first body) (second body) (nth body 2) attrs final-var known-shapes default-dtype)
 
            (or (= op :ternary-unpack)
                (= op :ternary-dequant))

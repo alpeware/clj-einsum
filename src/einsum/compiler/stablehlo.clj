@@ -142,9 +142,12 @@
                     (assoc acc (first outvars) out-t))
 
                   (= op :stablehlo/custom_call)
-                  (let [in-var (first in-vars)
-                        in-t (get acc in-var "tensor<1xi32>")]
-                    (assoc acc (first outvars) in-t))
+                  (let [custom-out-t (or (:type attrs) (:out-type attrs))]
+                    (cond
+                      (string? custom-out-t) (assoc acc (first outvars) custom-out-t)
+                      (vector? custom-out-t) (assoc acc (first outvars) (type->mlir-string custom-out-t))
+                      (= target-name "embed_lookup") (assoc acc (first outvars) "tensor<1x128x768xf32>")
+                      :else (assoc acc (first outvars) (or in-type "tensor<1x128x576xf32>"))))
 
                   (= op :stablehlo/dynamic_update_slice)
                   (let [[op-var _up-var] in-vars
@@ -190,11 +193,6 @@
                         out-dims (assoc dims dim-idx total-size)
                         out-t (str "tensor<" (str/join "x" out-dims) "x" dtype ">")]
                     (assoc acc (first outvars) out-t))
-
-                  (= op :stablehlo/custom_call)
-                  (if (= target-name "embed_lookup")
-                    (assoc acc (first outvars) "tensor<1x128x768xf32>")
-                    (assoc acc (first outvars) (or in-type "tensor<1x128x576xf32>")))
 
                   (or (= op :stablehlo/reduce_mean) (= op :stablehlo/reduce_sum) (= op :stablehlo/reduce_max) (= op :stablehlo/reduce_min))
                   (let [axes (get attrs :axes [2])
@@ -575,13 +573,17 @@
              "    }) {dimensions = array<i64: " axis-idx ">} : (" in-type ", " iota-type ", tensor<" in-dtype ">, tensor<i32>) -> (" out-val-type ", " out-idx-type ")"))
 
       (= op :stablehlo/custom_call)
-      (let [[in0 in1] invars
-            in0-t (get var-types in0 "tensor<1x128xi32>")
-            in1-t (or (get var-types in1) "tensor<50257x768xf32>")
-            out-type (get var-types out-var "tensor<1x128x768xf32>")]
-        (if (= target-name "embed_lookup")
-          (str "    %" (name out-var) " = \"stablehlo.custom_call\"(%" (name in0) ", %" (name in1) ") {call_target_name = \"embed_lookup\"} : (" in0-t ", " in1-t ") -> " out-type)
-          (str "    %" (name out-var) " = \"stablehlo.custom_call\"(%" (name in0) ") {call_target_name = \"" target-name "\"} : (" in0-t ") -> " out-type)))
+      (let [in-args (str/join ", " (map #(str "%" (name %)) invars))
+            target (or target-name (get attrs :call_target_name "copy"))
+            in-types (str/join ", " (map #(get var-types % "tensor<1xi32>") invars))
+            out-type (get var-types out-var (get var-types (first invars) "tensor<1xi32>"))
+            api-ver (or (:api_version attrs) (:api-version attrs) 1)
+            backend-cfg (or (:backend_config attrs) (:backend-config attrs))
+            cfg-attr (if backend-cfg (str ", backend_config = \"" backend-cfg "\"") "")]
+        (str "    %" (name out-var) " = \"stablehlo.custom_call\"(" in-args ") {"
+             "call_target_name = \"" target "\", "
+             "api_version = " api-ver " : i32"
+             cfg-attr "} : (" in-types ") -> " out-type))
 
       (= op :stablehlo/dot_general)
       (let [[lhs rhs] invars
@@ -696,11 +698,17 @@
                       (str " loc(\"" opn "\")"))
             raw-op-line (cond
                           (= op :stablehlo/custom_call)
-                          (let [in-var (first invars)
+                          (let [in-args (str/join ", " (map #(str "%" (name %)) invars))
                                 target (get attrs :call_target_name "copy")
-                                in-t (get var-types in-var "tensor<1xi32>")
-                                out-type (get var-types out-var in-t)]
-                            (str "    %" (name out-var) " = \"stablehlo.custom_call\"(%" (name in-var) ") {call_target_name = \"" target "\"} : (" in-t ") -> " out-type))
+                                in-types (str/join ", " (map #(get var-types % "tensor<1xi32>") invars))
+                                out-type (get var-types out-var (get var-types (first invars) "tensor<1xi32>"))
+                                api-ver (or (:api_version attrs) (:api-version attrs) 1)
+                                backend-cfg (or (:backend_config attrs) (:backend-config attrs))
+                                cfg-attr (if backend-cfg (str ", backend_config = \"" backend-cfg "\"") "")]
+                            (str "    %" (name out-var) " = \"stablehlo.custom_call\"(" in-args ") {"
+                                 "call_target_name = \"" target "\", "
+                                 "api_version = " api-ver " : i32"
+                                 cfg-attr "} : (" in-types ") -> " out-type))
 
                           (= op :debug/check-non-nan)
                           (let [in-var (first invars)

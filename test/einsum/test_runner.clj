@@ -60,6 +60,7 @@
             [einsum.models.transformer-test]
             [einsum.quant.catq-test]
             [einsum.quant.ternary-test]
+            [einsum.quant.w4a16-custom-call-test]
             [einsum.quantize-test]
             [einsum.runtime.benchmark.core-test]
             [einsum.runtime.benchmark.runner-test]
@@ -116,6 +117,7 @@
    'einsum.quantize-test
    'einsum.quant.catq-test
    'einsum.quant.ternary-test
+   'einsum.quant.w4a16-custom-call-test
    'einsum.models.gemma4-test
    'einsum.core-test
    'experiments.gate3-evals.clojure-bench-test])

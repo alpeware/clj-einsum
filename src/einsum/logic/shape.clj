@@ -110,6 +110,22 @@
              out-shape (or (:shape attrs) [rows (* (long half-cols) 2)])]
          (assoc known-shapes head-name (vec out-shape)))
 
+       (= (first eqn) :w4a16-gemv)
+       (let [head (ast/head eqn)
+             head-name (if (vector? head) (first head) head)
+             attrs (ast/attrs eqn)
+             body (ast/body-terms eqn)
+             x-name (first (first body))
+             w-name (first (second body))
+             x-shape (get known-shapes x-name [1 1])
+             w-shape (get known-shapes w-name [1 1])
+             N (second w-shape)
+             out-shape (or (:shape attrs)
+                           (if (= (count x-shape) 3)
+                             [(first x-shape) (second x-shape) N]
+                             [(first x-shape) N]))]
+         (assoc known-shapes head-name (vec out-shape)))
+
        (or (= (first eqn) :ternary-unpack)
            (= (first eqn) :ternary-dequant))
        (let [head (ast/head eqn)

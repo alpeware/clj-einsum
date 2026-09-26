@@ -118,7 +118,9 @@
    (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum 128 nil))
   ([ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size]
    (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size nil))
-  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 is-ternary norm-enum _weight-enum group-size arena]
+  ([ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size arena]
+   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size arena false))
+  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 is-ternary norm-enum _weight-enum group-size arena use-w4a16?]
    (let [target-arena (or arena arena/*active-arena*)]
      (if-not (or is-int8 is-int4 is-ternary)
        [(load-weight-buffer ctx weights-mmap tensor-name shape (if (= norm-enum 11) :f32 :bf16) norm-enum 0.0 target-arena)]
@@ -133,16 +135,25 @@
              prequantized? (and (or (contains? header scale-name) (contains? (:tensors weights-mmap) scale-name))
                                 (or (contains? header actual-tensor-name) (contains? (:tensors weights-mmap) actual-tensor-name)))]
          (if prequantized?
-           (let [w-shape (cond is-ternary [rows (quot cols 4)] is-int4 [rows (quot cols 2)] :else [rows cols])
-                 w-slice (st/get-tensor-slice weights-mmap actual-tensor-name)
+           (let [w-slice (st/get-tensor-slice weights-mmap actual-tensor-name)
                  scale-slice (st/get-tensor-slice weights-mmap scale-name)
-                 scale-shape (or (get-in header [scale-name "shape"])
-                                 (get-in (:tensors weights-mmap) [scale-name :info "shape"])
-                                 (if (and (or is-int4 is-ternary) group-size (zero? (mod cols group-size)))
-                                   [rows (quot cols group-size)]
-                                   [rows]))
-                 w-buf (xla/buffer-from-host-buffer ctx (:client ctx) w-slice w-shape 2)
-                 scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scale-slice scale-shape norm-enum)]
+                 num-groups (if (and group-size (zero? (mod cols group-size)))
+                              (quot cols group-size)
+                              1)
+                 w-buf (if (and is-int4 use-w4a16?)
+                         (let [repacked (exl3/repack-int4-to-rdna3 w-slice rows cols)]
+                           (xla/buffer-from-host-buffer ctx (:client ctx) repacked [(quot cols 8) rows] 4))
+                         (let [w-shape (cond is-ternary [rows (quot cols 4)] is-int4 [rows (quot cols 2)] :else [rows cols])]
+                           (xla/buffer-from-host-buffer ctx (:client ctx) w-slice w-shape 2)))
+                 scale-buf (if (and is-int4 use-w4a16?)
+                             (let [transposed (exl3/transpose-scales-for-rdna3 scale-slice rows num-groups)]
+                               (xla/buffer-from-host-buffer ctx (:client ctx) transposed [num-groups rows] norm-enum))
+                             (let [scale-shape (or (get-in header [scale-name "shape"])
+                                                   (get-in (:tensors weights-mmap) [scale-name :info "shape"])
+                                                   (if (and (or is-int4 is-ternary) group-size (zero? (mod cols group-size)))
+                                                     [rows (quot cols group-size)]
+                                                     [rows]))]
+                               (xla/buffer-from-host-buffer ctx (:client ctx) scale-slice scale-shape norm-enum)))]
              (when target-arena
                (xla/track! target-arena w-buf)
                (xla/track! target-arena scale-buf))
@@ -194,8 +205,17 @@
                (let [{:keys [data scales scale-shape]} (exl3/quantize-weights-per-row-int4 raw-arr rows cols
                                                                                            {:as scale-format
                                                                                             :group-size group-size})
-                     w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 2)] 2)
-                     scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum)]
+                     num-groups (if (and group-size (zero? (mod cols group-size)))
+                                  (quot cols group-size)
+                                  1)
+                     w-buf (if use-w4a16?
+                             (let [repacked (exl3/repack-int4-to-rdna3 data rows cols)]
+                               (xla/buffer-from-host-buffer ctx (:client ctx) repacked [(quot cols 8) rows] 4))
+                             (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 2)] 2))
+                     scale-buf (if use-w4a16?
+                                 (let [transposed (exl3/transpose-scales-for-rdna3 scales rows num-groups)]
+                                   (xla/buffer-from-host-buffer ctx (:client ctx) transposed [num-groups rows] norm-enum))
+                                 (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum))]
                  (when target-arena
                    (xla/track! target-arena w-buf)
                    (xla/track! target-arena scale-buf))
@@ -220,7 +240,12 @@
                                   (swap! (:device-buffers weight-store) assoc k buf))
                                 buf)]
     (binding [arena/*active-arena* target-arena]
-      (let [{:keys [prefix-base vocab-size hidden-dim total-pl-dim pl-dim weight-dtype weight-enum norm-enum layer-configs num-layers is-int8 is-int4 is-ternary group-size]} config
+      (let [{:keys [prefix-base vocab-size hidden-dim total-pl-dim pl-dim weight-dtype weight-enum norm-enum layer-configs num-layers is-int8 is-int4 is-ternary group-size backend target]} config
+            int4? (boolean (or is-int4 (= weight-dtype :int4)))
+            use-w4a16? (and int4?
+                            (if (some? (:use-w4a16-gemv config))
+                              (boolean (:use-w4a16-gemv config))
+                              (or (= backend :rocm) (= target :rocm))))
             has-ple? (pos? total-pl-dim)
             load-fn (fn
                       ([name shape enum] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum 0.0 target-arena))
@@ -245,10 +270,11 @@
                                        skipped? (contains? (set (:skip-layers config)) i)
                                        layer-is-ternary (and is-ternary (not skipped?))
                                        layer-is-int8 (and is-int8 (not skipped?))
-                                       layer-is-int4 (and is-int4 (not skipped?))
+                                       layer-is-int4 (and int4? (not skipped?))
+                                       layer-use-w4a16? (and use-w4a16? (not skipped?))
                                        quantized? (or layer-is-ternary layer-is-int8 layer-is-int4)
                                        load-linear-fn (fn [name shape w-kw scale-kw]
-                                                        (let [bufs (load-linear-projection-buffers ctx weights-mmap name shape layer-is-int8 layer-is-int4 layer-is-ternary norm-enum weight-enum group-size target-arena)]
+                                                        (let [bufs (load-linear-projection-buffers ctx weights-mmap name shape layer-is-int8 layer-is-int4 layer-is-ternary norm-enum weight-enum group-size target-arena layer-use-w4a16?)]
                                                           (if quantized?
                                                             (do (register-store-entry! w-kw (first bufs))
                                                                 (register-store-entry! scale-kw (second bufs)))

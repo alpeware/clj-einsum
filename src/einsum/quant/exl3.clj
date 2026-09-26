@@ -1,7 +1,7 @@
 (ns einsum.quant.exl3
   "EXL3 Quantization (turboderp-org/exllamav3) Procedural Codebooks, Trellis Decoding, and OpenXLA PJRT Lowers."
   (:require [einsum.quant.quip :as quip])
-  (:import [java.lang.foreign MemorySegment]
+  (:import [java.lang.foreign MemorySegment ValueLayout]
            [java.util.function IntConsumer]
            [java.util.stream IntStream]))
 
@@ -606,3 +606,98 @@
       :scales (if (= target-scale-format :bf16) scales-shorts scales-floats)
       :shape [rows half-cols]
       :scale-shape (if group-size [rows num-groups] [rows])})))
+
+;; --- RDNA3 (gfx1100 / RX 7900 XTX) Fused W4A16 GEMV Repacking Primitives ---
+
+(defn repack-int4-to-rdna3
+  "Repacks INT4 weights from [N, K/2] bytes to [K/8, N] uint32 words for RDNA3 GEMV.
+   Each uint32 packs 8 weights along K for column n, with even/odd nibble interleave:
+     bits [0..15] : q0, q2, q4, q6 (even K elements)
+     bits [16..31]: q1, q3, q5, q7 (odd K elements)
+   Accepts byte-array or MemorySegment."
+  [data-or-seg N K]
+  (let [^bytes data-bytes (if (instance? MemorySegment data-or-seg)
+                            (.toArray ^MemorySegment data-or-seg ValueLayout/JAVA_BYTE)
+                            ^bytes data-or-seg)
+        N (int N)
+        K (int K)
+        k-words (quot K 8)
+        half-k (quot K 2)
+        out (int-array (* k-words N))]
+    (if (>= N 128)
+      (-> (IntStream/range 0 N)
+          (.parallel)
+          (.forEach
+           (reify IntConsumer
+             (accept [_ n]
+               (let [row-base (* n half-k)]
+                 (dotimes [qk k-words]
+                   (let [byte-off (+ row-base (* qk 4))
+                         b0 (bit-and (int (aget data-bytes byte-off)) 0xFF)
+                         b1 (bit-and (int (aget data-bytes (+ byte-off 1))) 0xFF)
+                         b2 (bit-and (int (aget data-bytes (+ byte-off 2))) 0xFF)
+                         b3 (bit-and (int (aget data-bytes (+ byte-off 3))) 0xFF)
+                         lo (bit-or (bit-and b0 0x0F)
+                                    (bit-shift-left (bit-and b1 0x0F) 4)
+                                    (bit-shift-left (bit-and b2 0x0F) 8)
+                                    (bit-shift-left (bit-and b3 0x0F) 12))
+                         hi (bit-or (bit-shift-right b0 4)
+                                    (bit-shift-left (bit-shift-right b1 4) 4)
+                                    (bit-shift-left (bit-shift-right b2 4) 8)
+                                    (bit-shift-left (bit-shift-right b3 4) 12))
+                         word (unchecked-int (bit-or lo (bit-shift-left hi 16)))]
+                     (aset-int out (+ (* qk N) n) word))))))))
+      (dotimes [n N]
+        (let [row-base (* n half-k)]
+          (dotimes [qk k-words]
+            (let [byte-off (+ row-base (* qk 4))
+                  b0 (bit-and (int (aget data-bytes byte-off)) 0xFF)
+                  b1 (bit-and (int (aget data-bytes (+ byte-off 1))) 0xFF)
+                  b2 (bit-and (int (aget data-bytes (+ byte-off 2))) 0xFF)
+                  b3 (bit-and (int (aget data-bytes (+ byte-off 3))) 0xFF)
+                  lo (bit-or (bit-and b0 0x0F)
+                             (bit-shift-left (bit-and b1 0x0F) 4)
+                             (bit-shift-left (bit-and b2 0x0F) 8)
+                             (bit-shift-left (bit-and b3 0x0F) 12))
+                  hi (bit-or (bit-shift-right b0 4)
+                             (bit-shift-left (bit-shift-right b1 4) 4)
+                             (bit-shift-left (bit-shift-right b2 4) 8)
+                             (bit-shift-left (bit-shift-right b3 4) 12))
+                  word (unchecked-int (bit-or lo (bit-shift-left hi 16)))]
+              (aset-int out (+ (* qk N) n) word))))))
+    out))
+
+(defn transpose-scales-for-rdna3
+  "Transposes scales from [N, groups] to [groups, N] short-array (or float-array).
+   Accepts short-array, float-array, or MemorySegment."
+  [scales-or-seg N groups]
+  (let [N (int N)
+        groups (int groups)]
+    (if (= groups 1)
+      (if (instance? MemorySegment scales-or-seg)
+        (.toArray ^MemorySegment scales-or-seg ValueLayout/JAVA_SHORT)
+        scales-or-seg)
+      (let [^shorts s-arr (if (instance? MemorySegment scales-or-seg)
+                            (.toArray ^MemorySegment scales-or-seg ValueLayout/JAVA_SHORT)
+                            ^shorts scales-or-seg)
+            out (short-array (* groups N))]
+        (if (>= N 128)
+          (-> (IntStream/range 0 N)
+              (.parallel)
+              (.forEach
+               (reify IntConsumer
+                 (accept [_ n]
+                   (dotimes [g groups]
+                     (aset-short out (+ (* g N) n) (aget s-arr (+ (* n groups) g))))))))
+          (dotimes [n N]
+            (dotimes [g groups]
+              (aset-short out (+ (* g N) n) (aget s-arr (+ (* n groups) g))))))
+        out))))
+
+(defn make-rdna3-qzeros
+  "Allocates qzeros buffer filled with 0x88888888 of shape [groups, N/8] uint32."
+  [groups N]
+  (let [words (* (long groups) (quot (long N) 8))
+        arr (int-array words)]
+    (java.util.Arrays/fill arr (unchecked-int 0x88888888))
+    arr))

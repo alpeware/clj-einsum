@@ -486,6 +486,7 @@
    (let [{:keys [backend]} opts
          model-dir (or (:model-dir opts) (:model opts))
          ctx (xla/init-backend! (or backend :cpu))
+         opts (assoc opts :backend (or backend (:backend ctx) :cpu))
          dirs (if model-dir (cons model-dir cfg/DEFAULT_MODEL_DIRS) cfg/DEFAULT_MODEL_DIRS)
          resolved-model-dir (cfg/find-model-dir dirs)
          arena (Arena/ofConfined)

@@ -18,3 +18,6 @@
 (def exl3-linear-ast e/exl3-linear-ast)
 (def quantize-weights-per-row-int8 e/quantize-weights-per-row-int8)
 (def quantize-weights-per-row-int4 e/quantize-weights-per-row-int4)
+(def repack-int4-to-rdna3 e/repack-int4-to-rdna3)
+(def transpose-scales-for-rdna3 e/transpose-scales-for-rdna3)
+(def make-rdna3-qzeros e/make-rdna3-qzeros)
