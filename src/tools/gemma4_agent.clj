@@ -26,7 +26,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
    :sandbox :agent
    :temperature 0.0
    :top-k 10
-   :repetition-penalty 1.15
+   :repetition-penalty 1.0
    :method nil
    :backend :rocm
    :precision :bf16

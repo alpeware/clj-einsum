@@ -26,7 +26,7 @@
    :max-seq-len 2048
    :temperature 0.0
    :top-k 10
-   :repetition-penalty 1.15
+   :repetition-penalty 1.0
    :thinking true
    :nudge-on-no-tool true
    :overwrite false
@@ -127,6 +127,7 @@
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
+          :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :dry-run? true}))
 
       ;; Actual model inference
@@ -169,6 +170,7 @@
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
+          :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :dry-run? false})))))
 
 (defn run-agentic-task
@@ -206,6 +208,7 @@
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
+          :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :dry-run? true}))
 
       ;; Actual agentic loop execution
@@ -272,6 +275,7 @@
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
           :transcript (vec transcript)
+          :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :dry-run? false})))))
 
 ;; =============================================================================

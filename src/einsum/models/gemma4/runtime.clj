@@ -53,8 +53,8 @@
   "Selects next token from float array `logits-arr` using sampling options and repetition penalty."
   [^floats logits-arr opts _prompt-ids gen-ids]
   (let [{:keys [temperature top-k top-p repetition-penalty]
-         :or {temperature 0.0 top-k 10 top-p 1.0 repetition-penalty 1.15}} opts
-        rep-pen (double (or repetition-penalty 1.15))]
+         :or {temperature 0.0 top-k 10 top-p 1.0 repetition-penalty 1.0}} opts
+        rep-pen (double (or repetition-penalty 1.0))]
     (if (or (nil? temperature) (<= temperature 0.0))
       (if (and (number? rep-pen) (> rep-pen 1.0))
         (argmax-with-penalty logits-arr gen-ids rep-pen)

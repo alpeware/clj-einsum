@@ -35,7 +35,7 @@
    :max-new-tokens 256
    :temperature 0.70
    :top-k 40
-   :repetition-penalty 1.10
+   :repetition-penalty 1.0
    :backend :cpu
    :precision :bf16
    :thinking false
