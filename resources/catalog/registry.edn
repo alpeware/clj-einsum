@@ -38,4 +38,15 @@
      :judgment-cost-target "< 6.0 hours per verified RFC"
      :status :staged}}
 
- :experiments {}}
+ :experiments
+ {:clojure-bench {:gate :gate3-evals
+                  :slug "clojure_bench"
+                  :title "Clojure Coding Baseline for Gemma 4 Family"
+                  :status :unverified
+                  :generation 0
+                  :target-hardware "AMD Radeon RX 7900 XTX (24GB)"
+                  :spec-path "resources/proposals/gate3_evals/clojure_bench/spec.md"
+                  :results-path "resources/proposals/gate3_evals/clojure_bench/results.edn"
+                  :summary-path "resources/proposals/gate3_evals/clojure_bench/summary.csv"
+                  :sealed-sha256 "656f97b09127561b857f10eba46262750eb358279705d252cfea247d0300cda0"
+                  :verified-by nil}}}

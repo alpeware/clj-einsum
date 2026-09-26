@@ -13,6 +13,9 @@ if [ -n "$JSIG" ]; then
   export LD_PRELOAD="$JSIG${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
 
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0}"
+export ROCR_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES:-0}"
+
 MODE="inference"
 SCRIPT_NAME="$(basename "$0")"
 
@@ -30,6 +33,9 @@ elif [ "$1" = "cat-q" ] || [ "$1" = "--cat-q" ] || [ "$1" = "ternary" ] || [ "$1
 elif [ "$1" = "train-catq" ] || [ "$1" = "--train-catq" ] || [ "$1" = "train-ternary" ] || [ "$1" = "--train-ternary" ]; then
   MODE="train-catq"
   shift
+elif [ "$1" = "clj-bench" ] || [ "$1" = "--clj-bench" ] || [ "$1" = "clojure-bench" ]; then
+  MODE="clj-bench"
+  shift
 fi
 
 if [ "$MODE" = "agent" ]; then
@@ -40,6 +46,8 @@ elif [ "$MODE" = "cat-q" ]; then
   exec clojure -M:tools -m experiments.gate1-compression.cat-q-ternary.run "$@"
 elif [ "$MODE" = "train-catq" ]; then
   exec clojure -M:tools -m tools.train-catq "$@"
+elif [ "$MODE" = "clj-bench" ]; then
+  exec clojure -M:tools -m tools.clj-bench "$@"
 else
   exec clojure -M:tools -m tools.gemma4-inference "$@"
 fi

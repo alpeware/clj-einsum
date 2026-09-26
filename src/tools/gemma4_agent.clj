@@ -423,10 +423,13 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 (defn run-agent-loop
   "Runs autonomous agent loop with SCI Clojure tool calling across multiple turns."
   ([session initial-prompt]
-   (run-agent-loop session initial-prompt nil))
+   (run-agent-loop session initial-prompt nil nil))
   ([session initial-prompt custom-sci-ctx]
+   (run-agent-loop session initial-prompt custom-sci-ctx nil))
+  ([session initial-prompt custom-sci-ctx custom-tool-eval-fn]
    (let [{:keys [opts]} session
-         {:keys [system max-turns out quiet profile-out thinking tool-declaration max-consecutive-errors sandbox]} opts
+         {:keys [system max-turns out quiet profile-out thinking tool-declaration max-consecutive-errors sandbox tool-eval-fn]} opts
+         tool-eval (or custom-tool-eval-fn tool-eval-fn eval-tool-code)
          thinking? (boolean thinking)
          tool-decl (or tool-declaration DEFAULT_TOOL_DECLARATION)
          sci-ctx (or custom-sci-ctx
@@ -447,7 +450,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
            (when (seq out)
              (spit out (str/join "\n\n" (map :content @transcript)))
              (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
-           @transcript)
+           (with-meta @transcript {:turn-telemetry @turn-telemetry :history @history}))
          (do
            (when-not quiet (println "\n=================================================="))
            (when-not quiet (println (format "=== Agent Turn %d/%d ===" turn max-turns)))
@@ -503,7 +506,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                  (when (seq out)
                    (spit out (str/join "\n\n" (map :content @transcript)))
                    (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
-                 @transcript)
+                 (with-meta @transcript {:turn-telemetry @turn-telemetry :history @history}))
 
                (if (>= consecutive-errors consecutive-error-limit)
                  ;; Model attempted another tool call after error budget was exhausted
@@ -522,7 +525,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                    (when (seq out)
                      (spit out (str/join "\n\n" (map :content @transcript)))
                      (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
-                   @transcript)
+                   (with-meta @transcript {:turn-telemetry @turn-telemetry :history @history}))
 
                  (let [tool-code (:code tool-call)
                        tool-name (:name tool-call)
@@ -533,7 +536,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                            (println "--------------------------------------------------"))
                        t-tool-0 (System/nanoTime)
                        eval-res (if (seq tool-code)
-                                  (eval-tool-code sci-ctx tool-code)
+                                  (tool-eval sci-ctx tool-code)
                                   {:status :error :output "Error: No code provided to eval_clojure."})
                        t-tool-1 (System/nanoTime)
                        tool-ms (/ (- t-tool-1 t-tool-0) 1e6)

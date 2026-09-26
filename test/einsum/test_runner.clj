@@ -82,6 +82,7 @@
             [einsum.tools.cli-test]
             [einsum.tools.download-hf-test]
             [einsum.tools.fetch-pjrt-test]
+            [experiments.gate3-evals.clojure-bench-test]
             [clojure.string :as str]
             [clojure.test :refer [run-tests]]))
 
@@ -116,7 +117,8 @@
    'einsum.quant.catq-test
    'einsum.quant.ternary-test
    'einsum.models.gemma4-test
-   'einsum.core-test])
+   'einsum.core-test
+   'experiments.gate3-evals.clojure-bench-test])
 
 (def logic-namespaces
   "Pedro Domingos' Declarative Tensor Logic, semirings, Horn-clause symbolic reasoning, memory relations, KB."
