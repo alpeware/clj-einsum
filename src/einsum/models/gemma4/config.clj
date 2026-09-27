@@ -107,16 +107,22 @@
 
         layer-configs (mapv (fn [i]
                               (let [kmap (gemma4-logic/gemma4-weight-key-map i (str prefix-base "layers."))
-                                    l-q-dim (first (resolve-weight-shape header (:q-w kmap) [2048 hidden-dim]))
-                                    l-kv-dim (first (resolve-weight-shape header (:k-w kmap) [256 hidden-dim]))
                                     l-head-dim (first (get-in header [(:q-norm-w kmap) "shape"] [head-dim]))
-                                    mlp-dim (first (resolve-weight-shape header (:gate-w kmap) [(* 4 hidden-dim) hidden-dim]))
                                     l-type-str (or (get layer-types-cfg i)
                                                    (if (= l-head-dim 512) "full_attention" "sliding_attention"))
                                     is-global? (= l-type-str "full_attention")
+                                    expected-nkv (long (if is-global?
+                                                         (or (:num_global_kv_heads text-cfg) num-kv-heads 1)
+                                                         (or num-kv-heads 1)))
+                                    expected-kv-dim (* expected-nkv (long l-head-dim))
+                                    expected-nh (long (or (:num_attention_heads text-cfg) num-heads 8))
+                                    expected-q-dim (* expected-nh (long l-head-dim))
+                                    l-q-dim (first (resolve-weight-shape header (:q-w kmap) [expected-q-dim hidden-dim]))
+                                    l-kv-dim (first (resolve-weight-shape header (:k-w kmap) [expected-kv-dim hidden-dim]))
+                                    mlp-dim (first (resolve-weight-shape header (:gate-w kmap) [(* 4 hidden-dim) hidden-dim]))
                                     rope-prop (if is-global? 0.25 1.0)
                                     theta-base (if is-global? 1000000.0 10000.0)
-                                    l-nkv (quot l-kv-dim l-head-dim)]
+                                    l-nkv (max 1 (quot l-kv-dim (max 1 l-head-dim)))]
                                 {:idx i
                                  :q-dim l-q-dim
                                  :kv-dim l-kv-dim

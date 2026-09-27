@@ -41,7 +41,9 @@
    :vocab-size 262144
    :norm-eps 1e-6
    :final-logit-softcap 30.0
-   :num-kv-shared-layers 18})
+   :num-kv-shared-layers 18
+   :layer-types (vec (take 42 (cycle ["sliding_attention" "sliding_attention" "sliding_attention"
+                                      "sliding_attention" "sliding_attention" "full_attention"])))})
 
 (def DEFAULT_GEMMA4_12B_CONFIG
   {:hidden-dim 3840
