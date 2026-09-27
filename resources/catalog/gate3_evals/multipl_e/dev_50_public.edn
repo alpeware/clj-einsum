@@ -1,0 +1,252 @@
+;; MultiPL-E Clojure dev 50 subset — public tasks
+[ {:id "has-close-elements"
+  :title "Check close elements"
+  :fn-name has-close-elements?
+  :prompt "Write a function `has-close-elements?` that takes a vector of numbers `numbers` and a threshold `threshold`, and returns true if any two distinct numbers in the vector are closer to each other than `threshold`."
+  :public-tests [{:code "(has-close-elements? [1.0 2.0 3.9 4.0 5.0 2.2] 0.3)" :expected "true"} {:code "(has-close-elements? [1.0 2.0 3.9 4.0 5.0 2.2] 0.05)" :expected "false"}]}
+ {:id "separate-paren-groups"
+  :title "Separate parenthesis groups"
+  :fn-name separate-paren-groups
+  :prompt "Write a function `separate-paren-groups` that takes a string containing multiple balanced parentheses groups (with spaces) and returns a vector of strings containing each non-overlapping balanced group without spaces."
+  :public-tests [{:code "(separate-paren-groups \"(()()) (( )) () ((())())\")" :expected "[\"(()())\" \"(())\" \"()\" \"((())())\"]"} {:code "(separate-paren-groups \"() ()\")" :expected "[\"()\" \"()\"]"}]}
+ {:id "truncate-number"
+  :title "Truncate number to fraction"
+  :fn-name truncate-number
+  :prompt "Write a function `truncate-number` that takes a positive floating point number `number` and returns its fractional part (number - (int number))."
+  :public-tests [{:code "(< (Math/abs (- (truncate-number 3.5) 0.5)) 1e-6)" :expected "true"} {:code "(< (Math/abs (- (truncate-number 1.25) 0.25)) 1e-6)" :expected "true"}]}
+ {:id "below-zero"
+  :title "Detect account balance below zero"
+  :fn-name below-zero?
+  :prompt "Write a function `below-zero?` that takes a vector of deposit and withdrawal amounts `operations` and returns true if the balance ever falls strictly below zero, false otherwise."
+  :public-tests [{:code "(below-zero? [1 2 3])" :expected "false"} {:code "(below-zero? [1 2 -4 5])" :expected "true"}]}
+ {:id "mean-absolute-deviation"
+  :title "Mean absolute deviation"
+  :fn-name mean-absolute-deviation
+  :prompt "Write a function `mean-absolute-deviation` that computes the mean absolute deviation of a collection of numbers."
+  :public-tests [{:code "(< (Math/abs (- (mean-absolute-deviation [1.0 2.0 3.0 4.0]) 1.0)) 1e-6)" :expected "true"} {:code "(< (Math/abs (- (mean-absolute-deviation [2.0 2.0 2.0]) 0.0)) 1e-6)" :expected "true"}]}
+ {:id "intersperse"
+  :title "Intersperse delimiter"
+  :fn-name intersperse
+  :prompt "Write a function `intersperse` that takes a collection `coll` and a separator `delim` and returns a vector with `delim` inserted between every adjacent pair of elements."
+  :public-tests [{:code "(intersperse [1 2 3] 4)" :expected "[1 4 2 4 3]"} {:code "(intersperse [] 4)" :expected "[]"}]}
+ {:id "filter-by-substring"
+  :title "Filter strings by substring"
+  :fn-name filter-by-substring
+  :prompt "Write a function `filter-by-substring` that takes a collection of strings `strings` and a substring `sub` and returns a vector of strings containing `sub`."
+  :public-tests [{:code "(filter-by-substring [\"abc\" \"bacd\" \"cde\" \"array\"] \"a\")" :expected "[\"abc\" \"bacd\" \"array\"]"} {:code "(filter-by-substring [] \"a\")" :expected "[]"}]}
+ {:id "sum-product"
+  :title "Sum and product of integers"
+  :fn-name sum-product
+  :prompt "Write a function `sum-product` that takes a collection of integers and returns a vector `[sum prod]`. For empty collection, return `[0 1]`."
+  :public-tests [{:code "(sum-product [1 2 3 4])" :expected "[10 24]"} {:code "(sum-product [])" :expected "[0 1]"}]}
+ {:id "rolling-max"
+  :title "Rolling maximum"
+  :fn-name rolling-max
+  :prompt "Write a function `rolling-max` that takes a collection of integers and returns a vector of the rolling maximum seen so far."
+  :public-tests [{:code "(rolling-max [1 2 3 2 3 4 2])" :expected "[1 2 3 3 3 4 4]"} {:code "(rolling-max [])" :expected "[]"}]}
+ {:id "is-palindrome"
+  :title "Check palindrome string"
+  :fn-name is-palindrome?
+  :prompt "Write a function `is-palindrome?` that returns true if string `s` is a palindrome, false otherwise."
+  :public-tests [{:code "(is-palindrome? \"racecar\")" :expected "true"} {:code "(is-palindrome? \"hello\")" :expected "false"}]}
+ {:id "string-xor"
+  :title "Binary string XOR"
+  :fn-name string-xor
+  :prompt "Write a function `string-xor` that takes two binary strings `a` and `b` of equal length and returns their bitwise XOR as a binary string."
+  :public-tests [{:code "(string-xor \"010\" \"110\")" :expected "\"100\""} {:code "(string-xor \"101010\" \"010101\")" :expected "\"111111\""}]}
+ {:id "longest-string"
+  :title "Longest string in collection"
+  :fn-name longest-string
+  :prompt "Write a function `longest-string` that returns the longest string in a collection `strings`, or nil if empty."
+  :public-tests [{:code "(longest-string [\"a\" \"bb\" \"ccc\"])" :expected "\"ccc\""} {:code "(longest-string [])" :expected "nil"}]}
+ {:id "greatest-common-divisor"
+  :title "Greatest common divisor"
+  :fn-name greatest-common-divisor
+  :prompt "Write a function `greatest-common-divisor` that calculates the greatest common divisor of two positive integers `a` and `b`."
+  :public-tests [{:code "(greatest-common-divisor 3 5)" :expected "1"} {:code "(greatest-common-divisor 25 15)" :expected "5"}]}
+ {:id "all-prefixes"
+  :title "All prefixes of string"
+  :fn-name all-prefixes
+  :prompt "Write a function `all-prefixes` that returns a vector of all non-empty prefixes of string `s` from shortest to longest."
+  :public-tests [{:code "(all-prefixes \"abc\")" :expected "[\"a\" \"ab\" \"abc\"]"} {:code "(all-prefixes \"\")" :expected "[]"}]}
+ {:id "string-sequence"
+  :title "Number sequence as string"
+  :fn-name string-sequence
+  :prompt "Write a function `string-sequence` that takes an integer `n` and returns a string of space-separated integers from 0 to n inclusive."
+  :public-tests [{:code "(string-sequence 0)" :expected "\"0\""} {:code "(string-sequence 5)" :expected "\"0 1 2 3 4 5\""}]}
+ {:id "count-distinct-characters"
+  :title "Count distinct characters"
+  :fn-name count-distinct-characters
+  :prompt "Write a function `count-distinct-characters` that counts case-insensitive distinct characters in string `s`."
+  :public-tests [{:code "(count-distinct-characters \"xyzXYZ\")" :expected "3"} {:code "(count-distinct-characters \"Jerry\")" :expected "4"}]}
+ {:id "parse-music"
+  :title "Parse musical notes to beats"
+  :fn-name parse-music
+  :prompt "Write a function `parse-music` that parses note string `s` where 'o' = 4 beats, 'o|' = 2 beats, '.|' = 1 beat, separated by spaces."
+  :public-tests [{:code "(parse-music \"o o| .| o| o| .| .| .| .| o o\")" :expected "[4 2 1 2 2 1 1 1 1 4 4]"} {:code "(parse-music \"\")" :expected "[]"}]}
+ {:id "how-many-times"
+  :title "Count substring occurrences"
+  :fn-name how-many-times
+  :prompt "Write a function `how-many-times` that counts how many times string `sub` appears in string `s` (including overlapping occurrences)."
+  :public-tests [{:code "(how-many-times \"\" \"a\")" :expected "0"} {:code "(how-many-times \"aaa\" \"a\")" :expected "3"}]}
+ {:id "sort-numbers"
+  :title "Sort number words"
+  :fn-name sort-numbers
+  :prompt "Write a function `sort-numbers` that takes space-separated number words ('zero' to 'nine') and returns them sorted by integer value."
+  :public-tests [{:code "(sort-numbers \"three one five\")" :expected "\"one three five\""} {:code "(sort-numbers \"zero\")" :expected "\"zero\""}]}
+ {:id "find-closest-elements"
+  :title "Find closest elements"
+  :fn-name find-closest-elements
+  :prompt "Write a function `find-closest-elements` that finds the two numbers in a vector with smallest difference and returns `[smaller larger]`."
+  :public-tests [{:code "(find-closest-elements [1.0 2.0 3.0 4.0 5.0 2.2])" :expected "[2.0 2.2]"} {:code "(find-closest-elements [1.0 2.0 3.0 4.0 5.0 2.0])" :expected "[2.0 2.0]"}]}
+ {:id "rescale-to-unit"
+  :title "Rescale to unit interval [0, 1]"
+  :fn-name rescale-to-unit
+  :prompt "Write a function `rescale-to-unit` that rescales a vector of at least two distinct numbers so the minimum is 0.0 and maximum is 1.0."
+  :public-tests [{:code "(rescale-to-unit [1.0 2.0 3.0 4.0 5.0])" :expected "[0.0 0.25 0.5 0.75 1.0]"} {:code "(rescale-to-unit [2.0 4.0])" :expected "[0.0 1.0]"}]}
+ {:id "filter-integers"
+  :title "Filter integers from collection"
+  :fn-name filter-integers
+  :prompt "Write a function `filter-integers` that filters only integer values from a collection containing mixed types."
+  :public-tests [{:code "(filter-integers [\"a\" 3.14 5])" :expected "[5]"} {:code "(filter-integers [1 2 3 \"abc\" {} []])" :expected "[1 2 3]"}]}
+ {:id "strlen"
+  :title "String length"
+  :fn-name strlen
+  :prompt "Write a function `strlen` that returns the length of string `s`."
+  :public-tests [{:code "(strlen \"\")" :expected "0"} {:code "(strlen \"abc\")" :expected "3"}]}
+ {:id "largest-divisor"
+  :title "Largest proper divisor"
+  :fn-name largest-divisor
+  :prompt "Write a function `largest-divisor` that takes an integer `n` > 1 and returns the largest divisor of `n` strictly smaller than `n`."
+  :public-tests [{:code "(largest-divisor 15)" :expected "5"} {:code "(largest-divisor 49)" :expected "7"}]}
+ {:id "factorize"
+  :title "Prime factor list"
+  :fn-name factorize
+  :prompt "Write a function `factorize` that returns a vector of prime factors of positive integer `n` in ascending order."
+  :public-tests [{:code "(factorize 8)" :expected "[2 2 2]"} {:code "(factorize 25)" :expected "[5 5]"}]}
+ {:id "remove-duplicates"
+  :title "Remove duplicate elements"
+  :fn-name remove-duplicates
+  :prompt "Write a function `remove-duplicates` that removes all elements that occur more than once in `coll`, preserving relative order of singletons."
+  :public-tests [{:code "(remove-duplicates [1 2 3 2 4])" :expected "[1 3 4]"} {:code "(remove-duplicates [1 2 3])" :expected "[1 2 3]"}]}
+ {:id "flip-case"
+  :title "Flip character case"
+  :fn-name flip-case
+  :prompt "Write a function `flip-case` that toggles lowercase to uppercase and uppercase to lowercase for each character in string `s`."
+  :public-tests [{:code "(flip-case \"Hello!\")" :expected "\"hELLO!\""} {:code "(flip-case \"abc\")" :expected "\"ABC\""}]}
+ {:id "concatenate-strings"
+  :title "Concatenate strings"
+  :fn-name concatenate-strings
+  :prompt "Write a function `concatenate-strings` that concatenates a vector of strings into a single string."
+  :public-tests [{:code "(concatenate-strings [\"a\" \"b\" \"c\"])" :expected "\"abc\""} {:code "(concatenate-strings [])" :expected "\"\""}]}
+ {:id "filter-by-prefix"
+  :title "Filter strings by prefix"
+  :fn-name filter-by-prefix
+  :prompt "Write a function `filter-by-prefix` that returns strings starting with `prefix` from collection `strings`."
+  :public-tests [{:code "(filter-by-prefix [\"abc\" \"bcd\" \"cde\" \"array\"] \"a\")" :expected "[\"abc\" \"array\"]"} {:code "(filter-by-prefix [] \"a\")" :expected "[]"}]}
+ {:id "get-positive"
+  :title "Get positive numbers"
+  :fn-name get-positive
+  :prompt "Write a function `get-positive` that filters positive numbers from a collection `numbers`."
+  :public-tests [{:code "(get-positive [-1 2 -4 5 6])" :expected "[2 5 6]"} {:code "(get-positive [5 3 -5 2 -3 3 9 0 123 1 -10])" :expected "[5 3 2 3 9 123 1]"}]}
+ {:id "is-prime"
+  :title "Check primality"
+  :fn-name is-prime?
+  :prompt "Write a function `is-prime?` that returns true if integer `n` is prime, false otherwise."
+  :public-tests [{:code "(is-prime? 6)" :expected "false"} {:code "(is-prime? 101)" :expected "true"}]}
+ {:id "sort-third"
+  :title "Sort every third element"
+  :fn-name sort-third
+  :prompt "Write a function `sort-third` that sorts the elements at indices divisible by 3 in `coll`, leaving other elements in place."
+  :public-tests [{:code "(sort-third [1 2 3])" :expected "[1 2 3]"} {:code "(sort-third [5 6 3 4 8 9 2])" :expected "[2 6 3 4 8 9 5]"}]}
+ {:id "unique-elements"
+  :title "Sorted unique elements"
+  :fn-name unique-elements
+  :prompt "Write a function `unique-elements` that returns a sorted vector of unique elements from collection `coll`."
+  :public-tests [{:code "(unique-elements [5 3 5 2 3 3 9 0 123])" :expected "[0 2 3 5 9 123]"} {:code "(unique-elements [])" :expected "[]"}]}
+ {:id "max-element"
+  :title "Maximum element"
+  :fn-name max-element
+  :prompt "Write a function `max-element` that returns the maximum element in a non-empty vector `numbers`."
+  :public-tests [{:code "(max-element [1 2 3])" :expected "3"} {:code "(max-element [5 3 -5 2 -3 3 9 0 123 1 -10])" :expected "123"}]}
+ {:id "fizz-buzz"
+  :title "Count digit 7 in fizzbuzz multiples"
+  :fn-name fizz-buzz
+  :prompt "Write a function `fizz-buzz` that takes integer `n` and counts how many times digit 7 appears in numbers less than `n` that are divisible by 11 or 13."
+  :public-tests [{:code "(fizz-buzz 50)" :expected "0"} {:code "(fizz-buzz 78)" :expected "2"}]}
+ {:id "sort-even"
+  :title "Sort even indices"
+  :fn-name sort-even
+  :prompt "Write a function `sort-even` that returns vector `v` with even-indexed elements sorted in ascending order and odd-indexed elements untouched."
+  :public-tests [{:code "(sort-even [1 2 3])" :expected "[1 2 3]"} {:code "(sort-even [5 6 3 4])" :expected "[3 6 5 4]"}]}
+ {:id "encode-cyclic"
+  :title "Encode cyclic groups"
+  :fn-name encode-cyclic
+  :prompt "Write a function `encode-cyclic` that encodes string `s` by cycling every group of 3 characters: abc -> bca. Remaining 1-2 chars stay unchanged."
+  :public-tests [{:code "(encode-cyclic \"abcdef\")" :expected "\"bcadef\""} {:code "(encode-cyclic \"abcd\")" :expected "\"bcad\""}]}
+ {:id "incr-list"
+  :title "Increment list"
+  :fn-name incr-list
+  :prompt "Write a function `incr-list` that takes a collection of numbers and returns a vector with each element incremented by 1."
+  :public-tests [{:code "(incr-list [1 2 3])" :expected "[2 3 4]"} {:code "(incr-list [5 3 5 2 3 3 9 0 123])" :expected "[6 4 6 3 4 4 10 1 124]"}]}
+ {:id "pairs-sum-to-zero"
+  :title "Check if pairs sum to zero"
+  :fn-name pairs-sum-to-zero?
+  :prompt "Write a function `pairs-sum-to-zero?` that takes a collection of integers and returns true if there exist two distinct elements that sum to zero."
+  :public-tests [{:code "(pairs-sum-to-zero? [1 3 5 0])" :expected "false"} {:code "(pairs-sum-to-zero? [1 3 -2 1])" :expected "false"}]}
+ {:id "change-base"
+  :title "Change numerical base"
+  :fn-name change-base
+  :prompt "Write a function `change-base` that converts a non-negative integer `x` to its string representation in base `b` (2 <= b <= 9)."
+  :public-tests [{:code "(change-base 8 3)" :expected "\"22\""} {:code "(change-base 8 2)" :expected "\"1000\""}]}
+ {:id "triangle-area"
+  :title "Area of triangle"
+  :fn-name triangle-area
+  :prompt "Write a function `triangle-area` that computes the area of a triangle given its `base` and `height`."
+  :public-tests [{:code "(triangle-area 5 3)" :expected "7.5"} {:code "(triangle-area 2 2)" :expected "2.0"}]}
+ {:id "fib4"
+  :title "Fibonacci order 4"
+  :fn-name fib4
+  :prompt "Write a function `fib4` that computes the n-th element of the sequence: fib4(0)=0, fib4(1)=0, fib4(2)=2, fib4(3)=0, and fib4(n)=fib4(n-1)+fib4(n-2)+fib4(n-3)+fib4(n-4)."
+  :public-tests [{:code "(fib4 5)" :expected "4"} {:code "(fib4 6)" :expected "8"}]}
+ {:id "median"
+  :title "Median of numbers"
+  :fn-name median
+  :prompt "Write a function `median` that calculates the median of a non-empty collection of numbers (returning average of middle two for even length)."
+  :public-tests [{:code "(median [3 1 2 4 5])" :expected "3.0"} {:code "(median [-10 4 6 1000 10 20])" :expected "15.0"}]}
+ {:id "is-happy"
+  :title "Happy string check"
+  :fn-name is-happy?
+  :prompt "Write a function `is-happy?` that returns true if string `s` has length >= 3 and every 3 consecutive characters are distinct."
+  :public-tests [{:code "(is-happy? \"a\")" :expected "false"} {:code "(is-happy? \"aa\")" :expected "false"}]}
+ {:id "modp"
+  :title "Modular exponentiation of 2^n mod p"
+  :fn-name modp
+  :prompt "Write a function `modp` that calculates (2^n) mod p for non-negative integer `n` and positive integer `p`."
+  :public-tests [{:code "(modp 3 5)" :expected "3"} {:code "(modp 1101 101)" :expected "2"}]}
+ {:id "remove-vowels"
+  :title "Remove vowels from string"
+  :fn-name remove-vowels
+  :prompt "Write a function `remove-vowels` that returns string `s` with all vowels (a, e, i, o, u, case-insensitive) removed."
+  :public-tests [{:code "(remove-vowels \"abcdef\")" :expected "\"bcdf\""} {:code "(remove-vowels \"aaaaa\")" :expected "\"\""}]}
+ {:id "triplets-sum-to-zero"
+  :title "Triplets sum to zero"
+  :fn-name triplets-sum-to-zero?
+  :prompt "Write a function `triplets-sum-to-zero?` that takes a collection of integers and returns true if there exist three distinct elements that sum to zero."
+  :public-tests [{:code "(triplets-sum-to-zero? [1 3 5 0])" :expected "false"} {:code "(triplets-sum-to-zero? [1 3 -2 1])" :expected "true"}]}
+ {:id "car-race-collision"
+  :title "Car race collision count"
+  :fn-name car-race-collision
+  :prompt "Write a function `car-race-collision` that takes integer `n` (the number of cars traveling in each direction on a track) and returns the total number of collisions (n^2)."
+  :public-tests [{:code "(car-race-collision 2)" :expected "4"} {:code "(car-race-collision 3)" :expected "9"}]}
+ {:id "prime-fib"
+  :title "N-th Fibonacci number that is prime"
+  :fn-name prime-fib
+  :prompt "Write a function `prime-fib` that returns the n-th Fibonacci number that is also prime (1-indexed)."
+  :public-tests [{:code "(prime-fib 1)" :expected "2"} {:code "(prime-fib 2)" :expected "3"}]}
+ {:id "reverse-string"
+  :title "Reverse string"
+  :fn-name reverse-string
+  :prompt "Write a function `reverse-string` that takes a string `s` and returns it reversed."
+  :public-tests [{:code "(reverse-string \"hello\")" :expected "\"olleh\""} {:code "(reverse-string \"\")" :expected "\"\""}]}
+]

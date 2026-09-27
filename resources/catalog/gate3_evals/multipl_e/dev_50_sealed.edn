@@ -1,0 +1,102 @@
+;; MultiPL-E Clojure dev 50 subset — sealed hidden tests
+[ {:id "has-close-elements"
+  :hidden-tests [{:code "(has-close-elements? [1.0 2.0 5.9 4.0 5.0] 0.95)" :expected "true"} {:code "(has-close-elements? [1.0 2.0 5.9 4.0 5.0] 0.8)" :expected "false"} {:code "(has-close-elements? [1.0] 1.0)" :expected "false"}]}
+ {:id "separate-paren-groups"
+  :hidden-tests [{:code "(separate-paren-groups \"(() (()))\")" :expected "[\"(()(()))\"]"} {:code "(separate-paren-groups \"\")" :expected "[]"}]}
+ {:id "truncate-number"
+  :hidden-tests [{:code "(< (Math/abs (double (truncate-number 10.0))) 1e-6)" :expected "true"} {:code "(< (Math/abs (- (truncate-number 0.123) 0.123)) 1e-6)" :expected "true"}]}
+ {:id "below-zero"
+  :hidden-tests [{:code "(below-zero? [0 0 0])" :expected "false"} {:code "(below-zero? [1 -1 2 -2])" :expected "false"} {:code "(below-zero? [1 -2])" :expected "true"}]}
+ {:id "mean-absolute-deviation"
+  :hidden-tests [{:code "(< (Math/abs (- (mean-absolute-deviation [1.0 2.0 3.0]) (/ 2.0 3.0))) 1e-6)" :expected "true"}]}
+ {:id "intersperse"
+  :hidden-tests [{:code "(intersperse [1] 4)" :expected "[1]"} {:code "(intersperse [\"a\" \"b\"] \",\")" :expected "[\"a\" \",\" \"b\"]"}]}
+ {:id "filter-by-substring"
+  :hidden-tests [{:code "(filter-by-substring [\"hello\" \"world\"] \"z\")" :expected "[]"} {:code "(filter-by-substring [\"123\" \"234\"] \"23\")" :expected "[\"123\" \"234\"]"}]}
+ {:id "sum-product"
+  :hidden-tests [{:code "(sum-product [5])" :expected "[5 5]"} {:code "(sum-product [0 1 2])" :expected "[3 0]"}]}
+ {:id "rolling-max"
+  :hidden-tests [{:code "(rolling-max [5 4 3 2 1])" :expected "[5 5 5 5 5]"} {:code "(rolling-max [-1 -2 0 3 2])" :expected "[-1 -1 0 3 3]"}]}
+ {:id "is-palindrome"
+  :hidden-tests [{:code "(is-palindrome? \"\")" :expected "true"} {:code "(is-palindrome? \"a\")" :expected "true"}]}
+ {:id "string-xor"
+  :hidden-tests [{:code "(string-xor \"0\" \"0\")" :expected "\"0\""} {:code "(string-xor \"11\" \"11\")" :expected "\"00\""}]}
+ {:id "longest-string"
+  :hidden-tests [{:code "(longest-string [\"hello\" \"world\"])" :expected "\"hello\""} {:code "(longest-string [\"short\" \"very-long-string\" \"med\"])" :expected "\"very-long-string\""}]}
+ {:id "greatest-common-divisor"
+  :hidden-tests [{:code "(greatest-common-divisor 100 10)" :expected "10"} {:code "(greatest-common-divisor 49 28)" :expected "7"}]}
+ {:id "all-prefixes"
+  :hidden-tests [{:code "(all-prefixes \"x\")" :expected "[\"x\"]"} {:code "(all-prefixes \"clj\")" :expected "[\"c\" \"cl\" \"clj\"]"}]}
+ {:id "string-sequence"
+  :hidden-tests [{:code "(string-sequence 1)" :expected "\"0 1\""} {:code "(string-sequence 3)" :expected "\"0 1 2 3\""}]}
+ {:id "count-distinct-characters"
+  :hidden-tests [{:code "(count-distinct-characters \"\")" :expected "0"} {:code "(count-distinct-characters \"aaaa\")" :expected "1"}]}
+ {:id "parse-music"
+  :hidden-tests [{:code "(parse-music \"o\")" :expected "[4]"} {:code "(parse-music \".|\")" :expected "[1]"}]}
+ {:id "how-many-times"
+  :hidden-tests [{:code "(how-many-times \"aaaa\" \"aa\")" :expected "3"} {:code "(how-many-times \"banana\" \"an\")" :expected "2"}]}
+ {:id "sort-numbers"
+  :hidden-tests [{:code "(sort-numbers \"nine eight seven\")" :expected "\"seven eight nine\""} {:code "(sort-numbers \"\")" :expected "\"\""}]}
+ {:id "find-closest-elements"
+  :hidden-tests [{:code "(find-closest-elements [10.0 1.0 20.0 1.5])" :expected "[1.0 1.5]"}]}
+ {:id "rescale-to-unit"
+  :hidden-tests [{:code "(rescale-to-unit [10.0 30.0 20.0])" :expected "[0.0 1.0 0.5]"}]}
+ {:id "filter-integers"
+  :hidden-tests [{:code "(filter-integers [])" :expected "[]"} {:code "(filter-integers [\"hello\" :kw])" :expected "[]"}]}
+ {:id "strlen"
+  :hidden-tests [{:code "(strlen \"hello world\")" :expected "11"} {:code "(strlen \" \")" :expected "1"}]}
+ {:id "largest-divisor"
+  :hidden-tests [{:code "(largest-divisor 10)" :expected "5"} {:code "(largest-divisor 7)" :expected "1"}]}
+ {:id "factorize"
+  :hidden-tests [{:code "(factorize 70)" :expected "[2 5 7]"} {:code "(factorize 1)" :expected "[]"}]}
+ {:id "remove-duplicates"
+  :hidden-tests [{:code "(remove-duplicates [1 1 1])" :expected "[]"} {:code "(remove-duplicates [])" :expected "[]"}]}
+ {:id "flip-case"
+  :hidden-tests [{:code "(flip-case \"\")" :expected "\"\""} {:code "(flip-case \"123\")" :expected "\"123\""}]}
+ {:id "concatenate-strings"
+  :hidden-tests [{:code "(concatenate-strings [\"hello \", \"world\"])" :expected "\"hello world\""}]}
+ {:id "filter-by-prefix"
+  :hidden-tests [{:code "(filter-by-prefix [\"apple\" \"banana\" \"apricot\"] \"ap\")" :expected "[\"apple\" \"apricot\"]"}]}
+ {:id "get-positive"
+  :hidden-tests [{:code "(get-positive [])" :expected "[]"} {:code "(get-positive [-1 -2 0])" :expected "[]"}]}
+ {:id "is-prime"
+  :hidden-tests [{:code "(is-prime? 1)" :expected "false"} {:code "(is-prime? 2)" :expected "true"} {:code "(is-prime? 4)" :expected "false"}]}
+ {:id "sort-third"
+  :hidden-tests [{:code "(sort-third [])" :expected "[]"} {:code "(sort-third [9 1 2 8 3 4 7])" :expected "[7 1 2 8 3 4 9]"}]}
+ {:id "unique-elements"
+  :hidden-tests [{:code "(unique-elements [1 1 1])" :expected "[1]"}]}
+ {:id "max-element"
+  :hidden-tests [{:code "(max-element [-5 -2 -1])" :expected "-1"}]}
+ {:id "fizz-buzz"
+  :hidden-tests [{:code "(fizz-buzz 100)" :expected "3"}]}
+ {:id "sort-even"
+  :hidden-tests [{:code "(sort-even [])" :expected "[]"} {:code "(sort-even [9 2 7 4 5 6])" :expected "[5 2 7 4 9 6]"}]}
+ {:id "encode-cyclic"
+  :hidden-tests [{:code "(encode-cyclic \"\")" :expected "\"\""} {:code "(encode-cyclic \"ab\")" :expected "\"ab\""}]}
+ {:id "incr-list"
+  :hidden-tests [{:code "(incr-list [])" :expected "[]"} {:code "(incr-list [-1])" :expected "[0]"}]}
+ {:id "pairs-sum-to-zero"
+  :hidden-tests [{:code "(pairs-sum-to-zero? [1 2 3 7 -2])" :expected "true"} {:code "(pairs-sum-to-zero? [0 0])" :expected "true"}]}
+ {:id "change-base"
+  :hidden-tests [{:code "(change-base 7 2)" :expected "\"111\""} {:code "(change-base 0 5)" :expected "\"0\""}]}
+ {:id "triangle-area"
+  :hidden-tests [{:code "(triangle-area 10 8)" :expected "40.0"}]}
+ {:id "fib4"
+  :hidden-tests [{:code "(fib4 7)" :expected "14"} {:code "(fib4 1)" :expected "0"}]}
+ {:id "median"
+  :hidden-tests [{:code "(median [1])" :expected "1.0"} {:code "(median [1 2])" :expected "1.5"}]}
+ {:id "is-happy"
+  :hidden-tests [{:code "(is-happy? \"abcd\")" :expected "true"} {:code "(is-happy? \"aabb\")" :expected "false"} {:code "(is-happy? \"adb\")" :expected "true"} {:code "(is-happy? \"xyy\")" :expected "false"}]}
+ {:id "modp"
+  :hidden-tests [{:code "(modp 0 101)" :expected "1"} {:code "(modp 3 11)" :expected "8"}]}
+ {:id "remove-vowels"
+  :hidden-tests [{:code "(remove-vowels \"HELLO\")" :expected "\"HLL\""} {:code "(remove-vowels \"\")" :expected "\"\""}]}
+ {:id "triplets-sum-to-zero"
+  :hidden-tests [{:code "(triplets-sum-to-zero? [1 2 3 7])" :expected "false"} {:code "(triplets-sum-to-zero? [2 4 -5 3 9 7])" :expected "true"}]}
+ {:id "car-race-collision"
+  :hidden-tests [{:code "(car-race-collision 10)" :expected "100"} {:code "(car-race-collision 0)" :expected "0"}]}
+ {:id "prime-fib"
+  :hidden-tests [{:code "(prime-fib 3)" :expected "5"} {:code "(prime-fib 4)" :expected "13"}]}
+ {:id "reverse-string"
+  :hidden-tests [{:code "(reverse-string \"a\")" :expected "\"a\""} {:code "(reverse-string \"racecar\")" :expected "\"racecar\""}]}
+]

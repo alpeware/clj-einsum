@@ -236,19 +236,19 @@
       (is (= (:code sub1) (:code best))))))
 
 (deftest test-agentic-loop-ratchet-scripted-trajectory
-  (testing "Agentic loop ratchets to best submission: turn 1 passes 2/2 and turn 2 passes 1/2 -> turn 1 submission wins"
+  (testing "Agentic loop ratchets to best submission: turn 1 passes 1/2 and turn 2 passes 0/2 -> turn 1 submission wins"
     (let [task {:id "ratchet-test-task"
                 :fn-name 'ratchet-fn
                 :prompt "Write a function ratchet-fn that increments a number."
                 :public-tests [{:code "(ratchet-fn 1)" :expected "2"}
                                {:code "(ratchet-fn 2)" :expected "3"}]}
-          hidden-tests [{:code "(ratchet-fn 3)" :expected "4"}
+          hidden-tests [{:code "(ratchet-fn 1)" :expected "2"}
                         {:code "(ratchet-fn 4)" :expected "5"}]
-          ;; Turn 1: passes 2/2 public tests (and hidden tests)
-          turn1-code "(defn ratchet-fn [x] (inc x))"
+          ;; Turn 1: passes 1/2 public tests (no early exit)
+          turn1-code "(defn ratchet-fn [x] (if (= x 1) 2 999))"
           turn1-resp (format "<|tool_call>call:eval_clojure{code:<|\"|>%s<|\"|>}<tool_call|>" turn1-code)
-          ;; Turn 2: regresses, only passes 1/2 public tests
-          turn2-code "(defn ratchet-fn [x] (if (= x 1) 2 999))"
+          ;; Turn 2: regresses, passes 0/2 public tests
+          turn2-code "(defn ratchet-fn [x] 0)"
           turn2-resp (format "<|tool_call>call:eval_clojure{code:<|\"|>%s<|\"|>}<tool_call|>" turn2-code)
           ;; Turn 3: stops tool calls
           turn3-resp "I am finished."
@@ -259,11 +259,34 @@
                    :checkpoint-sha "dummy-cp"}
           opts {:quiet true :max-turns 3 :dry-run false}
           row (bench-run/run-agentic-task session task hidden-tests "dummy-sha" opts)]
-      ;; The ratcheted candidate must be turn 1's 2/2 submission, NOT turn 2's 1/2 submission
+      ;; The ratcheted candidate must be turn 1's 1/2 submission, NOT turn 2's 0/2 submission
+      (is (= turn1-code (:candidate-code row)))
+      (is (= 2 (:n-submissions row)))))
+
+  (testing "Agentic loop early exits on 100% public pass (Optimization 4)"
+    (let [task {:id "ratchet-test-task"
+                :fn-name 'ratchet-fn
+                :prompt "Write a function ratchet-fn that increments a number."
+                :public-tests [{:code "(ratchet-fn 1)" :expected "2"}
+                               {:code "(ratchet-fn 2)" :expected "3"}]}
+          hidden-tests [{:code "(ratchet-fn 3)" :expected "4"}
+                        {:code "(ratchet-fn 4)" :expected "5"}]
+          ;; Turn 1: passes 2/2 public tests -> early exits without running turn 2
+          turn1-code "(defn ratchet-fn [x] (inc x))"
+          turn1-resp (format "<|tool_call>call:eval_clojure{code:<|\"|>%s<|\"|>}<tool_call|>" turn1-code)
+          turn2-code "(defn ratchet-fn [x] 0)"
+          turn2-resp (format "<|tool_call>call:eval_clojure{code:<|\"|>%s<|\"|>}<tool_call|>" turn2-code)
+          session {:opts {:max-turns 3
+                          :quiet true
+                          :scripted-responses [turn1-resp turn2-resp]}
+                   :model-dir "dummy-model"
+                   :checkpoint-sha "dummy-cp"}
+          opts {:quiet true :max-turns 3 :dry-run false}
+          row (bench-run/run-agentic-task session task hidden-tests "dummy-sha" opts)]
       (is (= turn1-code (:candidate-code row)))
       (is (true? (:passed? row)))
       (is (= {:passed 2 :total 2} (:test-summary row)))
-      (is (= 2 (:n-submissions row))))))
+      (is (= 1 (:n-submissions row))))))
 
 (defspec prop-pick-best-public-submission-invariants 50
   (prop/for-all [submissions-data (gen/not-empty

@@ -7,7 +7,7 @@
             [clojure.java.shell :as sh]
             [clojure.string :as str]
             [sci.core :as sci]
-            [tools.gemma4-agent :as agent])
+            [einsum.agent.core :as agent])
   (:import [java.io File]
            [java.security MessageDigest]))
 
@@ -442,30 +442,30 @@ Once your definition passes all public tests, provide your final response.")
                       (and has-error? (not (seq raw-failures))) :error
                       :else :test-failure)]
     (cond-> {:model (str model)
-               :task (str task)
-               :mode (keyword mode)
-               :passed? all-passed?
-               :n-submissions (long (or n-submissions 1))
-               :tokens-in (long (or tokens-in 0))
-               :tokens-out (long (or tokens-out 0))
-               :max-new-tokens (long (or max-new-tokens 1536))
-               :wall-ms (double (or wall-ms 0.0))
-               :repetition-penalty (double (or repetition-penalty 1.0))
-               :sealed-sha (str sealed-sha)
-               :checkpoint-sha (str checkpoint-sha)
-               :harness-sha (:harness-sha (harness-version-info))
-               :harness-dirty? (:harness-dirty? (harness-version-info))
-               :stop-reason stop-reason
-               :dry-run? (boolean dry-run?)
-               :candidate-code candidate-code
-               :error err-msg
-               :test-summary {:passed (long (or (:passed-count grade-res) 0))
-                              :total (long (or (:total-count grade-res) 0))}
-               :failures (when (seq raw-failures) raw-failures)}
-        prompt-sha
-        (assoc :prompt-sha (str prompt-sha))
-        (and (not all-passed?) (seq transcript))
-        (assoc :transcript (vec transcript)))))
+             :task (str task)
+             :mode (keyword mode)
+             :passed? all-passed?
+             :n-submissions (long (or n-submissions 1))
+             :tokens-in (long (or tokens-in 0))
+             :tokens-out (long (or tokens-out 0))
+             :max-new-tokens (long (or max-new-tokens 1536))
+             :wall-ms (double (or wall-ms 0.0))
+             :repetition-penalty (double (or repetition-penalty 1.0))
+             :sealed-sha (str sealed-sha)
+             :checkpoint-sha (str checkpoint-sha)
+             :harness-sha (:harness-sha (harness-version-info))
+             :harness-dirty? (:harness-dirty? (harness-version-info))
+             :stop-reason stop-reason
+             :dry-run? (boolean dry-run?)
+             :candidate-code candidate-code
+             :error err-msg
+             :test-summary {:passed (long (or (:passed-count grade-res) 0))
+                            :total (long (or (:total-count grade-res) 0))}
+             :failures (when (seq raw-failures) raw-failures)}
+      prompt-sha
+      (assoc :prompt-sha (str prompt-sha))
+      (and (not all-passed?) (seq transcript))
+      (assoc :transcript (vec transcript)))))
 
 (defn read-results-edn
   "Reads all EDN rows from results-file."

@@ -1,14 +1,9 @@
 (ns tools.gemma4-inference
   "Top-level runnable CLI entrypoint and REPL API for end-to-end Gemma 4 text generation via pure XLA execution."
-  (:require [clojure.pprint :refer [pprint]]
-            [clojure.string :as str]
-            [einsum.core :as xla]
-            [einsum.models.gemma4.config :as cfg]
+  (:require [einsum.models.gemma4.config :as cfg]
             [einsum.models.gemma4.kernels :as kernels]
             [einsum.models.gemma4.runtime :as rt]
             [einsum.models.gemma4.weights :as gemma-weights]
-            [einsum.runtime.profile :as profile]
-            [einsum.runtime.tokenizer.protocol :refer [bos-id decode encode]]
             [tools.cli :as cli]))
 
 ;; ==============================================================================
@@ -42,150 +37,10 @@
 ;; High-Level Text Generation
 ;; ==============================================================================
 
-(defn generate-text
-  "Generates text response using Gemma 4 model via pure Tensor Logic execution."
-  [session prompt]
-  (let [{:keys [tokenizer opts]} session
-        {:keys [max-new-tokens temperature top-k model quiet]} opts
-        clean-prompt (or prompt "The capital of France is")
-        model-str (or model (get-in session [:config :model-dir]) "")
-        is-it-model (str/includes? (str/lower-case model-str) "-it")
-        is-already-templated (or (str/includes? clean-prompt "<|turn>user") (str/includes? clean-prompt "<|turn>model"))
-        prompt-ids (cond
-                     (and is-it-model (not is-already-templated))
-                     (let [raw-ids (encode tokenizer clean-prompt)
-                           clean-ids (if (= (first raw-ids) (bos-id tokenizer)) (rest raw-ids) raw-ids)
-                           prefix (if (:thinking opts)
-                                    ;; <bos><|turn>system\n<|think|><turn|>\n<|turn>user\n
-                                    [(bos-id tokenizer) 105 9731 107 98 106 107 105 2364 107]
-                                    [(bos-id tokenizer) 105 2364 107])]
-                       (vec (concat prefix clean-ids [106 107 105 4368 107])))
-
-                     :else
-                     (let [raw-ids (encode tokenizer clean-prompt)]
-                       (if (= (first raw-ids) (bos-id tokenizer))
-                         (vec raw-ids)
-                         (vec (cons (bos-id tokenizer) raw-ids)))))
-        prompt-len (count prompt-ids)
-        max-seq-len (long (or (:max-seq-len session) (:max-seq-len opts) (min 2048 (+ prompt-len max-new-tokens 16))))]
-    (when-not quiet
-      (let [prompt-str (if (> (count clean-prompt) 200)
-                         (str (subs clean-prompt 0 100) " ... [truncated " (count clean-prompt) " chars] ... " (subs clean-prompt (- (count clean-prompt) 100)))
-                         clean-prompt)
-            tok-str (if (> prompt-len 30)
-                      (str "[" (str/join " " (take 10 prompt-ids)) " ... " (str/join " " (take-last 5 prompt-ids)) "]")
-                      (str prompt-ids))]
-        (println (format "Prompt: \"%s\"" prompt-str))
-        (println (format "Generation Options: max-new-tokens=%d, temperature=%.2f, top-k=%d, precision=%s, method=%s"
-                         max-new-tokens temperature top-k (name (get-in session [:config :weight-dtype]))
-                         (name (or (:method opts) :kv-cache))))
-        (println (format "Encoded Token IDs (%d tokens): %s" prompt-len tok-str))))
-
-    (let [metrics-atom (or (:metrics-atom session) (atom {}))
-          trace-spans-atom (or (:trace-spans-atom session) (atom []))
-          reuse-weights? (some? (:device-weights session))
-          reuse-exec? (some? (:executable session))
-          exec (binding [profile/*active-trace-spans* trace-spans-atom]
-                 (if reuse-exec?
-                   (:executable session)
-                   (profile/with-profile metrics-atom "graph_compilation"
-                     (cond
-                       (or (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
-                       (kernels/compile-in-vram-loop-executable session max-seq-len)
-
-                       (= (:method opts) :tensor-logic-full)
-                       (kernels/compile-tensor-logic-executable session max-seq-len)
-
-                       :else
-                       (kernels/compile-gemma4-kv-executable session max-seq-len)))))
-          safe-prefill-len (cfg/max-safe-prefill-seq-len (:config session))
-          prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
-                         (if (:prefill-executable session)
-                           (:prefill-executable session)
-                           (when (and (or (= (or (:method opts) :kv-cache) :kv-cache)
-                                          (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
-                                      (<= max-seq-len safe-prefill-len))
-                             (profile/with-profile metrics-atom "graph_compilation"
-                               (kernels/compile-gemma4-prefill-executable session max-seq-len)))))
-          step-exec (binding [profile/*active-trace-spans* trace-spans-atom]
-                      (when (and (or (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
-                                 (> max-seq-len safe-prefill-len))
-                        (profile/with-profile metrics-atom "graph_compilation"
-                          (kernels/compile-gemma4-kv-executable session max-seq-len))))
-          active-session (assoc session
-                                :prefill-executable prefill-exec
-                                :step-executable step-exec)
-          device-weights (binding [profile/*active-trace-spans* trace-spans-atom]
-                           (if reuse-weights?
-                             (:device-weights session)
-                             (profile/with-profile metrics-atom "weight_transfer"
-                               (gemma-weights/allocate-device-weights session))))]
-      (when-not quiet
-        (println "\nGenerating tokens autoregressively with pure Tensor Logic Gemma 4 Kernel..."))
-      (let [final-context (binding [profile/*active-trace-spans* trace-spans-atom]
-                            (profile/with-profile metrics-atom "autoregressive_generation"
-                              (rt/run-autoregressive-generation active-session exec device-weights prompt-ids max-seq-len)))
-            generated-str (decode tokenizer final-context)]
-        (when-not quiet
-          (println)
-          (println generated-str))
-        (when-not reuse-weights?
-          (if-let [sa (:session-arena session)]
-            (xla/close-arena! sa)
-            (doseq [w device-weights] (xla/destroy-buffer! (:ctx session) w))))
-        (when-let [out-path (:out opts)]
-          (spit out-path generated-str)
-          (when-not quiet
-            (println (format "\n  ↳ Written generated output to [%s]" out-path))))
-        (when-let [profile-path (:profile-out opts)]
-          (spit profile-path (with-out-str (pprint @metrics-atom)))
-          (when-not quiet
-            (println (format "  ↳ Saved telemetry profile report to [%s]" profile-path))))
-        (when-let [trace-path (:chrome-trace-out opts)]
-          (profile/save-chrome-trace! @trace-spans-atom trace-path)
-          (when-not quiet
-            (println (format "  ↳ Saved Chrome tracing JSON to [%s]" trace-path))))
-        (when-not quiet
-          (println "\n==================================================================")
-          (println "=== Tensor Logic Gemma 4 Generation Verification Passed! ===")
-          (println "=================================================================="))
-        final-context))))
-
-(defn generate-text-string
-  "Generates text response using Gemma 4 model session and returns decoded text string."
-  [session prompt]
-  (let [{:keys [tokenizer]} session
-        final-context (generate-text session prompt)]
-    (decode tokenizer final-context)))
-
-(defn generate-new-tokens-and-text
-  "Generates text response using Gemma 4 model session and returns a map:
-   {:text <decoded-new-text>
-    :prompt-tokens <int>
-    :new-tokens <int>
-    :new-token-ids <vec>}."
-  [session prompt]
-  (let [{:keys [tokenizer]} session
-        raw-ids (encode tokenizer prompt)
-        prompt-ids (if (= (first raw-ids) (bos-id tokenizer))
-                     raw-ids
-                     (vec (cons (bos-id tokenizer) raw-ids)))
-        prompt-len (count prompt-ids)
-        seq-len (long (or (:max-seq-len session) (get-in session [:config :max-seq-len]) 2048))
-        safe-prompt-len (min prompt-len (max 0 (- seq-len 2)))
-        final-context (vec (generate-text session prompt))
-        total-len (count final-context)
-        slice-start (min total-len safe-prompt-len)
-        new-ids (subvec final-context slice-start)]
-    {:text (decode tokenizer new-ids)
-     :prompt-tokens prompt-len
-     :new-tokens (count new-ids)
-     :new-token-ids (vec new-ids)}))
-
-(defn generate-new-text-string
-  "Generates text response using Gemma 4 model session and returns ONLY newly generated text string without prompt prefix."
-  [session prompt]
-  (:text (generate-new-tokens-and-text session prompt)))
+(def generate-text rt/generate-text)
+(def generate-text-string rt/generate-text-string)
+(def generate-new-tokens-and-text rt/generate-new-tokens-and-text)
+(def generate-new-text-string rt/generate-new-text-string)
 
 ;; ==============================================================================
 ;; Backward-Compatible Re-Exports for Existing Callers

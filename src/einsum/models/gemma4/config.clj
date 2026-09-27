@@ -23,8 +23,9 @@
 (defn find-model-dir
   "Finds the first existing model directory from candidate paths."
   [dirs]
-  (or (first (filter #(.exists (io/file %)) dirs))
-      (first dirs)))
+  (let [candidates (if (string? dirs) [dirs] (seq dirs))]
+    (or (first (filter #(try (.exists (io/file %)) (catch Throwable _ false)) candidates))
+        (first candidates))))
 
 (defn load-model-config
   "Loads JSON configuration map from model directory `config.json`."

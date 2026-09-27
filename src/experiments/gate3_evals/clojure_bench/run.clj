@@ -5,10 +5,10 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [experiments.gate3-evals.clojure-bench.core :as bench-core]
-            [tools.cli :as cli]
-            [tools.gemma4-agent :as agent]
-            [tools.gemma4-inference :as gemma4-inf]))
+            [einsum.agent.core :as agent]
+            [einsum.models.gemma4.config :as cfg]
+            [einsum.models.gemma4.runtime :as gemma4-rt]
+            [experiments.gate3-evals.clojure-bench.core :as bench-core]))
 
 ;; =============================================================================
 ;; 1. Default Evaluation Configuration
@@ -39,16 +39,24 @@
 
 ;; Mock reference solutions used for dry-run verification
 (def MOCK-REFERENCE-SOLUTIONS
-  {"first-n" "(defn first-n [coll] (vec (take 10 coll)))"
-   "my-range" "(defn my-range ([end] (my-range 0 end)) ([start end] (loop [i start acc []] (if (>= i end) acc (recur (inc i) (conj acc i))))))"
-   "deep-flatten" "(defn deep-flatten [coll] (reduce (fn [acc x] (if (sequential? x) (into acc (deep-flatten x)) (conj acc x))) [] coll))"
-   "freqs" "(defn freqs [coll] (reduce (fn [m x] (update m x (fnil inc 0))) {} coll))"
-   "partition-by-parity" "(defn partition-by-parity [coll] (reduce (fn [m x] (if (even? x) (update m :even conj x) (update m :odd conj x))) {:even [] :odd []} coll))"
-   "my-comp" "(defn my-comp [& fns] (if (empty? fns) identity (let [rfns (reverse fns) r (first rfns) rest-fns (rest rfns)] (fn [& args] (reduce (fn [acc f] (f acc)) (apply r args) rest-fns)))))"
-   "balanced-delims?" "(defn balanced-delims? [s] (let [matches {\\) \\( \\] \\[ \\} \\{} opens #{\\( \\[ \\{}] (loop [chars (seq s) stack ()] (if-let [c (first chars)] (cond (opens c) (recur (rest chars) (conj stack c)) (matches c) (if (= (first stack) (matches c)) (recur (rest chars) (pop stack)) false) :else (recur (rest chars) stack)) (empty? stack)))))"
-   "deep-update-vals" "(defn deep-update-vals [f x] (cond (map? x) (reduce-kv (fn [m k v] (assoc m k (deep-update-vals f v))) {} x) (vector? x) (mapv #(deep-update-vals f %) x) :else (f x)))"
-   "lazy-interleave" "(defn lazy-interleave [c1 c2] (lazy-seq (let [s1 (seq c1) s2 (seq c2)] (cond (and s1 s2) (cons (first s1) (cons (first s2) (lazy-interleave (rest s1) (rest s2)))) s1 s1 s2 s2 :else nil))))"
-   "my-or" "(defmacro my-or ([] nil) ([x] x) ([x & next] (list (quote let) [(quote or#) x] (list (quote if) (quote or#) (quote or#) (cons (quote my-or) next)))))"})
+  (let [base {"first-n" "(defn first-n [coll] (vec (take 10 coll)))"
+              "my-range" "(defn my-range ([end] (my-range 0 end)) ([start end] (loop [i start acc []] (if (>= i end) acc (recur (inc i) (conj acc i))))))"
+              "deep-flatten" "(defn deep-flatten [coll] (reduce (fn [acc x] (if (sequential? x) (into acc (deep-flatten x)) (conj acc x))) [] coll))"
+              "freqs" "(defn freqs [coll] (reduce (fn [m x] (update m x (fnil inc 0))) {} coll))"
+              "partition-by-parity" "(defn partition-by-parity [coll] (reduce (fn [m x] (if (even? x) (update m :even conj x) (update m :odd conj x))) {:even [] :odd []} coll))"
+              "my-comp" "(defn my-comp [& fns] (if (empty? fns) identity (let [rfns (reverse fns) r (first rfns) rest-fns (rest rfns)] (fn [& args] (reduce (fn [acc f] (f acc)) (apply r args) rest-fns)))))"
+              "balanced-delims?" "(defn balanced-delims? [s] (let [matches {\\) \\( \\] \\[ \\} \\{} opens #{\\( \\[ \\{}] (loop [chars (seq s) stack ()] (if-let [c (first chars)] (cond (opens c) (recur (rest chars) (conj stack c)) (matches c) (if (= (first stack) (matches c)) (recur (rest chars) (pop stack)) false) :else (recur (rest chars) stack)) (empty? stack)))))"
+              "deep-update-vals" "(defn deep-update-vals [f x] (cond (map? x) (reduce-kv (fn [m k v] (assoc m k (deep-update-vals f v))) {} x) (vector? x) (mapv #(deep-update-vals f %) x) :else (f x)))"
+              "lazy-interleave" "(defn lazy-interleave [c1 c2] (lazy-seq (let [s1 (seq c1) s2 (seq c2)] (cond (and s1 s2) (cons (first s1) (cons (first s2) (lazy-interleave (rest s1) (rest s2)))) s1 s1 s2 s2 :else nil))))"
+              "my-or" "(defmacro my-or ([] nil) ([x] x) ([x & next] (list (quote let) [(quote or#) x] (list (quote if) (quote or#) (quote or#) (cons (quote my-or) next)))))"}
+        extra (try
+                (if-let [res (or (io/resource "catalog/gate3_evals/multipl_e/solutions.edn")
+                                 (let [f (io/file "resources/catalog/gate3_evals/multipl_e/solutions.edn")]
+                                   (when (.exists f) f)))]
+                  (edn/read-string (slurp res))
+                  {})
+                (catch Throwable _ {}))]
+    (merge base extra)))
 
 ;; =============================================================================
 ;; 2. Session Initialization & Weight Hash
@@ -84,7 +92,7 @@
     {:opts opts
      :model-dir (:model opts)
      :checkpoint-sha "dry-run-checkpoint-sha"}
-    (let [model-dir (cli/find-model-dir (or (:model-dir opts) (:model opts)) :gemma-4)
+    (let [model-dir (cfg/find-model-dir (or (:model-dir opts) (:model opts)))
           max-seq-len (long (or (:max-seq-len opts) 1024))
           checkpoint-sha (compute-checkpoint-hash model-dir)
           session-opts (assoc opts
@@ -94,7 +102,7 @@
                               :max-seq-len max-seq-len
                               :max-new-tokens (long (or (:max-new-tokens opts) 512))
                               :sandbox :benchmark)
-          session (gemma4-inf/init-agent-vram-session session-opts max-seq-len)]
+          session (gemma4-rt/init-agent-vram-session session-opts max-seq-len)]
       (assoc session
              :model-dir model-dir
              :checkpoint-sha checkpoint-sha))))
@@ -139,13 +147,17 @@
           :dry-run? true}))
 
       ;; Actual model inference
-      (let [chat-prompt (agent/format-agent-chat-prompt
+      (let [stop-pred (fn [text]
+                        (agent/semantic-stop? text {:target-fn fn-name}))
+            single-shot-session (update session :opts assoc
+                                        :stop-predicate stop-pred)
+            chat-prompt (agent/format-agent-chat-prompt
                          bench-core/SINGLE-SHOT-SYSTEM-PROMPT
                          [{:role :user :content prompt}]
                          8
                          (boolean (:thinking opts))
                          nil)
-            gen-res (gemma4-inf/generate-new-tokens-and-text session chat-prompt)
+            gen-res (gemma4-rt/generate-new-tokens-and-text single-shot-session chat-prompt)
             wall-ms (/ (- (System/nanoTime) t0) 1e6)
             gen-text (:text gen-res)
             prompt-tokens (long (or (:prompt-tokens gen-res) 0))
@@ -234,14 +246,25 @@
                      is-sub? (and (seq candidate) (bench-core/submission-form? candidate fn-name))]
                  (if is-sub?
                    (let [pub-res (bench-core/grade-submission sci-ctx candidate (:public-tests task))
-                         feedback (bench-core/format-public-feedback pub-res)]
+                         feedback (bench-core/format-public-feedback pub-res)
+                         early-exit? (boolean (:all-passed? pub-res))]
                      (swap! submissions conj {:code candidate :public-res pub-res :turn turn})
-                     (update eval-res :output #(str % "\n" feedback)))
+                     (-> eval-res
+                         (update :output #(str % "\n" feedback))
+                         (assoc :early-exit? early-exit?)))
                    eval-res))))
+
+            candidate-check-fn (fn [text]
+                                 (let [candidate (bench-core/extract-candidate-code text fn-name)]
+                                   (and (seq candidate) (bench-core/submission-form? candidate fn-name))))
+            stop-pred (fn [text]
+                        (agent/semantic-stop? text {:target-fn fn-name}))
 
             task-session (update session :opts assoc
                                  :sandbox :benchmark
                                  :tool-eval-fn submission-tool-hook
+                                 :candidate-check-fn candidate-check-fn
+                                 :stop-predicate stop-pred
                                  :quiet quiet)
             transcript (agent/run-agent-loop task-session prompt (bench-core/create-tightened-grading-ctx) submission-tool-hook)
             telemetry (get (meta transcript) :turn-telemetry [])
@@ -313,7 +336,8 @@
 (defn run-benchmark
   "Executes the clojure_bench evaluation suite across specified tasks and modes."
   [opts]
-  (let [dry-run? (boolean (:dry-run opts))
+  (let [opts (merge DEFAULT-BENCH-OPTS opts)
+        dry-run? (boolean (:dry-run opts))
         results-path (if (and dry-run? (= (:results-file opts) (:results-file DEFAULT-BENCH-OPTS)))
                        "resources/catalog/gate3_evals/clojure_bench/results_dry_run.edn"
                        (:results-file opts))
@@ -383,7 +407,7 @@
 
       (finally
         (when (and (not (:dry-run opts)) (map? session))
-          (try (gemma4-inf/close-agent-session! session) (catch Throwable _ nil)))))
+          (try (gemma4-rt/close-agent-session! session) (catch Throwable _ nil)))))
 
     ;; Summarize cumulative metrics from results-file and output CSV
     (let [cumulative-rows (bench-core/read-results-edn results-file)
@@ -425,11 +449,40 @@
 ;; 5. CLI Entrypoint
 ;; =============================================================================
 
+(defn- parse-raw-cli-args
+  [args defaults]
+  (loop [rem-args (vec args)
+         opts defaults]
+    (if (empty? rem-args)
+      opts
+      (let [arg (first rem-args)]
+        (cond
+          (str/starts-with? arg "--")
+          (let [flag (subs arg 2)
+                k (keyword flag)]
+            (if (or (= flag "dry-run") (= flag "quiet") (= flag "overwrite")
+                    (= flag "thinking") (= flag "nudge-on-no-tool"))
+              (if (and (> (count rem-args) 1) (not (str/starts-with? (second rem-args) "--")))
+                (recur (subvec rem-args 2) (assoc opts k (Boolean/parseBoolean (second rem-args))))
+                (recur (subvec rem-args 1) (assoc opts k true)))
+              (if (> (count rem-args) 1)
+                (let [val (second rem-args)
+                      parsed (cond
+                               (or (= flag "model") (= flag "model-dir"))
+                               (if (and (string? val) (not (str/starts-with? val ".")) (not (str/starts-with? val "/")))
+                                 (if (.exists (io/file val)) val (str ".models/" (last (str/split val #"/"))))
+                                 val)
+                               :else val)]
+                  (recur (subvec rem-args 2) (assoc opts k parsed)))
+                (recur (subvec rem-args 1) opts))))
+          :else
+          (recur (subvec rem-args 1) opts))))))
+
 (defn parse-bench-cli-args
   "Parses CLI flags for clj_bench."
   [args]
   (let [user-flags (set (keep #(when (str/starts-with? % "--") (subs % 2)) args))
-        raw-opts (cli/parse-cli-args args DEFAULT-BENCH-OPTS)
+        raw-opts (parse-raw-cli-args args DEFAULT-BENCH-OPTS)
         mode (keyword (str/replace (or (:mode raw-opts) "all") #"^:+" ""))
         opts (cond-> raw-opts
                (string? (:max-turns raw-opts)) (update :max-turns #(Long/parseLong %))

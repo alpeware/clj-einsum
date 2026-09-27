@@ -1,11 +1,13 @@
 (ns einsum.agent-test
   "Unit and generative tests for tools.gemma4-agent SCI tool execution, thinking trace extraction, and turn formatting."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [tools.gemma4-agent :as agent]))
+            [einsum.agent.core :as agent]))
 
 (deftest test-extract-clojure-code-blocks
   (testing "Extracting single and multiple Clojure code blocks from model generation"
@@ -419,3 +421,158 @@
                   (and (not (str/includes? prompt thought-str))
                        (not (str/includes? prompt "<|channel>thought"))
                        (str/includes? prompt code-str)))))
+
+;; =============================================================================
+;; Harness v2 Tests: Semantic Early Stopping, Nudge Short-Circuit, Early Exit
+;; =============================================================================
+
+(deftest test-inside-unclosed-thought
+  (testing "Unclosed thoughts detect as inside-thought"
+    (is (true? (agent/inside-unclosed-thought? "<|channel>thought\nStill thinking...")))
+    (is (true? (agent/inside-unclosed-thought? "<think>Pondering options...")))
+    (is (true? (agent/inside-unclosed-thought? "<|thought|>\nConsidering..."))))
+  (testing "Closed thoughts detect as not inside-thought"
+    (is (false? (agent/inside-unclosed-thought? "<|channel>thought\nThinking...<channel|>\nHere is the answer.")))
+    (is (false? (agent/inside-unclosed-thought? "<think>Pondering options...</think>\nDone.")))
+    (is (false? (agent/inside-unclosed-thought? "Just plain text without thoughts."))))
+  (testing "Multiple thoughts where last is unclosed"
+    (is (true? (agent/inside-unclosed-thought? "<think>First</think>\nText\n<think>Second unclosed"))))
+  (testing "Multiple thoughts where all are closed"
+    (is (false? (agent/inside-unclosed-thought? "<think>First</think>\nText\n<think>Second</think>\nFinal")))))
+
+(defspec prop-inside-unclosed-thought-detection
+  50
+  (prop/for-all [thought (gen/not-empty gen/string-alphanumeric)
+                 suffix (gen/not-empty gen/string-alphanumeric)]
+                (let [unclosed (str "<|channel>thought\n" thought)
+                      closed (str "<|channel>thought\n" thought "<channel|>\n" suffix)]
+                  (and (true? (agent/inside-unclosed-thought? unclosed))
+                       (false? (agent/inside-unclosed-thought? closed))))))
+
+(defspec prop-semantic-stop-unclosed-thought-invariant
+  50
+  (prop/for-all [thought (gen/not-empty gen/string-alphanumeric)]
+                ;; Even if complete code or tool call appears inside unclosed thought, it must NOT stop
+                (let [text (format "<|channel>thought\n%s\n```clojure\n(defn target [x] x)\n```\n" thought)]
+                  (false? (agent/semantic-stop? text {:target-fn "target"})))))
+
+(defspec prop-semantic-stop-code-block-invariant
+  50
+  (prop/for-all [thought (gen/not-empty gen/string-alphanumeric)
+                 trailing gen/string-alphanumeric]
+                (let [text (format "<|channel>thought\n%s<channel|>\n```clojure\n(defn target [x] x)\n```\n%s"
+                                   thought trailing)]
+                  (true? (agent/semantic-stop? text {:target-fn "target"})))))
+
+(defspec prop-semantic-stop-tool-call-invariant
+  50
+  (prop/for-all [thought (gen/not-empty gen/string-alphanumeric)
+                 trailing gen/string-alphanumeric]
+                (let [text (format "<|channel>thought\n%s<channel|>\n<|tool_call>call:eval_clojure{code:\"(+ 1 2)\"}<tool_call|>\n%s"
+                                   thought trailing)]
+                  (true? (agent/semantic-stop? text {:target-fn "target"})))))
+
+(defspec prop-semantic-stop-balanced-form-invariant
+  50
+  (prop/for-all [thought (gen/not-empty gen/string-alphanumeric)
+                 trailing gen/string-alphanumeric]
+                (let [text (format "<|channel>thought\n%s<channel|>\n(defn target [x] (inc x))\n%s"
+                                   thought trailing)]
+                  (true? (agent/semantic-stop? text {:target-fn "target"})))))
+
+(defspec prop-nudge-short-circuit-invariant
+  50
+  (prop/for-all [code (gen/not-empty gen/string-alphanumeric)]
+                (let [base-ctx {:turn 1
+                                :max-turns 5
+                                :new-tokens 100
+                                :opts {:nudge-on-no-tool true}
+                                :history [{:role :user :content "Prompt"}]
+                                :consecutive-errors 0}
+                      ;; Case A: Candidate code present -> nudge suppressed
+                      ctx-with-cand (assoc base-ctx :has-candidate? true :model-reply (str "(defn target [x] " code ")"))
+                      ;; Case B: Candidate code absent -> nudge needed
+                      ctx-no-cand (assoc base-ctx :has-candidate? false :model-reply "Just text with no code")]
+                  (and (false? (agent/nudge-needed? ctx-with-cand))
+                       (true? (agent/nudge-needed? ctx-no-cand))))))
+
+(deftest test-run-agent-loop-early-exit-public-pass
+  (testing "Early exit on public pass terminates loop at Turn 1"
+    (let [scripted-responses ["<|tool_call>call:eval_clojure{code:\"(defn my-inc [x] (inc x))\"}<tool_call|>"
+                              "Turn 2 that should never be executed"]
+          tool-hook (fn [_ctx _code _turn]
+                      {:status :success
+                       :output "[Public tests: 2/2 passed. All public examples succeeded!]"
+                       :early-exit? true})
+          session {:opts {:system "System prompt"
+                          :max-turns 5
+                          :tool-declaration agent/DEFAULT-TOOL-DECLARATION
+                          :scripted-responses scripted-responses
+                          :tool-eval-fn tool-hook
+                          :quiet true}}
+          transcript (agent/run-agent-loop session "Implement my-inc")]
+      (is (= 2 (count transcript)))
+      (is (= :model (:role (first transcript))))
+      (is (= :tool (:role (second transcript))))
+      (is (true? (:early-exit? (meta transcript))))
+      (is (= :public-pass (:early-exit-reason (meta transcript)))))))
+
+(deftest test-run-agent-loop-nudge-short-circuit
+  (testing "Turn 1 with candidate code short-circuits blind nudge and exits after 1 turn"
+    (let [scripted-responses ["Here is the code:\n```clojure\n(defn my-add [a b] (+ a b))\n```\nHope this helps!"
+                              "Turn 2 that should never be executed"]
+          cand-fn (fn [text] (str/includes? text "defn my-add"))
+          session {:opts {:system "System prompt"
+                          :max-turns 5
+                          :nudge-on-no-tool true
+                          :candidate-check-fn cand-fn
+                          :scripted-responses scripted-responses
+                          :quiet true}}
+          transcript (agent/run-agent-loop session "Implement my-add")]
+      (is (= 1 (count transcript)))
+      (is (= :model (:role (first transcript))))
+      (is (not (some #(= (:role %) :user) (rest transcript)))))))
+
+(deftest test-multipl-e-dev-50-fixture-and-ledger
+  (testing "MultiPL-E 50-task dev subset loads and satisfies schema invariants"
+    (let [pub-file (io/file "resources/catalog/gate3_evals/multipl_e/dev_50_public.edn")
+          sealed-file (io/file "resources/catalog/gate3_evals/multipl_e/dev_50_sealed.edn")]
+      (is (.exists pub-file))
+      (is (.exists sealed-file))
+      (let [pub (edn/read-string (slurp pub-file))
+            sealed (edn/read-string (slurp sealed-file))]
+        (is (= 50 (count pub)))
+        (is (= 50 (count sealed)))
+        (is (every? #(and (string? (:id %))
+                          (string? (:title %))
+                          (symbol? (:fn-name %))
+                          (string? (:prompt %))
+                          (seq (:public-tests %)))
+                    pub))
+        (is (every? #(and (string? (:id %))
+                          (seq (:hidden-tests %)))
+                    sealed)))))
+
+  (testing "MultiPL-E 50-task dev subset runs through harness with valid :harness-sha on every row"
+    (let [tmp-results (str "scratch/test_multipl_e_results_" (System/currentTimeMillis) ".edn")
+          tmp-summary (str "scratch/test_multipl_e_summary_" (System/currentTimeMillis) ".csv")
+          run-fn (requiring-resolve 'experiments.gate3-evals.clojure-bench.run/run-benchmark)
+          _ (run-fn {:dry-run true
+                     :overwrite true
+                     :quiet true
+                     :public-tasks-file "resources/catalog/gate3_evals/multipl_e/dev_50_public.edn"
+                     :sealed-tasks-file "resources/catalog/gate3_evals/multipl_e/dev_50_sealed.edn"
+                     :results-file tmp-results
+                     :summary-file tmp-summary})
+          rows (with-open [r (io/reader tmp-results)]
+                 (mapv edn/read-string (line-seq r)))]
+      (is (= 100 (count rows)))
+      (is (every? #(and (string? (:harness-sha %))
+                        (pos? (count (:harness-sha %))))
+                  rows))
+      (is (every? #(boolean? (:harness-dirty? %)) rows))
+      (is (every? #(true? (:passed? %)) rows))
+      ;; Cleanup temporary files
+      (io/delete-file tmp-results true)
+      (io/delete-file tmp-summary true))))
+
