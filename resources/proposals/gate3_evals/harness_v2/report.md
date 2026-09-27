@@ -3,7 +3,7 @@
 **Capability**: `harness_v2` \
 **Gate**: `gate3_evals` \
 **Type**: `capability` \
-**Status**: `done` \
+**Status**: `in-progress` \
 **Target Hardware**: AMD Radeon RX 7900 XTX (24GB) \
 **Verification Commit**: `d1451fae34a0231f98d66e93b2f55f844570443b` \
 **Date**: 2026-09-27
@@ -14,13 +14,7 @@
 
 RFC [`resources/proposals/gate3_evals/harness_v2/spec.md`](spec.md) proposed four runtime and harness optimizations to resolve the evaluation bottleneck (~70% runaway generation decoding waste and full prompt re-prefill tax per turn) ahead of the 1,116-cell MultiPL-E port.
 
-All six pre-registered Acceptance Criteria (**AC1–AC6**) have been satisfied and verified on the reference AMD Radeon RX 7900 XTX (24GB):
-1. **AC1 (Prefix KV-Cache Reuse)**: Reduced per-turn prefill latency by **51.0%** (Turn 2) and **73.3%** (Turn 3) on host GPU, beating the ≥50% criterion.
-2. **AC2 (Optimizations 2–4 & Versioning)**: Implemented chunked semantic early stopping, nudge short-circuiting, and public-test early exit. All evaluation records carry immutable `:harness-sha` and `:harness-dirty?` metadata.
-3. **AC3 (Wall-Time Reduction)**: Reduced total 20-cell reference suite wall-clock time from **2,465.20s** (v1 baseline) to **1,434.03s** (v2 reference run), achieving a **41.83% wall-time reduction** (beating the ≥40.0% threshold).
-4. **AC4 (Library Residence)**: Fully ported the agent execution loop out of `tools.gemma4-agent` into the pure library namespace `src/einsum/agent/core.clj`. Zero `tools.*` dependencies exist in the evaluation path.
-5. **AC5 (MultiPL-E Dev Subset)**: Established and verified a 50-task MultiPL-E Clojure dev subset (`resources/catalog/gate3_evals/multipl_e/`) running hermetically through the SCI sandbox with ground-truth solutions scoring 100% pass rates.
-6. **AC6 (Engineering Invariants)**: Developed via Strict TDD with property-based tests (`clojure.test.check`) for all stopping and nudge invariants; zero lint errors or warnings (`clojure -M:lint`); 100% passing fast test suite (`clojure -M:test fast`).
+Initial stage 3 verification revealed that while AC1, AC4, AC5, and AC6 passed, **AC2 failed**: 6 of 20 cells flipped from PASS to FAIL due to premature chunked semantic early stopping cutting off model reasoning and intermediate drafts. The capability is **reopened for remediation**: disabling chunked semantic early stopping (Optimization 2) to evaluate the speedup of Optimizations 1, 3, and 4 (KV cache prefix reuse, early exit, nudge short-circuit) without altering model reasoning.
 
 ---
 
@@ -29,8 +23,8 @@ All six pre-registered Acceptance Criteria (**AC1–AC6**) have been satisfied a
 | Criterion | Target / Requirement | Empirical Result | Status |
 |---|---|---|---|
 | **AC1: Prefix KV Cache** | ≥50% per-turn prefill reduction on 3-turn workload | Turn 2: **51.0%** reduction (1531.5ms → 750.6ms)<br>Turn 3: **73.3%** reduction (2193.8ms → 584.9ms) | **PASSED** |
-| **AC2: Optimizations 2–4** | Semantic stopping, nudge short-circuit, public pass exit; clean `:harness-sha` stamped | All 3 optimizations operational; rows stamped with `:harness-sha "d1451fa..."`, `:harness-dirty? false` | **PASSED** |
-| **AC3: Wall-Time Reduction** | ≥40.0% reduction on 20-cell reference suite (≤ 1479.1s) | **1,434.03s** vs 2,465.20s v1 baseline (**41.83% reduction**, -1,031.17s) | **PASSED** |
+| **AC2: Graded Outcome Invariance** | Reproduce v1 outcomes exactly (pass/fail per cell) | **6/20 cells regressed from PASS to FAIL** due to premature semantic stopping | **FAILED** |
+| **AC3: Wall-Time Reduction** | ≥40.0% reduction on 20-cell reference suite (≤ 1479.1s) | **1,434.03s** vs 2,465.20s v1 baseline (**41.83% reduction**, -1,031.17s; qualified by AC2 failures) | **QUALIFIED** |
 | **AC4: Library Residence** | Pure library namespace; no `tools.*` in eval path | Core agent logic residing in `einsum.agent.core`; CLI namespaces decoupled | **PASSED** |
 | **AC5: MultiPL-E Dev Subset** | 50 tasks load, grade hermetically in SCI sandbox, valid EDN ledger | 50 tasks cataloged; 50/50 solutions pass public & sealed tests; ledger appends valid EDN | **PASSED** |
 | **AC6: Repo Invariants & TDD** | Generative invariant tests, 0 lint warnings, green fast suite | 8 generative property tests; `clojure -M:lint` 0 warnings; 217 tests / 3199 assertions green | **PASSED** |
@@ -123,4 +117,4 @@ To prepare for the full 1,116-cell MultiPL-E evaluation port, a 50-task dev subs
 
 ## 7. Disposition
 
-The capability `harness_v2` is hereby marked **`done`**. The fast, library-resident, versioned evaluation harness is promoted for program-wide use in Gate 3 evaluations, unlocking `multipl_e_port`, `prompt_tuning_v1`, and `distill_sft`.
+The capability `harness_v2` is **reopened** (`status: in-progress`). Stage 3 verification identified that chunked semantic early stopping (Optimization 2) violated AC2 by cutting off reasoning drafts and causing 6 cell regressions. Remediating by evaluating with semantic stopping disabled while keeping prefix KV-cache reuse, public test early exit, and nudge short-circuit active.

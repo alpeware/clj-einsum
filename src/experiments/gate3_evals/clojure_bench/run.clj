@@ -29,6 +29,7 @@
    :repetition-penalty 1.0
    :thinking true
    :nudge-on-no-tool true
+   :semantic-stop false
    :overwrite false
    :dry-run false
    :quiet false
@@ -152,8 +153,9 @@
                                 4096
                                 (:max-new-tokens opts))
                               4096))
-            stop-pred (fn [text]
-                        (agent/semantic-stop? text {:target-fn fn-name}))
+            stop-pred (when (:semantic-stop opts)
+                        (fn [text]
+                          (agent/semantic-stop? text {:target-fn fn-name})))
             single-shot-session (update session :opts assoc
                                         :stop-predicate stop-pred
                                         :max-new-tokens max-new)
@@ -266,8 +268,9 @@
                                      (and (seq candidate)
                                           (bench-core/submission-form? candidate fn-name)
                                           (some? (agent/try-parse-sci-reader candidate))))))
-            stop-pred (fn [text]
-                        (agent/semantic-stop? text {:target-fn fn-name}))
+            stop-pred (when (:semantic-stop opts)
+                        (fn [text]
+                          (agent/semantic-stop? text {:target-fn fn-name})))
 
             task-session (update session :opts assoc
                                  :sandbox :benchmark
@@ -506,6 +509,7 @@
                (string? (:thinking raw-opts)) (update :thinking #(Boolean/parseBoolean %))
                (string? (:overwrite raw-opts)) (update :overwrite #(Boolean/parseBoolean %))
                (string? (:nudge-on-no-tool raw-opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
+               (string? (:semantic-stop raw-opts)) (update :semantic-stop #(Boolean/parseBoolean %))
                (string? (:backend raw-opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
                (string? (:mode raw-opts)) (update :mode #(keyword (str/replace % #"^:+" ""))))
         opts (if (and (or (= mode :single-shot) (= mode :all)) (not (contains? user-flags "max-seq-len")))

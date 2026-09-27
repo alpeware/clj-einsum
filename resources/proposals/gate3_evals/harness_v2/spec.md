@@ -144,4 +144,4 @@ not to build it: `killed-by-judgment`, reason recorded here.
 | Date | Event | Rationale |
 |---|---|---|
 | 2026-09-27 | `proposed` | Harness review measured ~70% waste on runaway generation; MultiPL-E port (1116 cells) intractable without speedups; v1 freeze gives a versioned baseline to compare against |
-| 2026-09-27 | `done` | All 6 acceptance criteria verified on RX 7900 XTX: 51.0%/73.3% prefix KV-cache prefill reduction (AC1), 41.83% wall-time reduction on 20-cell suite (AC3), library port complete (AC4), 50-task MultiPL-E subset cataloged (AC5), TDD/lint/tests green (AC6). Full report in `report.md`. |
+| 2026-09-27 | `reopened` | Stage 3 verification identified AC2 failure: 6/20 cells regressed from premature semantic early stopping. Reopening for remediation: disable chunked semantic stopping to preserve full model reasoning while evaluating KV cache reuse, early exit, and nudge short-circuit. |
