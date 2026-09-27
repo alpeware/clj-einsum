@@ -21,9 +21,9 @@ program).
 |---|---|---|---|---|---|
 | Prompt tuning v1 (worked agentic trajectories) | experiment | proposed | — | Blocked by MultiPL-E dev corpus | Freeze reference prompt; v1 with 2–3 disjoint worked trajectories; iterate on dev, report on sealed-10 only |
 | MultiPL-E humaneval-clj/mbpp-clj port | capability | proposed | — | Unlocks prompt tuning, distillation corpus | 161+397 tasks into harness format; expected values verified in SCI; public dev set |
-| E4B-QAT-INT4 eval | experiment | proposed | — | Unlocks student-substrate decision | Conditional triggered: PTQ-INT4 halved E4B; test whether QAT recovers ~2–3/10 |
+| E4B-QAT-INT4 eval | experiment | done | — | — | 3/10 union — beats PTQ-INT4 (1/10) and BF16 (~2/10); **student substrate decided** |
 | LoRA pure-stack trainer | capability | proposed | — | Unlocks distillation SFT | Large ticket. Pure Clojure/XLA stack, no PyTorch (program constraint) |
-| Student perplexity on teacher trajectories | measurement | proposed | — | — | Inference-only distillation de-risk; runs before the trainer exists |
+| Student perplexity on teacher trajectories | measurement | proposed | — | Student = E4B-QAT-INT4 (3/10); teacher = 31B-QAT-INT4 (7/10); gap is 4 tasks | Inference-only distillation de-risk; runs before the trainer exists |
 | Program-signature versioning | capability | proposed | — | — | Extend prompt-sha: hash(prompt, tool defs, turn structure, decoding params, harness version) on every ledger row |
 | Grading-sandbox hardening (slurp/spit) | capability | proposed | — | — | From adversarial review; load-bearing before the loop becomes training infra |
 | Paren-repair as agent-facing tool | experiment | proposed | — | — | Prompt-tuning sub-avenue; explicit tool, never silent harness fixup |
