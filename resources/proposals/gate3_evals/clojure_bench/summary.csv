@@ -1,6 +1,6 @@
 metric,value,single_shot,agentic,delta_loop,target
-mean_hidden_pass_rate,0.2300,0.2300,0.2300,0.0000,>=0.5000
-pass_at_1,0.1350,N/A,N/A,N/A,>=0.4000
+mean_hidden_pass_rate,0.2136,0.2091,0.2182,0.0091,>=0.5000
+pass_at_1,0.1227,N/A,N/A,N/A,>=0.4000
 median_submissions_to_pass,2.00,N/A,2.00,N/A,<=3.0
-total_evals,200,100,100,N/A,10 tasks
-passed_evals,46,23,23,N/A,N/A
+total_evals,220,110,110,N/A,10 tasks
+passed_evals,47,23,24,N/A,N/A

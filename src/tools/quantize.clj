@@ -85,7 +85,7 @@
       ;; If 31B
       (or (>= (long hidden) 5000) (>= (long layers) 50)) 31000000000
       ;; If 12B
-      (or (>= (long hidden) 3800) (>= (long layers) 40)) 12000000000
+      (or (>= (long hidden) 3800) (>= (long layers) 46)) 12000000000
       ;; If 4B
       (or (>= (long hidden) 2500) (>= (long layers) 30)) 4000000000
       ;; If 2B
