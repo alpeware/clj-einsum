@@ -53,4 +53,20 @@
                   :results-path "resources/catalog/gate3_evals/clojure_bench/results.edn"
                   :summary-path "resources/catalog/gate3_evals/clojure_bench/summary.csv"
                   :sealed-sha256 "656f97b09127561b857f10eba46262750eb358279705d252cfea247d0300cda0"
+                  :verified-by nil}
+   :harness-v2   {:gate :gate3-evals
+                  :slug "harness_v2"
+                  :title "Eval Harness v2 — Versioned, Fast, Library-Resident"
+                  :track :capability
+                  :status :active
+                  :verdict :done
+                  :completed "2026-09-27"
+                  :generation 0
+                  :target-hardware "AMD Radeon RX 7900 XTX (24GB)"
+                  :spec-path "resources/proposals/gate3_evals/harness_v2/spec.md"
+                  :report-path "resources/proposals/gate3_evals/harness_v2/report.md"
+                  :results-path "resources/proposals/gate3_evals/harness_v2/results.edn"
+                  :summary-path "resources/proposals/gate3_evals/harness_v2/summary.csv"
+                  :verification-sha "d1451fae34a0231f98d66e93b2f55f844570443b"
+                  :wall-time-reduction 0.4183
                   :verified-by nil}}}
