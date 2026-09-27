@@ -177,7 +177,9 @@ intelligence depends on it, because it does.
    as modest.
 3. **Kill criteria in advance.** Every exploratory line gets its
    falsification condition *before* it starts. A line that can't state
-   what would kill it doesn't start.
+   what would kill it doesn't start. Capabilities (the second work
+   track, §6) get pre-registered *acceptance criteria* instead — same
+   predeclared discipline, right shape.
 4. **Null results are contributions.** A closed line with committed
    evidence is worth more than an open line with vibes.
 5. **Open by default.** Apache 2.0, arXiv-first, public catalog. You
@@ -198,8 +200,23 @@ intelligence depends on it, because it does.
 This document states the *why*. The *how* lives where it's enforced:
 
 - `resources/proposals/` — RFC lifecycle. Tracked by descriptive `<slug>`
-  across parallel exploration tracks (`TEMPLATE.md`). A proposal without
-  pre-registered kill criteria is returned unread.
+  across parallel exploration tracks. Two proposal types:
+  - **Experiments** (`TEMPLATE.md`) — falsifiable claims. Pre-registered
+    hypotheses, decision rules, kill criteria. Verdicts: adopt / reject /
+    killed-by-evidence. A proposal without pre-registered kill criteria
+    is returned unread.
+  - **Capabilities** (`CAPABILITY-TEMPLATE.md`) — judgment-called
+    infrastructure the program needs (harnesses, trainers, ports).
+    Not falsifiable; *completable*. Pre-registered acceptance criteria
+    and non-goals instead of hypotheses. Verdicts: done /
+    killed-by-judgment, reason recorded. The decision to build is a
+    human judgment call about program needs, stated plainly — never a
+    fake hypothesis.
+  Measurements (the ledger, baselines) are standing programs under a
+  capability's umbrella: data, not proposals.
+- `BACKLOG.md` — the flight plan. Every active line visible, triaged by
+  track, with status and dependencies. The gates are the altimeter;
+  the backlog is the flight plan.
 - `resources/catalog/` — the four gate directories (`<gate>/<slug>/`) plus
   `registry.edn`: lineage per entry (bytes/param, calibration minutes, eval
   scores, hardware, judgment cost). Score the snapshot, not the model.
@@ -208,5 +225,6 @@ This document states the *why*. The *how* lives where it's enforced:
 - `CONTRIBUTING.md` — the contributor contract (coding agents as primary
   contributors; spec → implement → test → measure → catalog).
 
-New work enters through a proposal, exits through a gate, and compounds
-through the catalog. That is the whole machine.
+New work enters through a proposal (either track), exits through a gate
+(experiments) or acceptance (capabilities), and compounds through the
+catalog and the backlog. That is the whole machine.

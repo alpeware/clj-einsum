@@ -1,16 +1,74 @@
 # clojure_bench: Clojure coding baseline for the Gemma 4 family
 
-Proposal — not yet built. Concrete `clojure-gen` task of the G3 eval instrument
-(`../quant_baseline_eval/spec.md`); inherits its discipline (dev/sealed split,
-cost ledger, pre-registered verdicts, comparison not leaderboard).
+**Capability**: `clojure_bench` \
+**Type**: `capability` \
+**Gate**: `gate3_evals` \
+**Generation**: `1` \
+**Literature**: `[]` \
+**Hardware-Target**: `{:reference "AMD Radeon RX 7900 XTX (24GB)" :claim-shape "10-task suite runs end-to-end in-VRAM, both modes, append-only ledger"}` \
+**Extends**: `"quant_baseline_eval"` \
+**Refutes**: `nil` \
+**Supersedes**: `nil` \
+**Reopens**: `nil` \
+**Unlocks**: `["substrate comparisons (QAT vs PTQ)", "prompt tuning", "distillation SFT eval", "rep-pen operating config"]`
 
-## Goal
+> **Track note.** This is a *capability*, not an experiment. It was built
+> on a human judgment call — the program needed a measurement instrument
+> before it could run any eval-gated experiment — not on a falsifiable
+> hypothesis. The rigor lives in the acceptance criteria below.
 
-Establish a measured baseline of how well Gemma 4 E2B / E4B / 31B (INT4,
-thinking + tool calling enabled) write correct, idiomatic Clojure — before we
-try to improve the loop. Two numbers per model: raw s-expression ability
-(single-shot) and loop ability (agentic with the `eval_clojure` tool). Their
-difference is the story: it measures what the first loop adds.
+---
+
+## 1. Abstract & Motivation
+
+The program had no way to measure what its loop could actually do. Every
+substrate question (QAT vs PTQ), every decoding question (rep-pen), every
+future prompt-tuning or distillation claim would have been argued on
+vibes. So we built the instrument first: a 10-task Clojure coding
+benchmark with single-shot and agentic modes, a sealed fixture, and an
+append-only ledger. Concrete `clojure-gen` task of the G3 eval
+instrument (`../quant_baseline_eval/spec.md`); inherits its discipline
+(dev/sealed split, cost ledger, pre-registered verdicts, comparison not
+leaderboard).
+
+Two numbers per model: raw s-expression ability (single-shot) and loop
+ability (agentic with the `eval_clojure` tool). Their difference is the
+story: it measures what the first loop adds.
+
+## 2. Acceptance Criteria & Non-Goals
+
+- **AC1** — 10 laddered tasks with machine-verified expected values:
+  **done** 2026-09-25 (10/10 tasks, 68/68 tests verified against
+  reference solutions in SCI 0.9.44).
+- **AC2** — Sealed fixture never entering model context, sha256 recorded
+  per row: **done** (`tasks_sealed.edn`
+  `656f97b09127561b857f10eba46262750eb358279705d252cfea247d0300cda0`).
+- **AC3** — Both modes run end-to-end in-VRAM on the 7900 XTX:
+  **done** (200 ledger rows across 7 model configs as of 2026-09-27).
+- **AC4** — Append-only ledger; no row ever mutated: **done**
+  (`results.edn`, sequential EDN, every row carries `:model :task :mode
+  :passed? :tokens-in :tokens-out :max-new-tokens :wall-ms :sealed-sha
+  :checkpoint-sha :prompt-sha :repetition-penalty`).
+- **AC5** — Best-submission ratchet (highest public-test pass wins ties
+  by earliest turn): **done**.
+
+**Non-goals:** no partial credit in v1; no multi-file or repo-level
+tasks; no contamination rotation yet (the sealed fixture needs a
+rotation story before it becomes the distillation gate).
+
+**Verdict: done** (2026-09-27).
+
+## 3. Interface & Integration
+
+- **Code location**: `src/experiments/gate3_evals/clojure_bench/`
+  (`core.clj`, `run.clj`); tasks in `resources/proposals/gate3_evals/clojure_bench/`.
+- **Consumed by**: every substrate/decoding/prompt experiment via
+  `run.clj`; future distillation eval via the same sealed fixture.
+- **Artifacts produced**: `results.edn` (append-only ledger),
+  `summary.csv`.
+- **Harness changes**: ledger schema extensions are additive only
+  (`:prompt-sha`, `:max-new-tokens`, `:repetition-penalty` all landed
+  this way).
 
 ## Why Clojure first
 
@@ -29,8 +87,6 @@ is genuinely discriminative: persistent collections, the seq abstraction,
   `:code` in the tightened SCI context and compares with `=` against
   `(clojure.edn/read-string :expected)`.
 - Pass = **all** hidden tests pass. No partial credit in v1 (pre-registered).
-- All expected values in this proposal were machine-verified against reference
-  solutions evaluated in SCI 0.9.44 on 2026-09-25 (10/10 tasks, 68/68 tests).
 
 ## The 10 tasks
 
@@ -50,9 +106,9 @@ one Clojure-specific failure mode observed in small models.
 | 9 | `lazy-interleave` | real `lazy-seq` (infinite-input tests fail if eager) |
 | 10 | `my-or` | macro: syntax-quote, short-circuit, `~'` hygiene |
 
-Task 10 is the sharpest discriminator and the most Clojure-specific; keep it
-in v1. SCI 0.9.44 supports `defmacro` in the grading context (verified
-2026-09-25), so the macro is graded by behavior, including a side-effect
+Task 10 is the sharpest discriminator and the most Clojure-specific. SCI
+0.9.44 supports `defmacro` in the grading context (verified 2026-09-25),
+so the macro is graded by behavior, including a side-effect
 short-circuit test — not by expanding and eyeballing.
 
 ## Modes
@@ -65,14 +121,13 @@ short-circuit test — not by expanding and eyeballing.
    score fed back. Best-public submission is graded hidden exactly once.
    This is the first loop, measured.
 
-Both modes share prompts, extraction, grading context, and seeds. Depends on
-the agent-issue fixes (balanced-reader extraction, greedy arg parsing, token
-telemetry, error budget, tightened grading sandbox) landing first.
+Both modes share prompts, extraction, grading context, and seeds.
 
-## Models & decoding
+## Models & decoding (operating config as of 2026-09-27)
 
-E2B, E4B, 31B — INT4 checkpoints, thinking on, temperature 0.0, top-k 10,
-repetition-penalty 1.15. Same harness, same prompts, same seeds. 31B INT4 is
+INT4 checkpoints, thinking on, temperature 0.0, top-k 10,
+**repetition-penalty 1.0** (1.15 deprecated: hurts agentic on both 31B
+and 12B substrates). Same harness, same prompts, same seeds. 31B INT4 is
 its own reference (BF16 31B cannot load on the 7900 XTX); cross-model cells
 are absolute comparisons, never retention claims.
 
@@ -82,30 +137,45 @@ are absolute comparisons, never retention claims.
 - Per-task pass table — shows where the ladder breaks per model.
 - pass@1 (first submission passes hidden), pass@k (any of k passes).
 - Agentic efficiency: median submissions to first public pass.
-- Cost ledger per (model, task, mode): tokens in/out per turn, wall ms, VRAM
-  residency, checkpoint sha, sealed sha256, stop reason.
+- Cost ledger per (model, task, mode): tokens in/out per turn, wall ms,
+  VRAM residency, checkpoint sha, sealed sha256, prompt sha,
+  repetition penalty, stop reason.
+- Trace metrics: pre-tool thinking tokens, budget-saturation rate.
 
 ## Grading sandbox
 
 Tightened SCI context, separate from the agent's: no `slurp`/`spit`/
 `list-files`, no `System/`, deterministic. The agent keeps its tools; the
 grader keeps its honesty. Reference solutions live only in the verification
-script used to validate this proposal — they are never shipped with the
+script used to validate the tasks — they are never shipped with the
 benchmark and never enter model context.
 
-## Runner sketch (`tools/clj_bench.clj`, to build)
+## Runner (`src/experiments/gate3_evals/clojure_bench/run.clj`)
 
 - Load `tasks_public.edn`; render prompt = task prompt + fn name + public
   tests as examples.
-- single-shot: one `generate-new-text-string`, extract, grade, record row.
+- single-shot: one generation, extract, grade, record row.
 - agentic: reuse `run-agent-loop` with a per-task prompt and a submission
   hook (defn/defmacro-shaped tool call → eval public tests → feed back score).
-- Append one EDN row per (model, task, mode) to `results.edn`:
-  `{:model :task :mode :passed? :n-submissions :tokens-in :tokens-out
-    :wall-ms :sealed-sha :checkpoint-sha :stop-reason}`.
+- Append one EDN row per (model, task, mode) to `results.edn`.
 
-## Open questions (Simon's call)
+## Resolved questions
 
-1. Keep the macro task in v1? Recommended: yes — best discriminator.
-2. Run single-shot first, then agentic — or straight to agentic?
-   Recommended: single-shot first; gives the agentic mode something to beat.
+1. Keep the macro task in v1? **Yes** — best discriminator, confirmed
+   across 200 rows (my-or remains in the stable hard core).
+2. Single-shot first, then agentic? **Single-shot first** — gives the
+   agentic mode something to beat; the mode delta is the loop's story.
+
+## 4. Cost Estimate (actuals)
+
+- Engineering: agent-built across 2026-09-25 → 2026-09-27 (spec,
+  ratchet, ledger-schema extensions, agent-issue fixes).
+- Compute: full 20-cell eval ≈ 44 min end-to-end on the 7900 XTX
+  (31B-QAT-INT4 baseline, 2026-09-27).
+
+## 5. Decision Log
+
+| Date | Event | Rationale |
+|---|---|---|
+| 2026-09-25 | `proposed` | Program needed a measurement instrument before any eval-gated experiment; human judgment call |
+| 2026-09-27 | `done` | All acceptance criteria hold; 200 ledger rows; unlocking substrate, decoding, and prompt experiments |
