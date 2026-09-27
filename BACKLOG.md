@@ -21,7 +21,7 @@ program).
 |---|---|---|---|---|---|
 | Prompt tuning v1 (worked agentic trajectories) | experiment | proposed | — | Blocked by MultiPL-E dev corpus | Freeze reference prompt; v1 with 2–3 disjoint worked trajectories; iterate on dev, report on sealed-10 only |
 | MultiPL-E humaneval-clj/mbpp-clj port | capability | proposed | — | Unlocks prompt tuning, distillation corpus | 161+397 tasks into harness format; expected values verified in SCI; public dev set |
-| E4B-INT4 baseline | experiment | proposed | — | — | Missing student-floor cell; E4B BF16 already at ~2–3/10 |
+| E4B-QAT-INT4 eval | experiment | proposed | — | Unlocks student-substrate decision | Conditional triggered: PTQ-INT4 halved E4B; test whether QAT recovers ~2–3/10 |
 | LoRA pure-stack trainer | capability | proposed | — | Unlocks distillation SFT | Large ticket. Pure Clojure/XLA stack, no PyTorch (program constraint) |
 | Student perplexity on teacher trajectories | measurement | proposed | — | — | Inference-only distillation de-risk; runs before the trainer exists |
 | Program-signature versioning | capability | proposed | — | — | Extend prompt-sha: hash(prompt, tool defs, turn structure, decoding params, harness version) on every ledger row |
@@ -36,6 +36,7 @@ program).
 | clojure_bench v1 instrument | capability | done — 200 ledger rows, sealed fixture, append-only |
 | Best-submission ratchet | capability | done |
 | Prompt-sha ledger tracking | capability | done |
+| E4B-INT4 baseline | experiment | 1/10 union — PTQ-INT4 roughly halves E4B BF16 (~2–3/10); single-shot 0/10, agentic recovers first-n via 3 submissions |
 | QAT-31B substrate evaluation | experiment | **ADOPT** (judgment call, then rule-confirmed 7/10 > 6/10) |
 | 12B-QAT 2×2 matrix (rep-pen × mode) | experiment | Finding: below thinking-convergence threshold; no decoding rescue |
 | Repetition-penalty operating config | experiment | **1.0** adopted; 1.15 deprecated (hurts agentic on both substrates) |
@@ -49,7 +50,7 @@ program).
 | Ternary / CAT-Q / E2M-ATQ / KOTMS | experiment | Quant track paused behind the baseline/eval program |
 | Chunked prefill, MTP speculative decoding, INT4 KV, W4A16 profiling artifacts | capability | Runtime work; sequenced after the eval program |
 | RLVR stage | experiment | After SFT; needs rollout+update loop |
-| E2B-QAT / E4B-QAT evals | experiment | Only if the student substrate needs it |
+| E2B-QAT eval | experiment | Only if E2B becomes relevant (currently out as student) |
 | EmbeddingGemma port | capability | Separate bidirectional-encoder question; tokenizer compat unestablished |
 | Alternative-model hedge (Muse-Glimmer-30B, MiMo-9B) | experiment | Parked; Gemma 4 31B retained as the vehicle |
 | Task D | experiment | Parked by Simon |
