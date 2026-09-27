@@ -391,7 +391,7 @@ Once your definition passes all public tests, provide your final response.")
 (defn format-results-row
   "Formats an individual task evaluation result map for results.edn, persisting
    rich diagnostics (candidate-code, error, test-summary, failure details, stop-reason, transcript on failure)."
-  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha dry-run? transcript repetition-penalty]}]
+  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha prompt-sha dry-run? transcript repetition-penalty]}]
   (let [all-passed? (boolean (:all-passed? grade-res))
         has-error? (seq (or error (:error grade-res)))
         err-msg (or error (:error grade-res))
@@ -429,6 +429,8 @@ Once your definition passes all public tests, provide your final response.")
              :test-summary {:passed (long (or (:passed-count grade-res) 0))
                             :total (long (or (:total-count grade-res) 0))}
              :failures (when (seq raw-failures) raw-failures)}
+      prompt-sha
+      (assoc :prompt-sha (str prompt-sha))
       (and (not all-passed?) (seq transcript))
       (assoc :transcript (vec transcript)))))
 

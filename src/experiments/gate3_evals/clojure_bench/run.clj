@@ -133,6 +133,7 @@
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
+          :prompt-sha (:prompt-sha opts)
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :dry-run? true}))
@@ -177,6 +178,7 @@
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
+          :prompt-sha (:prompt-sha opts)
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :dry-run? false})))))
@@ -216,6 +218,7 @@
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
+          :prompt-sha (:prompt-sha opts)
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :dry-run? true}))
@@ -289,6 +292,7 @@
           :wall-ms wall-ms
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
+          :prompt-sha (:prompt-sha opts)
           :transcript (vec transcript)
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens (long (or (:max-new-tokens opts) 1536))
@@ -328,6 +332,8 @@
             (throw (IllegalArgumentException. (str "Sealed tasks file not found: " sealed-file))))
 
         sealed-sha (bench-core/compute-file-sha256 sealed-file)
+        prompt-sha (bench-core/compute-file-sha256 public-file)
+        opts (assoc opts :prompt-sha prompt-sha)
         public-tasks (edn/read-string (slurp public-file))
         sealed-map (into {} (map (juxt :id :hidden-tests) (edn/read-string (slurp sealed-file))))
         selected-tasks (filter-tasks public-tasks (:tasks opts))
@@ -339,6 +345,7 @@
             (println "==================================================")
             (println (format "Model Checkpoint     : %s" (:model opts)))
             (println (format "Backend              : %s" (:backend opts)))
+            (println (format "Prompt SHA-256       : %s" prompt-sha))
             (println (format "Sealed SHA-256       : %s" sealed-sha))
             (println (format "Evaluation Mode      : %s" run-mode))
             (println (format "Selected Tasks       : %d/%d" (count selected-tasks) (count public-tasks)))

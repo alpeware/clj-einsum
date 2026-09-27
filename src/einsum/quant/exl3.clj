@@ -675,10 +675,10 @@
         groups (int groups)]
     (if (= groups 1)
       (if (instance? MemorySegment scales-or-seg)
-        (.toArray ^MemorySegment scales-or-seg ValueLayout/JAVA_SHORT)
+        (.toArray ^MemorySegment scales-or-seg ValueLayout/JAVA_SHORT_UNALIGNED)
         scales-or-seg)
       (let [^shorts s-arr (if (instance? MemorySegment scales-or-seg)
-                            (.toArray ^MemorySegment scales-or-seg ValueLayout/JAVA_SHORT)
+                            (.toArray ^MemorySegment scales-or-seg ValueLayout/JAVA_SHORT_UNALIGNED)
                             ^shorts scales-or-seg)
             out (short-array (* groups N))]
         (if (>= N 128)

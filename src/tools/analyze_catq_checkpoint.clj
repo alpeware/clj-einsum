@@ -68,7 +68,7 @@
                   ^MemorySegment data-seg (st/get-tensor-slice catq-mmap tname)
                   ^MemorySegment scale-seg (st/get-tensor-slice catq-mmap (str tname ".scales"))
                   wc-data (.toArray data-seg ValueLayout/JAVA_BYTE)
-                  wc-scale (.toArray scale-seg ValueLayout/JAVA_SHORT)
+                  wc-scale (.toArray scale-seg ValueLayout/JAVA_SHORT_UNALIGNED)
                   deq (catq/dequantize-matrix-catq wc-data wc-scale rows cols 128)
                   snr (snr-db wb deq)
                   sim (cos-sim-vec wb deq)
