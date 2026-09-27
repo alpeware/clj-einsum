@@ -61,7 +61,7 @@ rotation story before it becomes the distillation gate).
 ## 3. Interface & Integration
 
 - **Code location**: `src/experiments/gate3_evals/clojure_bench/`
-  (`core.clj`, `run.clj`); tasks in `resources/proposals/gate3_evals/clojure_bench/`.
+  (`core.clj`, `run.clj`); tasks in `resources/catalog/gate3_evals/clojure_bench/`.
 - **Consumed by**: every substrate/decoding/prompt experiment via
   `run.clj`; future distillation eval via the same sealed fixture.
 - **Artifacts produced**: `results.edn` (append-only ledger),

@@ -113,7 +113,7 @@
 
 (deftest test-sealed-tests-sha256-integrity
   (testing "Sealed tests file matches pre-registered SHA-256 checksum exactly"
-    (let [sealed-file (io/file "resources/proposals/gate3_evals/clojure_bench/tasks_sealed.edn")
+    (let [sealed-file (io/file "resources/catalog/gate3_evals/clojure_bench/tasks_sealed.edn")
           computed-sha (bench-core/compute-file-sha256 sealed-file)]
       (is (= EXPECTED-SEALED-SHA256 computed-sha)
           "SHA-256 of tasks_sealed.edn must remain immutable to protect against benchmark contamination."))))
@@ -124,9 +124,9 @@
 
 (deftest test-reference-solutions-all-tasks
   (testing "All 10 tasks reference solutions pass 100% of public and sealed tests in SCI"
-    (let [public-tasks (edn/read-string (slurp (io/file "resources/proposals/gate3_evals/clojure_bench/tasks_public.edn")))
+    (let [public-tasks (edn/read-string (slurp (io/file "resources/catalog/gate3_evals/clojure_bench/tasks_public.edn")))
           sealed-tasks (into {} (map (juxt :id :hidden-tests)
-                                     (edn/read-string (slurp (io/file "resources/proposals/gate3_evals/clojure_bench/tasks_sealed.edn")))))]
+                                     (edn/read-string (slurp (io/file "resources/catalog/gate3_evals/clojure_bench/tasks_sealed.edn")))))]
       (is (= 10 (count public-tasks)))
       (is (= 10 (count sealed-tasks)))
       (doseq [t public-tasks]
@@ -494,3 +494,41 @@
       (is (nil? (:failures row)))
       (is (= {:passed 5 :total 5} (:test-summary row))))))
 
+;; =============================================================================
+;; 12. Harness versioning (:harness-sha / :harness-dirty?)
+;; =============================================================================
+
+(deftest test-harness-version-info-shape
+  (testing "harness-version-info returns a map with :harness-sha and :harness-dirty?"
+    (let [info (bench-core/harness-version-info)]
+      (is (map? info))
+      (is (contains? info :harness-sha))
+      (is (contains? info :harness-dirty?))
+      (is (or (nil? (:harness-sha info))
+              (re-matches #"[0-9a-f]{40}" (:harness-sha info))))
+      (is (or (nil? (:harness-dirty? info))
+              (boolean? (:harness-dirty? info))))))
+  (testing "harness-version-info is stable within a process (memoized)"
+    (is (= (bench-core/harness-version-info)
+           (bench-core/harness-version-info)))))
+
+(deftest test-format-results-row-harness-version
+  (testing "format-results-row stamps every row with harness version info"
+    (let [grade-res {:all-passed? true :passed-count 5 :total-count 5 :results [] :error nil}
+          row (bench-core/format-results-row
+               {:model "gemma-4-E2B-it-int4"
+                :task "first-n"
+                :mode :single-shot
+                :candidate-code "(defn first-n [coll] (vec (take 10 coll)))"
+                :grade-res grade-res
+                :tokens-in 266
+                :tokens-out 512
+                :wall-ms 8000.0
+                :sealed-sha "dummy-sha"
+                :checkpoint-sha "dummy-cp"
+                :dry-run? false})
+          info (bench-core/harness-version-info)]
+      (is (contains? row :harness-sha))
+      (is (contains? row :harness-dirty?))
+      (is (= (:harness-sha info) (:harness-sha row)))
+      (is (= (:harness-dirty? info) (:harness-dirty? row))))))

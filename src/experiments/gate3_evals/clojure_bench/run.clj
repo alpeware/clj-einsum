@@ -32,10 +32,10 @@
    :overwrite false
    :dry-run false
    :quiet false
-   :public-tasks-file "resources/proposals/gate3_evals/clojure_bench/tasks_public.edn"
-   :sealed-tasks-file "resources/proposals/gate3_evals/clojure_bench/tasks_sealed.edn"
-   :results-file "resources/proposals/gate3_evals/clojure_bench/results.edn"
-   :summary-file "resources/proposals/gate3_evals/clojure_bench/summary.csv"})
+   :public-tasks-file "resources/catalog/gate3_evals/clojure_bench/tasks_public.edn"
+   :sealed-tasks-file "resources/catalog/gate3_evals/clojure_bench/tasks_sealed.edn"
+   :results-file "resources/catalog/gate3_evals/clojure_bench/results.edn"
+   :summary-file "resources/catalog/gate3_evals/clojure_bench/summary.csv"})
 
 ;; Mock reference solutions used for dry-run verification
 (def MOCK-REFERENCE-SOLUTIONS
@@ -315,10 +315,10 @@
   [opts]
   (let [dry-run? (boolean (:dry-run opts))
         results-path (if (and dry-run? (= (:results-file opts) (:results-file DEFAULT-BENCH-OPTS)))
-                       "resources/proposals/gate3_evals/clojure_bench/results_dry_run.edn"
+                       "resources/catalog/gate3_evals/clojure_bench/results_dry_run.edn"
                        (:results-file opts))
         summary-path (if (and dry-run? (= (:summary-file opts) (:summary-file DEFAULT-BENCH-OPTS)))
-                       "resources/proposals/gate3_evals/clojure_bench/summary_dry_run.csv"
+                       "resources/catalog/gate3_evals/clojure_bench/summary_dry_run.csv"
                        (:summary-file opts))
         opts (assoc opts :results-file results-path :summary-file summary-path)
         public-file (io/file (:public-tasks-file opts))
@@ -334,6 +334,10 @@
         sealed-sha (bench-core/compute-file-sha256 sealed-file)
         prompt-sha (bench-core/compute-file-sha256 public-file)
         opts (assoc opts :prompt-sha prompt-sha)
+        {:keys [harness-sha harness-dirty?]} (bench-core/harness-version-info)
+        _ (when (and (not dry-run?) harness-dirty?)
+            (println (str "WARNING: git tree is dirty; rows will be stamped :harness-dirty? true "
+                          "under sha " harness-sha ". Record runs should use a clean tree.")))
         public-tasks (edn/read-string (slurp public-file))
         sealed-map (into {} (map (juxt :id :hidden-tests) (edn/read-string (slurp sealed-file))))
         selected-tasks (filter-tasks public-tasks (:tasks opts))

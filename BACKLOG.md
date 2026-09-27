@@ -24,7 +24,9 @@ program).
 | E4B-QAT-INT4 eval | experiment | done | — | — | 3/10 union — beats PTQ-INT4 (1/10) and BF16 (~2/10); **student substrate decided** |
 | LoRA pure-stack trainer | capability | proposed | — | Unlocks distillation SFT | Large ticket. Pure Clojure/XLA stack, no PyTorch (program constraint) |
 | Student perplexity on teacher trajectories | measurement | proposed | — | Student = E4B-QAT-INT4 (3/10); teacher = 31B-QAT-INT4 (7/10); gap is 4 tasks | Inference-only distillation de-risk; runs before the trainer exists |
-| Program-signature versioning | capability | proposed | — | — | Extend prompt-sha: hash(prompt, tool defs, turn structure, decoding params, harness version) on every ledger row |
+| clojure_bench freeze (v1 → catalog) | capability | done | — | — | Moved to `resources/catalog/gate3_evals/clojure_bench/`; rows carry `:harness-sha`/`:harness-dirty?` from 2026-09-27; 240 historical rows pre-versioning (no backfill) |
+| Eval harness v2 (KV cache, stopping, library port) | capability | proposed | — | Unlocks MultiPL-E port at scale, prompt tuning, distillation SFT | Spec at `resources/proposals/gate3_evals/harness_v2/spec.md`; AC2: 20-cell 31B-QAT@1.0 re-run reproduces v1 outcomes exactly |
+| Program-signature versioning | capability | proposed | — | Superseded in part by :harness-sha (freeze) | Extend prompt-sha: hash(prompt, tool defs, turn structure, decoding params, harness version) on every ledger row |
 | Grading-sandbox hardening (slurp/spit) | capability | proposed | — | — | From adversarial review; load-bearing before the loop becomes training infra |
 | Paren-repair as agent-facing tool | experiment | proposed | — | — | Prompt-tuning sub-avenue; explicit tool, never silent harness fixup |
 | QAT adoption decision record | capability | proposed | — | — | DECISIONS.md: judgment call → rule confirmation (7/10 > 6/10) |

@@ -19,3 +19,12 @@ Gate 3 evaluates whether a model generation demonstrates **increasing intelligen
 - [`e18_diagnostics/`](e18_diagnostics/): 2x2 factorial temperature sweep; definitive refutation of gradient resolver under varying temperature regimes.
 - [`e19_hybrid_crystallization/`](e19_hybrid_crystallization/): Evaluated gradient search with temperature decay; proved unconstrained search finds spurious covers.
 - [`e20_constrained_crystallization/`](e20_constrained_crystallization/): Falsified weak structural priors; permanently closed the line on gradient-discovered predicate invention.
+
+## 3. Standing instruments
+
+- [`clojure_bench/`](clojure_bench/): Clojure coding baseline for the Gemma 4 family
+  (capability verdict `done`, frozen 2026-09-27). Rows in `results.edn` carry
+  `:harness-sha` (repo HEAD at row-write time) and `:harness-dirty?` from the
+  freeze commit onward. **Rows without `:harness-sha` are pre-versioning** —
+  produced by the v1 harness before versioning existed; the SHA was never
+  backfilled because the producing working trees are unknown.

@@ -4,6 +4,7 @@
    public test feedback formatting, best-submission selection, and telemetry metrics calculation."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.java.shell :as sh]
             [clojure.string :as str]
             [sci.core :as sci]
             [tools.gemma4-agent :as agent])
@@ -388,6 +389,36 @@ Once your definition passes all public tests, provide your final response.")
      :agentic agentic-stats
      :by-task by-task}))
 
+;; =============================================================================
+;; 2. Harness versioning (:harness-sha / :harness-dirty?)
+;; =============================================================================
+;; Every result row is stamped with the repo HEAD it was produced under, so
+;; rows remain comparable as the harness evolves. One repo SHA pins all
+;; harness namespaces (experiments.gate3-evals.clojure-bench.* and
+;; tools.gemma4-agent) because they live in the same repo. Rows written
+;; before versioning (frozen 2026-09-27) carry no :harness-sha: absent key
+;; means pre-versioning, never backfilled.
+
+(def ^:private harness-version-info*
+  (delay
+    (try
+      (let [{sha-exit :exit sha-out :out} (sh/sh "git" "rev-parse" "HEAD")
+            sha (when (zero? sha-exit) (str/trim sha-out))
+            {st-exit :exit st-out :out} (sh/sh "git" "status" "--porcelain")
+            dirty? (when (zero? st-exit) (boolean (seq (str/trim st-out))))]
+        {:harness-sha (when (seq sha) sha)
+         :harness-dirty? dirty?})
+      (catch Exception _
+        {:harness-sha nil :harness-dirty? nil}))))
+
+(defn harness-version-info
+  "Returns {:harness-sha <40-char repo HEAD or nil> :harness-dirty? <bool or nil>}.
+   Memoized per process: one git invocation per JVM run. nil sha means the
+   version could not be determined (no git, not a repo); nil dirty? means
+   unknown. Never throws."
+  []
+  @harness-version-info*)
+
 (defn format-results-row
   "Formats an individual task evaluation result map for results.edn, persisting
    rich diagnostics (candidate-code, error, test-summary, failure details, stop-reason, transcript on failure)."
@@ -411,28 +442,30 @@ Once your definition passes all public tests, provide your final response.")
                       (and has-error? (not (seq raw-failures))) :error
                       :else :test-failure)]
     (cond-> {:model (str model)
-             :task (str task)
-             :mode (keyword mode)
-             :passed? all-passed?
-             :n-submissions (long (or n-submissions 1))
-             :tokens-in (long (or tokens-in 0))
-             :tokens-out (long (or tokens-out 0))
-             :max-new-tokens (long (or max-new-tokens 1536))
-             :wall-ms (double (or wall-ms 0.0))
-             :repetition-penalty (double (or repetition-penalty 1.0))
-             :sealed-sha (str sealed-sha)
-             :checkpoint-sha (str checkpoint-sha)
-             :stop-reason stop-reason
-             :dry-run? (boolean dry-run?)
-             :candidate-code candidate-code
-             :error err-msg
-             :test-summary {:passed (long (or (:passed-count grade-res) 0))
-                            :total (long (or (:total-count grade-res) 0))}
-             :failures (when (seq raw-failures) raw-failures)}
-      prompt-sha
-      (assoc :prompt-sha (str prompt-sha))
-      (and (not all-passed?) (seq transcript))
-      (assoc :transcript (vec transcript)))))
+               :task (str task)
+               :mode (keyword mode)
+               :passed? all-passed?
+               :n-submissions (long (or n-submissions 1))
+               :tokens-in (long (or tokens-in 0))
+               :tokens-out (long (or tokens-out 0))
+               :max-new-tokens (long (or max-new-tokens 1536))
+               :wall-ms (double (or wall-ms 0.0))
+               :repetition-penalty (double (or repetition-penalty 1.0))
+               :sealed-sha (str sealed-sha)
+               :checkpoint-sha (str checkpoint-sha)
+               :harness-sha (:harness-sha (harness-version-info))
+               :harness-dirty? (:harness-dirty? (harness-version-info))
+               :stop-reason stop-reason
+               :dry-run? (boolean dry-run?)
+               :candidate-code candidate-code
+               :error err-msg
+               :test-summary {:passed (long (or (:passed-count grade-res) 0))
+                              :total (long (or (:total-count grade-res) 0))}
+               :failures (when (seq raw-failures) raw-failures)}
+        prompt-sha
+        (assoc :prompt-sha (str prompt-sha))
+        (and (not all-passed?) (seq transcript))
+        (assoc :transcript (vec transcript)))))
 
 (defn read-results-edn
   "Reads all EDN rows from results-file."
