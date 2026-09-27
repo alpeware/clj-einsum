@@ -10,6 +10,8 @@
    ".models/gemma-4-2b-it"
    ".models/gemma-4-E4B-it"
    ".models/gemma-4-4b-it"
+   ".models/gemma-4-12b-it-qat-int4"
+   ".models/gemma-4-12B-it-qat-int4"
    ".models/gemma-4-12B-it"
    ".models/gemma-4-12b-it"
    ".models/gemma-4-31B-it"
@@ -138,8 +140,10 @@
                               (or (= precision :int4)
                                   (= quant-metadata "int4")
                                   (and (or (nil? precision) (= precision :auto))
-                                       (or (re-find #"31[bB]" (or resolved-model-dir ""))
-                                           (re-find #"31[bB]" (or (:model-dir opts) "")))))))
+                                       (or (re-find #"(?:31|12)[bB]" (or resolved-model-dir ""))
+                                           (re-find #"(?:31|12)[bB]" (or (:model-dir opts) ""))
+                                           (re-find #"int4" (or resolved-model-dir ""))
+                                           (re-find #"int4" (or (:model-dir opts) "")))))))
         is-int8 (boolean (and (not is-ternary)
                               (or (= precision :int8)
                                   (= quant-metadata "int8"))))

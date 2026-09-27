@@ -57,7 +57,10 @@
    :vocab-size 262144
    :norm-eps 1e-6
    :final-logit-softcap 30.0
-   :num-kv-shared-layers 0})
+   :num-kv-shared-layers 0
+   :sliding-window 1024
+   :layer-types (vec (take 48 (cycle ["sliding_attention" "sliding_attention" "sliding_attention"
+                                      "sliding_attention" "sliding_attention" "full_attention"])))})
 
 (def DEFAULT_GEMMA4_31B_CONFIG
   {:hidden-dim 5376

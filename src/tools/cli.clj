@@ -11,7 +11,8 @@
   {:gemma-2 [".models/gemma-2-2b-it" ".models/gemma-2b" ".models/gemma-2-2b" ".models/gemma"]
    :gemma-3 [".models/gemma-3-270m-it" ".models/gemma-3-270m" ".models/gemma-3" ".models/gemma"]
    :gemma-4 [".models/gemma-4-E2B-it" ".models/gemma-4-2b-it" ".models/gemma-4-E4B-it"
-             ".models/gemma-4-4b-it" ".models/gemma-4-12B-it" ".models/gemma-4-12b-it"
+             ".models/gemma-4-4b-it" ".models/gemma-4-12b-it-qat-int4" ".models/gemma-4-12B-it-qat-int4"
+             ".models/gemma-4-12B-it" ".models/gemma-4-12b-it"
              ".models/gemma-4-31B-it" ".models/gemma-4-31b-it" ".models/gemma4-2b"
              ".models/gemma-2b" ".models/gemma4"]
    :smollm  [".models/smollm-135m" ".models/smollm"]
