@@ -23,7 +23,7 @@
    :max-turns 5
    :max-consecutive-errors 3
    :max-new-tokens 1536
-   :max-seq-len 2048
+   :max-seq-len 4608
    :temperature 0.0
    :top-k 10
    :repetition-penalty 1.0
@@ -93,14 +93,14 @@
      :model-dir (:model opts)
      :checkpoint-sha "dry-run-checkpoint-sha"}
     (let [model-dir (cfg/find-model-dir (or (:model-dir opts) (:model opts)))
-          max-seq-len (long (or (:max-seq-len opts) 1024))
+          max-seq-len (long (or (:max-seq-len opts) 4608))
           checkpoint-sha (compute-checkpoint-hash model-dir)
           session-opts (assoc opts
                               :model-dir model-dir
                               :model model-dir
                               :mode :agent
                               :max-seq-len max-seq-len
-                              :max-new-tokens (long (or (:max-new-tokens opts) 512))
+                              :max-new-tokens (long (or (:max-new-tokens opts) 1536))
                               :sandbox :benchmark)
           session (gemma4-rt/init-agent-vram-session session-opts max-seq-len)]
       (assoc session
@@ -147,10 +147,16 @@
           :dry-run? true}))
 
       ;; Actual model inference
-      (let [stop-pred (fn [text]
+      (let [max-new (long (or (:single-shot-max-new-tokens opts)
+                              (if (or (= (:mode opts) :all) (= (:mode opts) :single-shot))
+                                4096
+                                (:max-new-tokens opts))
+                              4096))
+            stop-pred (fn [text]
                         (agent/semantic-stop? text {:target-fn fn-name}))
             single-shot-session (update session :opts assoc
-                                        :stop-predicate stop-pred)
+                                        :stop-predicate stop-pred
+                                        :max-new-tokens max-new)
             chat-prompt (agent/format-agent-chat-prompt
                          bench-core/SINGLE-SHOT-SYSTEM-PROMPT
                          [{:role :user :content prompt}]
@@ -192,7 +198,7 @@
           :checkpoint-sha checkpoint-sha
           :prompt-sha (:prompt-sha opts)
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
-          :max-new-tokens (long (or (:max-new-tokens opts) 1536))
+          :max-new-tokens max-new
           :dry-run? false})))))
 
 (defn run-agentic-task
@@ -255,8 +261,11 @@
                    eval-res))))
 
             candidate-check-fn (fn [text]
-                                 (let [candidate (bench-core/extract-candidate-code text fn-name)]
-                                   (and (seq candidate) (bench-core/submission-form? candidate fn-name))))
+                                 (when-not (agent/inside-unclosed-thought? text)
+                                   (let [candidate (bench-core/extract-candidate-code text fn-name)]
+                                     (and (seq candidate)
+                                          (bench-core/submission-form? candidate fn-name)
+                                          (some? (agent/try-parse-sci-reader candidate))))))
             stop-pred (fn [text]
                         (agent/semantic-stop? text {:target-fn fn-name}))
 
@@ -265,6 +274,7 @@
                                  :tool-eval-fn submission-tool-hook
                                  :candidate-check-fn candidate-check-fn
                                  :stop-predicate stop-pred
+                                 :max-new-tokens 1536
                                  :quiet quiet)
             transcript (agent/run-agent-loop task-session prompt (bench-core/create-tightened-grading-ctx) submission-tool-hook)
             telemetry (get (meta transcript) :turn-telemetry [])
@@ -498,12 +508,8 @@
                (string? (:nudge-on-no-tool raw-opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
                (string? (:backend raw-opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
                (string? (:mode raw-opts)) (update :mode #(keyword (str/replace % #"^:+" ""))))
-        opts (if (and (= mode :single-shot) (not (contains? user-flags "max-new-tokens")))
-               (assoc opts :max-new-tokens 4096)
-               opts)
-        opts (if (and (> (long (or (:max-new-tokens opts) 1536)) 1536)
-                      (not (contains? user-flags "max-seq-len")))
-               (assoc opts :max-seq-len (+ (long (:max-new-tokens opts)) 512))
+        opts (if (and (or (= mode :single-shot) (= mode :all)) (not (contains? user-flags "max-seq-len")))
+               (assoc opts :max-seq-len 4608)
                opts)]
     opts))
 

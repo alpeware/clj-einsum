@@ -7,7 +7,8 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [einsum.agent.core :as agent]))
+            [einsum.agent.core :as agent]
+            [experiments.gate3-evals.clojure-bench.core :as bench-core]))
 
 (deftest test-extract-clojure-code-blocks
   (testing "Extracting single and multiple Clojure code blocks from model generation"
@@ -575,4 +576,19 @@
       ;; Cleanup temporary files
       (io/delete-file tmp-results true)
       (io/delete-file tmp-summary true))))
+
+(deftest test-candidate-check-fn-rejection-of-truncated-forms
+  (testing "Rejects truncated or unclosed code forms to prevent false nudge short-circuits"
+    (let [check-fn (fn [text fn-name]
+                     (when-not (agent/inside-unclosed-thought? text)
+                       (let [cand (bench-core/extract-candidate-code text fn-name)]
+                         (and (seq cand)
+                              (bench-core/submission-form? cand fn-name)
+                              (some? (agent/try-parse-sci-reader cand))))))
+          broken-code "(defn deep-flatten [coll]\n  (let [flatten (fn [x] (cond (sequential? x) (flatten"
+          valid-code "(defn deep-flatten [coll]\n  (vec (flatten coll)))"
+          unclosed-thought (str "<|channel>thought\nStill thinking...\n" valid-code)]
+      (is (false? (boolean (check-fn broken-code "deep-flatten"))))
+      (is (false? (boolean (check-fn unclosed-thought "deep-flatten"))))
+      (is (true? (boolean (check-fn valid-code "deep-flatten")))))))
 
