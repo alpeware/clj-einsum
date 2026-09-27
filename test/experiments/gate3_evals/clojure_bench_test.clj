@@ -386,11 +386,28 @@
       (is (= :test-failure (:stop-reason row)))
       (is (false? (:passed? row)))
       (is (= "(defn first-n [coll] (take 10 coll))" (:candidate-code row)))
+      (is (= 1536 (:max-new-tokens row)))
       (is (= {:passed 4 :total 5} (:test-summary row)))
       (is (= 1 (count (:failures row))))
       (is (= "(vector? (first-n (range 100)))" (:code (first (:failures row)))))
       (is (= "false" (:actual (first (:failures row)))))
       (is (= transcript (:transcript row)))))
+
+  (testing "Formats row with explicit max-new-tokens budget"
+    (let [row (bench-core/format-results-row
+               {:model "gemma-4-31b-it-int4"
+                :task "first-n"
+                :mode :single-shot
+                :candidate-code "(defn first-n [coll] (vec (take 10 coll)))"
+                :max-new-tokens 4096
+                :grade-res {:all-passed? true :passed-count 5 :total-count 5}
+                :tokens-in 266
+                :tokens-out 2500
+                :wall-ms 8000.0
+                :sealed-sha "dummy-sha"
+                :checkpoint-sha "dummy-cp"
+                :dry-run? false})]
+      (is (= 4096 (:max-new-tokens row)))))
 
   (testing "Omits transcript on passing row"
     (let [grade-res {:all-passed? true

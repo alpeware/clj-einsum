@@ -134,6 +134,7 @@
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
+          :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :dry-run? true}))
 
       ;; Actual model inference
@@ -177,6 +178,7 @@
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
+          :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :dry-run? false})))))
 
 (defn run-agentic-task
@@ -215,6 +217,7 @@
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
+          :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :dry-run? true}))
 
       ;; Actual agentic loop execution
@@ -288,6 +291,7 @@
           :checkpoint-sha checkpoint-sha
           :transcript (vec transcript)
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
+          :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :dry-run? false})))))
 
 ;; =============================================================================
