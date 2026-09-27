@@ -59,14 +59,22 @@
 (defn- compute-checkpoint-hash
   "Computes SHA-256 for the model weights file (model.safetensors) with caching."
   [model-dir]
-  (let [safetensors (io/file model-dir "model.safetensors")]
-    (if (.exists safetensors)
+  (let [safetensors (io/file model-dir "model.safetensors")
+        sha-file (io/file model-dir "model.safetensors.sha256")]
+    (cond
+      (and (.exists sha-file) (.exists safetensors) (>= (.lastModified sha-file) (.lastModified safetensors)))
+      (str/trim (slurp sha-file))
+
+      (.exists safetensors)
       (let [cache-key [(.getAbsolutePath safetensors) (.length safetensors) (.lastModified safetensors)]]
         (if-let [cached (get @checkpoint-hash-cache cache-key)]
           cached
           (let [sha (bench-core/compute-file-sha256 safetensors)]
             (swap! checkpoint-hash-cache assoc cache-key sha)
+            (try (spit sha-file sha) (catch Throwable _ nil))
             sha)))
+
+      :else
       "unknown-safetensors-sha256")))
 
 (defn init-benchmark-session
@@ -76,9 +84,7 @@
     {:opts opts
      :model-dir (:model opts)
      :checkpoint-sha "dry-run-checkpoint-sha"}
-    (let [_ (when (= (keyword (:backend opts)) :rocm)
-              (Thread/sleep 3000))
-          model-dir (cli/find-model-dir (or (:model-dir opts) (:model opts)) :gemma-4)
+    (let [model-dir (cli/find-model-dir (or (:model-dir opts) (:model opts)) :gemma-4)
           max-seq-len (long (or (:max-seq-len opts) 1024))
           checkpoint-sha (compute-checkpoint-hash model-dir)
           session-opts (assoc opts
@@ -407,21 +413,31 @@
 (defn parse-bench-cli-args
   "Parses CLI flags for clj_bench."
   [args]
-  (let [opts (cli/parse-cli-args args DEFAULT-BENCH-OPTS)]
-    (cond-> opts
-      (string? (:max-turns opts)) (update :max-turns #(Long/parseLong %))
-      (string? (:max-consecutive-errors opts)) (update :max-consecutive-errors #(Long/parseLong %))
-      (string? (:max-new-tokens opts)) (update :max-new-tokens #(Long/parseLong %))
-      (string? (:max-seq-len opts)) (update :max-seq-len #(Long/parseLong %))
-      (string? (:temperature opts)) (update :temperature #(Double/parseDouble %))
-      (string? (:top-k opts)) (update :top-k #(Long/parseLong %))
-      (string? (:repetition-penalty opts)) (update :repetition-penalty #(Double/parseDouble %))
-      (string? (:dry-run opts)) (update :dry-run #(Boolean/parseBoolean %))
-      (string? (:thinking opts)) (update :thinking #(Boolean/parseBoolean %))
-      (string? (:overwrite opts)) (update :overwrite #(Boolean/parseBoolean %))
-      (string? (:nudge-on-no-tool opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
-      (string? (:backend opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
-      (string? (:mode opts)) (update :mode #(keyword (str/replace % #"^:+" ""))))))
+  (let [user-flags (set (keep #(when (str/starts-with? % "--") (subs % 2)) args))
+        raw-opts (cli/parse-cli-args args DEFAULT-BENCH-OPTS)
+        mode (keyword (str/replace (or (:mode raw-opts) "all") #"^:+" ""))
+        opts (cond-> raw-opts
+               (string? (:max-turns raw-opts)) (update :max-turns #(Long/parseLong %))
+               (string? (:max-consecutive-errors raw-opts)) (update :max-consecutive-errors #(Long/parseLong %))
+               (string? (:max-new-tokens raw-opts)) (update :max-new-tokens #(Long/parseLong %))
+               (string? (:max-seq-len raw-opts)) (update :max-seq-len #(Long/parseLong %))
+               (string? (:temperature raw-opts)) (update :temperature #(Double/parseDouble %))
+               (string? (:top-k raw-opts)) (update :top-k #(Long/parseLong %))
+               (string? (:repetition-penalty raw-opts)) (update :repetition-penalty #(Double/parseDouble %))
+               (string? (:dry-run raw-opts)) (update :dry-run #(Boolean/parseBoolean %))
+               (string? (:thinking raw-opts)) (update :thinking #(Boolean/parseBoolean %))
+               (string? (:overwrite raw-opts)) (update :overwrite #(Boolean/parseBoolean %))
+               (string? (:nudge-on-no-tool raw-opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
+               (string? (:backend raw-opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
+               (string? (:mode raw-opts)) (update :mode #(keyword (str/replace % #"^:+" ""))))
+        opts (if (and (= mode :single-shot) (not (contains? user-flags "max-new-tokens")))
+               (assoc opts :max-new-tokens 4096)
+               opts)
+        opts (if (and (> (long (or (:max-new-tokens opts) 1536)) 1536)
+                      (not (contains? user-flags "max-seq-len")))
+               (assoc opts :max-seq-len (+ (long (:max-new-tokens opts)) 512))
+               opts)]
+    opts))
 
 (defn -main
   "CLI entrypoint for clojure_bench."

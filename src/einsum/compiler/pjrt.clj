@@ -180,9 +180,34 @@
          (not (boolean (re-find #"rocprofiler" name)))
          (not (boolean (re-find #"^(xla_cpu|pjrt_plugin|libpjrt)" name))))))
 
+(defonce ^:private gpu-keepalive-started? (atom false))
+
+(defn- ensure-gpu-keepalive!
+  "Starts a daemon background thread that touches /dev/dri/renderD128 every 2 seconds
+   to prevent AMD ROCm GPUs from entering PCIe runtime autosuspend (D3cold) while PJRT is active."
+  []
+  (when (compare-and-set! gpu-keepalive-started? false true)
+    (let [dev-render (io/file "/dev/dri/renderD128")]
+      (when (.exists dev-render)
+        ;; Wake GPU immediately
+        (try (with-open [_is (io/input-stream dev-render)] nil) (catch Exception _ nil))
+        (let [t (Thread.
+                 ^Runnable
+                 (fn []
+                   (while true
+                     (try
+                       (with-open [_is (io/input-stream dev-render)]
+                         nil)
+                       (catch Exception _ nil))
+                     (try (Thread/sleep 2000) (catch InterruptedException _ nil))))
+                 "amd-gpu-runtime-pm-keepalive")]
+          (.setDaemon t true)
+          (.start t))))))
+
 (defn load-plugin!
   "Loads the PJRT shared object from `lib-path` and initializes the PJRT plugin."
   [lib-path]
+  (ensure-gpu-keepalive!)
   (preload-libpython!)
   (ensure-hsaco-cache-dir!)
   (let [arena (Arena/global)
@@ -267,6 +292,7 @@
   "Creates a PJRT_Client for the loaded plugin, optionally accepting a `create-options` map."
   ([api-ctx] (create-client api-ctx {}))
   ([api-ctx opts]
+   (ensure-gpu-keepalive!)
    (let [{:keys [api-ptr linker arena]} (extract-ctx api-ctx)
          create-handle (downcall-ptr linker api-ptr OFFSET_CLIENT_CREATE ValueLayout/ADDRESS [ValueLayout/ADDRESS])
          create-args (.allocate ^Arena arena (long 88))

@@ -15,6 +15,7 @@ fi
 
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0}"
 export ROCR_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES:-0}"
+export HSA_TOOLS_REPORT_LOAD_FAILURE=0
 
 MODE="inference"
 SCRIPT_NAME="$(basename "$0")"
@@ -41,7 +42,7 @@ elif [ "$1" = "run" ] || [ "$1" = "--run" ] || [ "$1" = "exec" ]; then
   shift
 fi
 
-sleep 2
+: < /dev/dri/renderD128 2>/dev/null || true
 
 if [ "$MODE" = "agent" ]; then
   exec clojure -M:tools -m tools.gemma4-agent "$@"
