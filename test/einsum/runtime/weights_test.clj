@@ -36,7 +36,7 @@
 
 (deftest test-weight-store-get-device-buffer-with-arrays
   (testing "get-device-buffer transfers host array to device, tracks in arena, and caches"
-    (let [ctx (xla/init-backend! :cpu)
+    (let [ctx (xla/init-backend! :interpreter {:quiet? true})
           w-floats (float-array [1.0 2.0 3.0 4.0])
           source {"w.weight" w-floats}
           header {"w.weight" {"shape" [2 2] "dtype" "F32"}}]

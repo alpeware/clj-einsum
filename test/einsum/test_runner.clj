@@ -59,6 +59,7 @@
             [einsum.models.tl-nano-test]
             [einsum.models.transformer-test]
             [einsum.quant.catq-test]
+            [einsum.quant.ternary-pjrt-test]
             [einsum.quant.ternary-test]
             [einsum.quant.w4a16-custom-call-test]
             [einsum.quantize-test]
@@ -95,7 +96,6 @@
   "Pure, fast unit and generative property tests with zero hardware dependencies (<3s)."
   ['einsum.compiler.stablehlo-test
    'einsum.compiler.fuse-test
-   'einsum.compiler.kernel-test
    'einsum.compiler.pjrt-version-test
    'einsum.logic.interpret-test
    'einsum.test-helpers.generators-test
@@ -117,7 +117,6 @@
    'einsum.quantize-test
    'einsum.quant.catq-test
    'einsum.quant.ternary-test
-   'einsum.quant.w4a16-custom-call-test
    'einsum.models.gemma4-test
    'einsum.core-test
    'experiments.gate3-evals.clojure-bench-test])
@@ -177,9 +176,12 @@
   "PJRT plugin backend initialization, graph compilation, benchmarks, C2C memory, and isolated runners."
   ['einsum.compiler.pjrt-test
    'einsum.compiler.compile-test
+   'einsum.compiler.kernel-test
    'einsum.compiler.autodiff-test
    'einsum.hardware-test
    'einsum.logic.interpret-diff-test
+   'einsum.quant.ternary-pjrt-test
+   'einsum.quant.w4a16-custom-call-test
    'einsum.runtime.c2c-test
    'einsum.runtime.benchmark.workloads-test
    'einsum.runtime.benchmark.runner-test
