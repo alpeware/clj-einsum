@@ -117,6 +117,32 @@
     (let [text "<clojure>(defn f [x] (+ x 1))"
           tc (agent/extract-tool-call text :xml)]
       (is (= "eval_clojure" (:name tc)))
+      (is (= "(defn f [x] (+ x 1))" (:code tc)))))
+
+  (testing "Extracting fenced markdown tool call (```clojure ... ```) when tool-syntax is :fenced"
+    (let [text "I will test this code:\n```clojure\n(defn square [x] (* x x))\n```\nDone."
+          tc (agent/extract-tool-call text :fenced)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(defn square [x] (* x x))" (:code tc)))
+      (is (str/includes? (:raw tc) "```clojure"))
+      (is (str/includes? (:raw tc) "```"))))
+
+  (testing "Extracting fenced markdown tool call with ```clj tag"
+    (let [text "```clj\n(+ 10 20)\n```"
+          tc (agent/extract-tool-call text :fenced)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(+ 10 20)" (:code tc)))))
+
+  (testing "Extracting fenced markdown tool call with thoughts present"
+    (let [text "<|channel>thought\nWe should test 5*5.\n<channel|>\n```clojure\n(* 5 5)\n```"
+          tc (agent/extract-tool-call text :fenced)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(* 5 5)" (:code tc)))))
+
+  (testing "Extracting fenced markdown tool call unclosed up to EOF"
+    (let [text "```clojure\n(defn f [x] (+ x 1))"
+          tc (agent/extract-tool-call text :fenced)]
+      (is (= "eval_clojure" (:name tc)))
       (is (= "(defn f [x] (+ x 1))" (:code tc))))))
 
 (deftest test-format-tool-response
@@ -161,6 +187,14 @@
       (is (str/starts-with? resp "<clojure_result>"))
       (is (str/includes? resp "[Public tests: 2/2 passed.]"))
       (is (str/ends-with? resp "</clojure_result>"))))
+
+  (testing "Formatting fenced tool response wrapped in ```clojure_result code block"
+    (let [res {:output "[Public tests: 2/2 passed.]"
+               :status :success}
+          resp (agent/format-tool-response "eval_clojure" res :fenced)]
+      (is (str/starts-with? resp "```clojure_result"))
+      (is (str/includes? resp "[Public tests: 2/2 passed.]"))
+      (is (str/ends-with? resp "```"))))
 
   (testing "Stop token IDs conform to Gemma 4 spec (omits 49, includes 50)"
     (let [k-stop @(requiring-resolve 'einsum.models.gemma4.kernels/GEMMA4-STOP-TOKEN-IDS)]
@@ -599,6 +633,24 @@
                  post gen/string-alphanumeric]
                 (let [text (format "%s\n<clojure>\n%s\n</clojure>\n%s" pre code post)
                       tc (agent/extract-tool-call text :xml)]
+                  (and (= "eval_clojure" (:name tc))
+                       (= code (:code tc))))))
+
+(defspec prop-semantic-stop-fenced-tool-call-invariant
+  50
+  (prop/for-all [thought (gen/not-empty gen/string-alphanumeric)
+                 trailing gen/string-alphanumeric]
+                (let [text (format "<|channel>thought\n%s<channel|>\n```clojure\n(defn target [x] x)\n```\n%s"
+                                   thought trailing)]
+                  (true? (agent/semantic-stop? text {:target-fn "target" :tool-syntax :fenced})))))
+
+(defspec prop-extract-tool-call-fenced-roundtrip
+  50
+  (prop/for-all [code (gen/not-empty gen/string-alphanumeric)
+                 pre (gen/not-empty gen/string-alphanumeric)
+                 post gen/string-alphanumeric]
+                (let [text (format "%s\n```clojure\n%s\n```\n%s" pre code post)
+                      tc (agent/extract-tool-call text :fenced)]
                   (and (= "eval_clojure" (:name tc))
                        (= code (:code tc))))))
 

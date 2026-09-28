@@ -306,11 +306,12 @@
 
             task-system (or (when-not (= (:system opts) bench-core/AGENT-SYSTEM-PROMPT)
                               (:system opts))
-                            (if (= tool-syntax :xml)
-                              bench-core/AGENT-SYSTEM-PROMPT-XML
+                            (case tool-syntax
+                              :xml bench-core/AGENT-SYSTEM-PROMPT-XML
+                              :fenced bench-core/AGENT-SYSTEM-PROMPT-FENCED
                               bench-core/AGENT-SYSTEM-PROMPT))
 
-            task-tool-decl (if (= tool-syntax :xml)
+            task-tool-decl (if (or (= tool-syntax :xml) (= tool-syntax :fenced))
                              nil
                              (get opts :tool-declaration agent/DEFAULT-TOOL-DECLARATION))
 

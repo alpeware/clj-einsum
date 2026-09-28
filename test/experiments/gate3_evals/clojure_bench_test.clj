@@ -557,7 +557,7 @@
       (is (= (:harness-dirty? info) (:harness-dirty? row))))))
 
 ;; =============================================================================
-;; 13. Tool Syntax (:tool-syntax :native vs :xml)
+;; 13. Tool Syntax (:tool-syntax :native vs :xml vs :fenced)
 ;; =============================================================================
 
 (deftest test-extract-candidate-code-xml
@@ -571,10 +571,24 @@
           code (bench-core/extract-candidate-code text "first-n")]
       (is (= "(defn first-n [coll] (vec (take 10 coll)))" code)))))
 
+(deftest test-extract-candidate-code-fenced
+  (testing "Extracting candidate code from ```clojure...``` markdown code block"
+    (let [text "Here is the implementation:\n```clojure\n(defn my-range [n] (vec (range n)))\n```\nEnd."
+          code (bench-core/extract-candidate-code text "my-range")]
+      (is (= "(defn my-range [n] (vec (range n)))" code))))
+
+  (testing "Extracting candidate code from ```clj...``` markdown code block"
+    (let [text "Running:\n```clj\n(defn first-n [coll] (vec (take 10 coll)))\n```"
+          code (bench-core/extract-candidate-code text "first-n")]
+      (is (= "(defn first-n [coll] (vec (take 10 coll)))" code)))))
+
 (deftest test-cli-tool-syntax-parsing
   (testing "Parsing --tool-syntax xml"
     (let [opts (bench-run/parse-bench-cli-args ["--tool-syntax" "xml"])]
       (is (= :xml (:tool-syntax opts)))))
   (testing "Parsing --tool-syntax native"
     (let [opts (bench-run/parse-bench-cli-args ["--tool-syntax" "native"])]
-      (is (= :native (:tool-syntax opts))))))
+      (is (= :native (:tool-syntax opts)))))
+  (testing "Parsing --tool-syntax fenced"
+    (let [opts (bench-run/parse-bench-cli-args ["--tool-syntax" "fenced"])]
+      (is (= :fenced (:tool-syntax opts))))))

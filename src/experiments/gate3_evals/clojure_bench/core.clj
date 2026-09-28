@@ -90,6 +90,18 @@ Execution results will be returned in <clojure_result>...</clojure_result>.
 If any tests fail, inspect the failure errors, revise your implementation, and output revised code in <clojure>...</clojure> to re-test.
 Only provide your final response once your definition passes all public tests.")
 
+(def AGENT-SYSTEM-PROMPT-FENCED
+  "You are an expert Clojure engineer with access to an interactive Clojure REPL sandbox.
+Keep internal reasoning very concise (1-2 paragraphs max): plan your logic briefly, do not write full code drafts in thought, and wrap your Clojure code in ```clojure ... ``` markdown fences to evaluate and test your code against public examples.
+Example:
+```clojure
+(defn my-fn [x]
+  (* x 2))
+```
+Execution results will be returned in ```clojure_result ... ```.
+If any tests fail, inspect the failure errors, revise your implementation, and output revised code in ```clojure ... ``` to re-test.
+Only provide your final response once your definition passes all public tests.")
+
 (defn render-benchmark-prompt
   "Renders the formatted user prompt for a task, embedding public test examples.
    Never includes sealed/hidden tests to preserve evaluation integrity."

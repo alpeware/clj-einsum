@@ -28,6 +28,17 @@ Execution results will be returned in <clojure_result>...</clojure_result>.
 Once you have the result, provide your final response to the user in plain text without further code tags.
 Syntax rules: use square brackets for bindings and parameters: [x], [k v], vectors: [1 2 3], and (range start end).")
 
+(def DEFAULT-SYSTEM-PROMPT-FENCED
+  "You are a Clojure assistant with access to an interactive Clojure REPL sandbox.
+To evaluate or test Clojure code, output your code wrapped in a ```clojure ... ``` markdown fence:
+```clojure
+(defn my-fn [x]
+  (* x 2))
+```
+Execution results will be returned in ```clojure_result ... ```.
+Once you have the result, provide your final response to the user in plain text without further code tags.
+Syntax rules: use square brackets for bindings and parameters: [x], [k v], vectors: [1 2 3], and (range start end).")
+
 (def DEFAULT-AGENT-OPTS
   {:prompt "Write a Clojure function returning the first 10 integers."
    :model ".models/gemma-4-E2B-it"
@@ -202,15 +213,17 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 
 (defn extract-tool-call
   "Extracts the tool call from text if present.
-   Supports :native Gemma 4 syntax (<|tool_call>call:eval_clojure{code:...}<tool_call|>)
-   and :xml syntax (<clojure>...</clojure> or <clj>...</clj>).
+   Supports :native Gemma 4 syntax (<|tool_call>call:eval_clojure{code:...}<tool_call|>),
+   :xml syntax (<clojure>...</clojure> or <clj>...</clj>),
+   and :fenced syntax (```clojure ... ``` or ```clj ... ```).
    Returns a map {:name fn-name :code clojure-code-str :raw raw-tool-call-str} or nil if text is a plain text response or malformed."
   ([text]
    (extract-tool-call text :native))
   ([text tool-syntax]
    (let [clean (strip-thinking-trace (or text ""))
          syntax (keyword (or tool-syntax :native))]
-     (if (= syntax :xml)
+     (case syntax
+       :xml
        (when-let [[raw code] (re-find #"(?s)<(?:clojure|clj)>\s*(.*?)\s*(?:</(?:clojure|clj)>|$)" clean)]
          (let [trimmed-code (str/trim (or code ""))]
            (when (seq trimmed-code)
@@ -220,6 +233,18 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                            (str/ends-with? (str/trim raw) "</clj>"))
                      (str/trim raw)
                      (str "<clojure>\n" trimmed-code "\n</clojure>"))})))
+
+       :fenced
+       (when-let [[raw code] (re-find #"(?s)```(?:clojure|clj)?\s*\n?(.*?)(?:```|$)" clean)]
+         (let [trimmed-code (str/trim (or code ""))]
+           (when (seq trimmed-code)
+             {:name "eval_clojure"
+              :code trimmed-code
+              :raw (if (str/ends-with? (str/trim raw) "```")
+                     (str/trim raw)
+                     (str "```clojure\n" trimmed-code "\n```"))})))
+
+       ;; default :native
        (when-let [[raw fn-name args] (re-find #"(?s)<\|tool_call>(?:call:)?(\w+)?\s*(.*?)(?:<tool_call\|>|$)" clean)]
          (when-let [code (parse-tool-call-code args)]
            {:name (if (seq fn-name) fn-name "eval_clojure")
@@ -276,7 +301,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
      (format-tool-response tool-name res :native)))
   ([tool-name res tool-syntax]
    (let [syntax (keyword (or tool-syntax :native))]
-     (if (= syntax :xml)
+     (if (or (= syntax :xml) (= syntax :fenced))
        (let [content (cond
                        (string? res) (str/trim res)
                        (map? res) (let [out (str/trim (or (:output res) ""))
@@ -289,13 +314,17 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                         directive (when (or (= (:status res) :failed)
                                                             (= (:status res) :error)
                                                             (seq failures))
-                                                    "Please inspect the test results and provide your revised implementation in <clojure>...</clojure>.")
+                                                    (if (= syntax :fenced)
+                                                      "Please inspect the test results and provide your revised implementation in ```clojure ... ```."
+                                                      "Please inspect the test results and provide your revised implementation in <clojure>...</clojure>."))
                                         pieces (filter seq [out failures nudge directive])]
                                     (if (seq pieces)
                                       (str/join "\n\n" pieces)
                                       (pr-str (dissoc res :early-exit?))))
                        :else (str/trim (str res)))]
-         (format "<clojure_result>\n%s\n</clojure_result>" content))
+         (if (= syntax :fenced)
+           (format "```clojure_result\n%s\n```" content)
+           (format "<clojure_result>\n%s\n</clojure_result>" content)))
        (let [t-name (if (seq tool-name) tool-name "eval_clojure")]
          (cond
            (string? res)
@@ -398,9 +427,14 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
              target-fn (:target-fn opts)
              tool-syntax (keyword (or (:tool-syntax opts) :native))]
          (cond
-           ;; Case 0: Complete XML tool call tag outside thought
+           ;; Case 0a: Complete XML tool call tag outside thought
            (and (= tool-syntax :xml)
                 (boolean (re-find #"(?s)<(?:clojure|clj)>.*?</(?:clojure|clj)>" body)))
+           true
+
+           ;; Case 0b: Complete fenced markdown tool call block outside thought
+           (and (= tool-syntax :fenced)
+                (boolean (re-find #"(?s)```(?:clojure|clj)?\s*\n?\s*(\S.*?)\s*```" body)))
            true
 
            ;; Case 1: Complete tool call tag
@@ -468,7 +502,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                      (into [initial] clean-tail)))
          has-system? (boolean (seq system-prompt))
          clean-system (when has-system? (str/trim system-prompt))
-         tool-decl-str (when (and (seq tool-declaration) (not= syntax :xml))
+         tool-decl-str (when (and (seq tool-declaration) (not= syntax :xml) (not= syntax :fenced))
                          (str (str/trim tool-declaration)))
          already-has-think? (and has-system? (str/includes? clean-system "<|think|>"))
          thinking-needed? (and thinking? (not already-has-think?))
@@ -520,7 +554,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                              (recur (inc idx) acc))
 
                            (= role :model)
-                           (if (= syntax :xml)
+                           (if (or (= syntax :xml) (= syntax :fenced))
                              (do
                                (.append acc "<|turn>model\n")
                                (.append acc clean-content)
@@ -538,7 +572,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                    (recur (inc idx) acc)))))
 
                            (= role :tool)
-                           (if (= syntax :xml)
+                           (if (or (= syntax :xml) (= syntax :fenced))
                              (do
                                (.append acc "<|turn>user\n")
                                (.append acc clean-content)
@@ -553,7 +587,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                            (do
                              (.append acc (str "<|turn>" (name role) "\n" clean-content "<turn|>\n"))
                              (recur (inc idx) acc))))))
-         model-prefix (if (and (= last-role :tool) (not= syntax :xml))
+         model-prefix (if (and (= last-role :tool) (not= syntax :xml) (not= syntax :fenced))
                         ""
                         "<|turn>model\n")]
      (str "<bos>" system-turn turns-str model-prefix))))
@@ -709,12 +743,13 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
          tool-eval (or custom-tool-eval-fn tool-eval-fn eval-tool-code)
          candidate-fn (or candidate-check-fn (constantly false))
          thinking? (boolean thinking)
-         tool-decl (if (= syntax :xml)
+         tool-decl (if (or (= syntax :xml) (= syntax :fenced))
                      nil
                      (or tool-declaration DEFAULT-TOOL-DECLARATION))
          sys-prompt (or system
-                        (if (= syntax :xml)
-                          DEFAULT-SYSTEM-PROMPT-XML
+                        (case syntax
+                          :xml DEFAULT-SYSTEM-PROMPT-XML
+                          :fenced DEFAULT-SYSTEM-PROMPT-FENCED
                           DEFAULT-SYSTEM-PROMPT))
          sci-ctx (or custom-sci-ctx
                      (case sandbox
@@ -802,8 +837,9 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                      :model-reply model-reply
                                      :has-candidate? has-candidate?})
                    (let [nudge-msg (or (:nudge-prompt opts)
-                                       (if (= syntax :xml)
-                                         "Please test your Clojure implementation by outputting code in <clojure>...</clojure>."
+                                       (case syntax
+                                         :xml "Please test your Clojure implementation by outputting code in <clojure>...</clojure>."
+                                         :fenced "Please test your Clojure implementation by outputting code in ```clojure ... ```."
                                          "Please test your Clojure implementation by calling the eval_clojure tool."))]
                      (when-not quiet (println (format "\n[Agent Loop Nudge (Turn %d)]: Emitting tool reminder." turn)))
                      (swap! history conj {:role :user :content nudge-msg})
