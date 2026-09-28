@@ -281,7 +281,7 @@
                           :scripted-responses [turn1-resp turn2-resp]}
                    :model-dir "dummy-model"
                    :checkpoint-sha "dummy-cp"}
-          opts {:quiet true :max-turns 3 :dry-run false}
+          opts {:quiet true :max-turns 3 :dry-run false :early-exit true}
           row (bench-run/run-agentic-task session task hidden-tests "dummy-sha" opts)]
       (is (= turn1-code (:candidate-code row)))
       (is (true? (:passed? row)))

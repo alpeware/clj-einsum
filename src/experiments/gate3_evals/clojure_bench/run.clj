@@ -8,6 +8,7 @@
             [einsum.agent.core :as agent]
             [einsum.models.gemma4.config :as cfg]
             [einsum.models.gemma4.runtime :as gemma4-rt]
+            [einsum.runtime.arena :as arena]
             [experiments.gate3-evals.clojure-bench.core :as bench-core]))
 
 ;; =============================================================================
@@ -23,13 +24,15 @@
    :max-turns 5
    :max-consecutive-errors 3
    :max-new-tokens 1536
-   :max-seq-len 4608
+   :max-seq-len 2048
    :temperature 0.0
    :top-k 10
    :repetition-penalty 1.0
    :thinking true
    :nudge-on-no-tool true
    :semantic-stop false
+   :early-exit false
+   :nudge-short-circuit false
    :overwrite false
    :dry-run false
    :quiet false
@@ -156,9 +159,10 @@
             stop-pred (when (:semantic-stop opts)
                         (fn [text]
                           (agent/semantic-stop? text {:target-fn fn-name})))
-            single-shot-session (update session :opts assoc
-                                        :stop-predicate stop-pred
-                                        :max-new-tokens max-new)
+            single-shot-session (assoc (update session :opts assoc
+                                               :stop-predicate stop-pred
+                                               :max-new-tokens max-new)
+                                       :kv-state nil)
             chat-prompt (agent/format-agent-chat-prompt
                          bench-core/SINGLE-SHOT-SYSTEM-PROMPT
                          [{:role :user :content prompt}]
@@ -244,7 +248,10 @@
           :dry-run? true}))
 
       ;; Actual agentic loop execution
-      (let [submission-tool-hook
+      (let [task-kv-state (atom nil)
+            early-exit-opt? (get opts :early-exit false)
+            nudge-sc-opt? (get opts :nudge-short-circuit false)
+            submission-tool-hook
             (fn submission-tool-hook
               ([sci-ctx tool-code]
                (submission-tool-hook sci-ctx tool-code (inc (count @submissions))))
@@ -255,84 +262,92 @@
                  (if is-sub?
                    (let [pub-res (bench-core/grade-submission sci-ctx candidate (:public-tests task))
                          feedback (bench-core/format-public-feedback pub-res)
-                         early-exit? (boolean (:all-passed? pub-res))]
+                         early-exit? (boolean (and early-exit-opt? (:all-passed? pub-res)))]
                      (swap! submissions conj {:code candidate :public-res pub-res :turn turn})
-                     (-> eval-res
-                         (update :output #(str % "\n" feedback))
-                         (assoc :early-exit? early-exit?)))
+                     (cond-> (update eval-res :output #(str % "\n" feedback))
+                       early-exit? (assoc :early-exit? true)))
                    eval-res))))
 
-            candidate-check-fn (fn [text]
-                                 (when-not (agent/inside-unclosed-thought? text)
-                                   (let [candidate (bench-core/extract-candidate-code text fn-name)]
-                                     (and (seq candidate)
-                                          (bench-core/submission-form? candidate fn-name)
-                                          (some? (agent/try-parse-sci-reader candidate))))))
+            candidate-check-fn (when nudge-sc-opt?
+                                 (fn [text]
+                                   (when-not (agent/inside-unclosed-thought? text)
+                                     (let [candidate (bench-core/extract-candidate-code text fn-name)]
+                                       (and (seq candidate)
+                                            (bench-core/submission-form? candidate fn-name)
+                                            (some? (agent/try-parse-sci-reader candidate)))))))
+
             stop-pred (when (:semantic-stop opts)
                         (fn [text]
                           (agent/semantic-stop? text {:target-fn fn-name})))
 
-            task-session (update session :opts assoc
-                                 :sandbox :benchmark
-                                 :tool-eval-fn submission-tool-hook
-                                 :candidate-check-fn candidate-check-fn
-                                 :stop-predicate stop-pred
-                                 :max-new-tokens 1536
-                                 :quiet quiet)
-            transcript (agent/run-agent-loop task-session prompt (bench-core/create-tightened-grading-ctx) submission-tool-hook)
-            telemetry (get (meta transcript) :turn-telemetry [])
-            total-in (reduce + 0 (map #(long (or (:prompt-tokens %) 0)) telemetry))
-            total-out (reduce + 0 (map #(long (or (:new-tokens %) 0)) telemetry))
-            total-turn-ms (reduce + 0.0 (map #(double (or (:total-turn-ms %) 0.0)) telemetry))
-            wall-ms (if (pos? total-turn-ms) total-turn-ms (/ (- (System/nanoTime) t0) 1e6))
+            task-session (assoc (update session :opts assoc
+                                        :sandbox :benchmark
+                                        :tool-eval-fn submission-tool-hook
+                                        :candidate-check-fn candidate-check-fn
+                                        :stop-predicate stop-pred
+                                        :max-new-tokens (long (or (:max-new-tokens opts) 1536))
+                                        :quiet quiet)
+                                :kv-state task-kv-state)]
+        (try
+          (let [transcript (agent/run-agent-loop task-session prompt (bench-core/create-tightened-grading-ctx) submission-tool-hook)
+                telemetry (get (meta transcript) :turn-telemetry [])
+                total-in (reduce + 0 (map #(long (or (:prompt-tokens %) 0)) telemetry))
+                total-out (reduce + 0 (map #(long (or (:new-tokens %) 0)) telemetry))
+                total-turn-ms (reduce + 0.0 (map #(double (or (:total-turn-ms %) 0.0)) telemetry))
+                wall-ms (if (pos? total-turn-ms) total-turn-ms (/ (- (System/nanoTime) t0) 1e6))
 
-            ;; Fallback / ratchet: extract and grade candidates from model turns in transcript if not already captured
-            _ (doseq [t transcript
-                      :when (= (:role t) :model)]
-                (let [text (or (:response t) (:raw t) (:content t) "")
-                      candidate (bench-core/extract-candidate-code text fn-name)]
-                  (when (and (seq candidate)
-                             (bench-core/submission-form? candidate fn-name)
-                             (not (some #(= (:code %) candidate) @submissions)))
-                    (let [pub-res (bench-core/grade-submission candidate (:public-tests task))]
-                      (swap! submissions conj {:code candidate :public-res pub-res :turn (or (:turn t) 1)})))))
+                ;; Fallback / ratchet: extract and grade candidates from model turns in transcript if not already captured
+                _ (doseq [t transcript
+                          :when (= (:role t) :model)]
+                    (let [text (or (:response t) (:raw t) (:content t) "")
+                          candidate (bench-core/extract-candidate-code text fn-name)]
+                      (when (and (seq candidate)
+                                 (bench-core/submission-form? candidate fn-name)
+                                 (not (some #(= (:code %) candidate) @submissions)))
+                        (let [pub-res (bench-core/grade-submission candidate (:public-tests task))]
+                          (swap! submissions conj {:code candidate :public-res pub-res :turn (or (:turn t) 1)})))))
 
-            best-sub (bench-core/pick-best-public-submission @submissions)
-            candidate-code (:code best-sub)
-            hidden-res (if (seq candidate-code)
-                         (bench-core/grade-submission candidate-code hidden-tests)
-                         {:all-passed? false :passed-count 0 :total-count (count hidden-tests) :error "No submission found"})
-            error-msg (when-not (seq candidate-code) "No candidate submission found during agent loop")]
+                best-sub (bench-core/pick-best-public-submission @submissions)
+                candidate-code (:code best-sub)
+                hidden-res (if (seq candidate-code)
+                             (bench-core/grade-submission candidate-code hidden-tests)
+                             {:all-passed? false :passed-count 0 :total-count (count hidden-tests) :error "No submission found"})
+                error-msg (when-not (seq candidate-code) "No candidate submission found during agent loop")]
 
-        (when-not quiet
-          (println (format "  ↳ Result: %s (Pass: %d/%d, %d submissions, %.1f ms)"
-                           (if (:all-passed? hidden-res) "PASS" "FAIL")
-                           (:passed-count hidden-res)
-                           (:total-count hidden-res)
-                           (count @submissions)
-                           wall-ms))
-          (when-not (:all-passed? hidden-res)
-            (if candidate-code
-              (println (format "    ↳ Best Candidate: %s" (str/replace candidate-code #"\n" " ")))
-              (println "    ↳ No candidate submission found."))))
-        (bench-core/format-results-row
-         {:model model-name
-          :task task-id
-          :mode :agentic
-          :candidate-code candidate-code
-          :grade-res hidden-res
-          :error error-msg
-          :n-submissions (count @submissions)
-          :tokens-in total-in
-          :tokens-out total-out
-          :wall-ms wall-ms
-          :sealed-sha sealed-sha
-          :checkpoint-sha checkpoint-sha
-          :prompt-sha (:prompt-sha opts)
-          :transcript (vec transcript)
-          :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
-          :max-new-tokens (long (or (:max-new-tokens opts) 1536))
-          :dry-run? false})))))
+            (when-not quiet
+              (println (format "  ↳ Result: %s (Pass: %d/%d, %d submissions, %.1f ms)"
+                               (if (:all-passed? hidden-res) "PASS" "FAIL")
+                               (:passed-count hidden-res)
+                               (:total-count hidden-res)
+                               (count @submissions)
+                               wall-ms))
+              (when-not (:all-passed? hidden-res)
+                (if candidate-code
+                  (println (format "    ↳ Best Candidate: %s" (str/replace candidate-code #"\n" " ")))
+                  (println "    ↳ No candidate submission found."))))
+            (bench-core/format-results-row
+             {:model model-name
+              :task task-id
+              :mode :agentic
+              :candidate-code candidate-code
+              :grade-res hidden-res
+              :error error-msg
+              :n-submissions (count @submissions)
+              :tokens-in total-in
+              :tokens-out total-out
+              :wall-ms wall-ms
+              :sealed-sha sealed-sha
+              :checkpoint-sha checkpoint-sha
+              :prompt-sha (:prompt-sha opts)
+              :transcript (vec transcript)
+              :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
+              :max-new-tokens (long (or (:max-new-tokens opts) 1536))
+              :dry-run? false}))
+          (finally
+            (when-let [st @task-kv-state]
+              (when-let [bufs (seq (:kv-buffers st))]
+                (try (arena/destroy! (:session-arena session) bufs) (catch Throwable _ nil)))
+              (reset! task-kv-state nil))))))))
 
 ;; =============================================================================
 ;; 4. Benchmark Orchestration & Reporting
@@ -398,29 +413,50 @@
         _ (when (:overwrite opts)
             (spit results-file ""))
 
-        session (init-benchmark-session opts)
+        user-flags (or (:user-flags opts) #{})
         all-results (atom [])]
 
-    (try
-      (doseq [task selected-tasks]
-        (let [task-id (:id task)
-              hidden-tests (get sealed-map task-id [])]
-
-          ;; 1. Single-shot evaluation
-          (when (or (= run-mode :all) (= run-mode :single-shot))
-            (let [ss-row (run-single-shot-task session task hidden-tests sealed-sha opts)]
+    ;; 1. Single-shot evaluation phase
+    (when (or (= run-mode :all) (= run-mode :single-shot))
+      (let [ss-max-seq-len (or (:single-shot-max-seq-len opts)
+                               (when (contains? user-flags "max-seq-len") (:max-seq-len opts))
+                               4608)
+            ss-max-new (or (:single-shot-max-new-tokens opts)
+                           (when (contains? user-flags "max-new-tokens") (:max-new-tokens opts))
+                           4096)
+            ss-opts (assoc opts :max-seq-len ss-max-seq-len :max-new-tokens ss-max-new)
+            ss-session (init-benchmark-session ss-opts)]
+        (try
+          (doseq [task selected-tasks]
+            (let [task-id (:id task)
+                  hidden-tests (get sealed-map task-id [])
+                  ss-row (run-single-shot-task ss-session task hidden-tests sealed-sha ss-opts)]
               (swap! all-results conj ss-row)
               (spit results-file (str (pr-str ss-row) "\n") :append true)))
+          (finally
+            (when (and (not dry-run?) (map? ss-session))
+              (try (gemma4-rt/close-agent-session! ss-session) (catch Throwable _ nil)))))))
 
-          ;; 2. Agentic evaluation
-          (when (or (= run-mode :all) (= run-mode :agentic))
-            (let [ag-row (run-agentic-task session task hidden-tests sealed-sha opts)]
+    ;; 2. Agentic evaluation phase
+    (when (or (= run-mode :all) (= run-mode :agentic))
+      (let [ag-max-seq-len (or (:agentic-max-seq-len opts)
+                               (when (contains? user-flags "max-seq-len") (:max-seq-len opts))
+                               2048)
+            ag-max-new (or (:agentic-max-new-tokens opts)
+                           (when (contains? user-flags "max-new-tokens") (:max-new-tokens opts))
+                           1536)
+            ag-opts (assoc opts :max-seq-len ag-max-seq-len :max-new-tokens ag-max-new)
+            ag-session (init-benchmark-session ag-opts)]
+        (try
+          (doseq [task selected-tasks]
+            (let [task-id (:id task)
+                  hidden-tests (get sealed-map task-id [])
+                  ag-row (run-agentic-task ag-session task hidden-tests sealed-sha ag-opts)]
               (swap! all-results conj ag-row)
-              (spit results-file (str (pr-str ag-row) "\n") :append true)))))
-
-      (finally
-        (when (and (not (:dry-run opts)) (map? session))
-          (try (gemma4-rt/close-agent-session! session) (catch Throwable _ nil)))))
+              (spit results-file (str (pr-str ag-row) "\n") :append true)))
+          (finally
+            (when (and (not dry-run?) (map? ag-session))
+              (try (gemma4-rt/close-agent-session! ag-session) (catch Throwable _ nil)))))))
 
     ;; Summarize cumulative metrics from results-file and output CSV
     (let [cumulative-rows (bench-core/read-results-edn results-file)
@@ -496,7 +532,6 @@
   [args]
   (let [user-flags (set (keep #(when (str/starts-with? % "--") (subs % 2)) args))
         raw-opts (parse-raw-cli-args args DEFAULT-BENCH-OPTS)
-        mode (keyword (str/replace (or (:mode raw-opts) "all") #"^:+" ""))
         opts (cond-> raw-opts
                (string? (:max-turns raw-opts)) (update :max-turns #(Long/parseLong %))
                (string? (:max-consecutive-errors raw-opts)) (update :max-consecutive-errors #(Long/parseLong %))
@@ -510,11 +545,11 @@
                (string? (:overwrite raw-opts)) (update :overwrite #(Boolean/parseBoolean %))
                (string? (:nudge-on-no-tool raw-opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
                (string? (:semantic-stop raw-opts)) (update :semantic-stop #(Boolean/parseBoolean %))
+               (string? (:early-exit raw-opts)) (update :early-exit #(Boolean/parseBoolean %))
+               (string? (:nudge-short-circuit raw-opts)) (update :nudge-short-circuit #(Boolean/parseBoolean %))
                (string? (:backend raw-opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
                (string? (:mode raw-opts)) (update :mode #(keyword (str/replace % #"^:+" ""))))
-        opts (if (and (or (= mode :single-shot) (= mode :all)) (not (contains? user-flags "max-seq-len")))
-               (assoc opts :max-seq-len 4608)
-               opts)]
+        opts (assoc opts :user-flags user-flags)]
     opts))
 
 (defn -main

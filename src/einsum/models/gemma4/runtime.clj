@@ -77,6 +77,23 @@
         (recur (inc i))
         i))))
 
+(defn- model-sliding-window-size
+  "Calculates minimum sliding window size across all unshared sliding-attention layers."
+  [config num-unshared]
+  (let [layer-configs (:layer-configs config)
+        layer-types (:layer-types config)
+        wins (keep (fn [i]
+                     (let [cfg (when (seq layer-configs) (nth layer-configs i nil))
+                           is-global? (if cfg (:is-global? cfg) (gemma-logic/layer-is-global? layer-types i))]
+                       (when-not is-global?
+                         (long (or (:sliding-window cfg)
+                                   (:sliding-window config)
+                                   (:sliding_window config)
+                                   512)))))
+                   (range num-unshared))]
+    (when (seq wins)
+      (reduce min wins))))
+
 (defn run-vram-loop-generation
   "Executes autoregressive token generation entirely within device VRAM using 1-shot prefill
    (or sequential prefill for large contexts, with prefix KV-cache reuse across agent turns)
@@ -117,7 +134,14 @@
             ;; Check for prefix KV-cache hit across turns
             is-persistent? (some? kv-state)
             prior-cache (when is-persistent? @kv-state)
-            p-match (if (and prior-cache (:cached-tokens prior-cache) (seq (:kv-buffers prior-cache)))
+            min-win (model-sliding-window-size config num-unshared)
+            ring-wrapped? (boolean (and min-win
+                                        prior-cache
+                                        (>= (count (:cached-tokens prior-cache)) min-win)))
+            p-match (if (and prior-cache
+                             (not ring-wrapped?)
+                             (:cached-tokens prior-cache)
+                             (seq (:kv-buffers prior-cache)))
                       (common-prefix-len (:cached-tokens prior-cache) clamped-prompt-ids)
                       0)
             _ (when (and is-persistent? prior-cache (zero? p-match))
@@ -376,7 +400,14 @@
          prefill-exec (or prefill-executable (:prefill-executable session))
          is-persistent? (some? kv-state)
          prior-cache (when is-persistent? @kv-state)
-         p-match (if (and prior-cache (:cached-tokens prior-cache) (seq (:kv-buffers prior-cache)))
+         min-win (model-sliding-window-size config num-unshared)
+         ring-wrapped? (boolean (and min-win
+                                     prior-cache
+                                     (>= (count (:cached-tokens prior-cache)) min-win)))
+         p-match (if (and prior-cache
+                          (not ring-wrapped?)
+                          (:cached-tokens prior-cache)
+                          (seq (:kv-buffers prior-cache)))
                    (common-prefix-len (:cached-tokens prior-cache) clamped-prompt-ids)
                    0)
          _ (when (and is-persistent? prior-cache (zero? p-match))
