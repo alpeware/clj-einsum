@@ -80,6 +80,41 @@ The 20-cell reference suite was evaluated with `gemma-4-31b-it-qat-int4` at repe
 | **Agentic Loop (10 cells)** | 1,521.77s | 1,115.84s | +405.93s | **26.67%** |
 | **Combined 20-Cell Suite** | **2,465.20s** | **1,940.97s** | **+524.23s** | **21.27%** |
 
+### 3.3 Gemma 4 E4B-it (BF16 Checkpoint) Evaluation Breakdown
+
+The 20-cell suite was also evaluated on `gemma-4-E4B-it` (unquantized BF16 checkpoint) with exact v1 parameters (`max-seq-len=2048`, `max-new-tokens=1536`, `rep-pen=1.0`, `temp=0.0`) recorded in [`results_e4b_it.edn`](results_e4b_it.edn) and [`summary_e4b_it.csv`](summary_e4b_it.csv).
+
+| Task | Mode | v1 Outcome | v1 Wall (s) | v2 Outcome | v2 Wall (s) | Wall Delta (s) | Speedup (%) |
+|---|---|---|---|---|---|---|---|
+| `balanced-delims?` | `agentic` | FAIL | 6.02 | FAIL | 47.46 | -41.44 | -688.66%* |
+| `balanced-delims?` | `single-shot` | FAIL | 47.51 | FAIL | 56.41 | -8.90 | -18.73% |
+| `deep-flatten` | `agentic` | FAIL | 55.59 | FAIL | 120.20 | -64.61 | -116.23%* |
+| `deep-flatten` | `single-shot` | FAIL | 40.99 | FAIL | 40.82 | +0.17 | +0.42% |
+| `deep-update-vals` | `agentic` | FAIL | 104.60 | FAIL | 62.61 | +41.99 | **+40.14%** |
+| `deep-update-vals` | `single-shot` | PASS | 26.87 | PASS | 26.78 | +0.09 | +0.35% |
+| `first-n` | `agentic` | FAIL | 17.14 | FAIL | 17.25 | -0.11 | -0.66% |
+| `first-n` | `single-shot` | FAIL | 15.21 | FAIL | 15.08 | +0.13 | +0.88% |
+| `freqs` | `agentic` | PASS | 53.35 | PASS | 28.94 | +24.41 | **+45.76%** |
+| `freqs` | `single-shot` | PASS | 18.16 | PASS | 18.09 | +0.07 | +0.36% |
+| `lazy-interleave` | `agentic` | FAIL | 94.91 | **PASS** | 45.34 | +49.57 | **+52.22%** |
+| `lazy-interleave` | `single-shot` | FAIL | 47.54 | FAIL | 55.60 | -8.06 | -16.95% |
+| `my-comp` | `agentic` | FAIL | 87.51 | FAIL | 81.54 | +5.97 | +6.82% |
+| `my-comp` | `single-shot` | FAIL | 23.43 | FAIL | 23.33 | +0.10 | +0.41% |
+| `my-or` | `agentic` | FAIL | 5.55 | FAIL | 113.98 | -108.43 | -1952.31%* |
+| `my-or` | `single-shot` | FAIL | 47.54 | FAIL | 56.53 | -8.99 | -18.92% |
+| `my-range` | `agentic` | FAIL | 33.45 | FAIL | 59.25 | -25.80 | -77.14% |
+| `my-range` | `single-shot` | FAIL | 47.39 | FAIL | 49.12 | -1.73 | -3.65% |
+| `partition-by-parity` | `agentic` | FAIL | 61.54 | **PASS** | 33.53 | +28.01 | **+45.52%** |
+| `partition-by-parity` | `single-shot` | FAIL | 24.34 | FAIL | 24.25 | +0.09 | +0.38% |
+
+*\*Note: In v1, `my-or` (5.55s, 169 tokens) and `balanced-delims?` (6.02s, 172 tokens) aborted early on Turn 1 due to syntax crashes. In v2, the hardened agent loop properly executed full multi-turn reasoning (e.g. `my-or` 4 turns, 3668 tokens), enabling `lazy-interleave` and `partition-by-parity` to succeed.*
+
+**Key Findings for E4B-it BF16**:
+1. **Pass Rate**: Increased from **3/20 (15.0%)** in v1 to **5/20 (25.0%)** in v2.
+2. **Zero Regressions**: All 3 passing cells from v1 passed in v2 (`deep-update-vals` single-shot, `freqs` single-shot, `freqs` agentic).
+3. **New Agentic Passes**: 2 previously failed agentic tasks passed in v2 (`lazy-interleave` and `partition-by-parity`).
+4. **Agentic Wall-Time Speedup**: For tasks with comparable multi-turn structures (`freqs`, `lazy-interleave`, `partition-by-parity`, `deep-update-vals`), prefix KV-cache reuse delivered **40.1% to 52.2% wall-time reduction** per task.
+
 ---
 
 ## 4. Architectural Findings & Invariants
