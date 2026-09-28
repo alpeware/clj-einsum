@@ -408,6 +408,7 @@
                 :dry-run? false})]
       (is (= :test-failure (:stop-reason row)))
       (is (false? (:passed? row)))
+      (is (= 0.0 (:temperature row)))
       (is (= "(defn first-n [coll] (take 10 coll))" (:candidate-code row)))
       (is (= 1536 (:max-new-tokens row)))
       (is (= {:passed 4 :total 5} (:test-summary row)))
@@ -416,13 +417,14 @@
       (is (= "false" (:actual (first (:failures row)))))
       (is (= transcript (:transcript row)))))
 
-  (testing "Formats row with explicit max-new-tokens budget"
+  (testing "Formats row with explicit max-new-tokens budget and temperature"
     (let [row (bench-core/format-results-row
                {:model "gemma-4-31b-it-int4"
                 :task "first-n"
                 :mode :single-shot
                 :candidate-code "(defn first-n [coll] (vec (take 10 coll)))"
                 :max-new-tokens 4096
+                :temperature 0.7
                 :grade-res {:all-passed? true :passed-count 5 :total-count 5}
                 :tokens-in 266
                 :tokens-out 2500
@@ -430,7 +432,8 @@
                 :sealed-sha "dummy-sha"
                 :checkpoint-sha "dummy-cp"
                 :dry-run? false})]
-      (is (= 4096 (:max-new-tokens row)))))
+      (is (= 4096 (:max-new-tokens row)))
+      (is (= 0.7 (:temperature row)))))
 
   (testing "Omits transcript on passing row"
     (let [grade-res {:all-passed? true
@@ -580,7 +583,22 @@
   (testing "Extracting candidate code from ```clj...``` markdown code block"
     (let [text "Running:\n```clj\n(defn first-n [coll] (vec (take 10 coll)))\n```"
           code (bench-core/extract-candidate-code text "first-n")]
-      (is (= "(defn first-n [coll] (vec (take 10 coll)))" code)))))
+      (is (= "(defn first-n [coll] (vec (take 10 coll)))" code))))
+
+  (testing "Extracts code from ```clojure...``` when preceded by echoed ```clojure_result...```"
+    (let [text "Previous execution result:\n```clojure_result\nExecution Exception: error\n```\nRevised code:\n```clojure\n(defn first-n [coll] (vec (take 10 coll)))\n```"
+          code (bench-core/extract-candidate-code text "first-n")]
+      (is (= "(defn first-n [coll] (vec (take 10 coll)))" code))))
+
+  (testing "Returns nil when response only contains ```clojure_result...```"
+    (let [text "Previous execution result:\n```clojure_result\nExecution Exception: error\n```"
+          code (bench-core/extract-candidate-code text "first-n")]
+      (is (nil? code))))
+
+  (testing "Returns nil when candidate code is ONLY present in thinking channel"
+    (let [text "<|channel>thought\n```clojure\n(defn first-n [coll] (vec (take 10 coll)))\n```\n<channel|>\nI have considered the approach but cannot provide code yet."
+          code (bench-core/extract-candidate-code text "first-n")]
+      (is (nil? code)))))
 
 (deftest test-cli-tool-syntax-parsing
   (testing "Parsing --tool-syntax xml"

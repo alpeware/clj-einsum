@@ -235,7 +235,8 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                      (str "<clojure>\n" trimmed-code "\n</clojure>"))})))
 
        :fenced
-       (when-let [[raw code] (re-find #"(?s)```(?:clojure|clj)?\s*\n?(.*?)(?:```|$)" clean)]
+       (when-let [[raw code] (or (re-find #"(?s)```(?:clojure|clj)(?!_)\s*\n?(.*?)(?:```|$)" clean)
+                                 (re-find #"(?s)```\s*\n(.*?)\n```" clean))]
          (let [trimmed-code (str/trim (or code ""))]
            (when (seq trimmed-code)
              {:name "eval_clojure"
@@ -354,8 +355,10 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
    Maintained for backward compatibility."
   [text]
   (let [extract-raw (fn [s allow-loose?]
-                      (let [pattern #"(?s)```(?:clojure|clj)?\s*\n?(.*?)(?:```|$)"
-                            raw-matches (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq pattern s))))
+                      (let [tagged-matches (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq #"(?s)```(?:clojure|clj)(?!_)\s*\n?(.*?)(?:```|$)" s))))
+                            bare-matches (when (empty? tagged-matches)
+                                           (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq #"(?s)```\s*\n(.*?)\n```" s)))))
+                            raw-matches (vec (concat tagged-matches bare-matches))
                             cleaned-blocks (mapv (fn [block]
                                                    (-> block
                                                        (str/replace #"^```[a-z]*>?" "")
@@ -434,7 +437,8 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 
            ;; Case 0b: Complete fenced markdown tool call block outside thought
            (and (= tool-syntax :fenced)
-                (boolean (re-find #"(?s)```(?:clojure|clj)?\s*\n?\s*(\S.*?)\s*```" body)))
+                (boolean (or (re-find #"(?s)```(?:clojure|clj)(?!_)\s*\n?\s*(\S.*?)\s*```" body)
+                             (re-find #"(?s)```\s*\n\s*(\S.*?)\s*```" body))))
            true
 
            ;; Case 1: Complete tool call tag
@@ -442,7 +446,8 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
            true
 
            ;; Case 2: Complete closed markdown code block
-           (when-let [[_ code-content] (re-find #"(?s)```(?:clojure|clj)?\s*\n(.*?)\n```" body)]
+           (when-let [[_ code-content] (or (re-find #"(?s)```(?:clojure|clj)(?!_)\s*\n(.*?)\n```" body)
+                                           (re-find #"(?s)```\s*\n(.*?)\n```" body))]
              (if target-fn
                (contains-target-definition? code-content target-fn)
                (some? (try-parse-sci-reader (str/trim code-content)))))
@@ -827,14 +832,14 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                      :tool-call tool-call})
 
              (if-not tool-call
-               (let [has-candidate? (boolean (candidate-fn model-reply))]
+               (let [has-candidate? (boolean (candidate-fn final-response))]
                  (if (nudge-needed? {:turn turn
                                      :max-turns max-turns
                                      :new-tokens new-tokens
                                      :opts opts
                                      :history @history
                                      :consecutive-errors consecutive-errors
-                                     :model-reply model-reply
+                                     :model-reply final-response
                                      :has-candidate? has-candidate?})
                    (let [nudge-msg (or (:nudge-prompt opts)
                                        (case syntax

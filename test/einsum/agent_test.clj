@@ -738,6 +738,8 @@
   (testing "MultiPL-E 50-task dev subset runs through harness with valid :harness-sha on every row"
     (let [tmp-results (str "scratch/test_multipl_e_results_" (System/currentTimeMillis) ".edn")
           tmp-summary (str "scratch/test_multipl_e_summary_" (System/currentTimeMillis) ".csv")
+          _ (io/make-parents (io/file tmp-results))
+          _ (io/make-parents (io/file tmp-summary))
           run-fn (requiring-resolve 'experiments.gate3-evals.clojure-bench.run/run-benchmark)
           _ (run-fn {:dry-run true
                      :overwrite true
@@ -762,14 +764,49 @@
   (testing "Rejects truncated or unclosed code forms to prevent false nudge short-circuits"
     (let [check-fn (fn [text fn-name]
                      (when-not (agent/inside-unclosed-thought? text)
-                       (let [cand (bench-core/extract-candidate-code text fn-name)]
+                       (let [clean (agent/strip-thinking-trace (or text ""))
+                             cand (bench-core/extract-candidate-code clean fn-name)]
                          (and (seq cand)
                               (bench-core/submission-form? cand fn-name)
                               (some? (agent/try-parse-sci-reader cand))))))
           broken-code "(defn deep-flatten [coll]\n  (let [flatten (fn [x] (cond (sequential? x) (flatten"
           valid-code "(defn deep-flatten [coll]\n  (vec (flatten coll)))"
-          unclosed-thought (str "<|channel>thought\nStill thinking...\n" valid-code)]
+          unclosed-thought (str "<|channel>thought\nStill thinking...\n" valid-code)
+          closed-thought-only (str "<|channel>thought\n" valid-code "\n<channel|>\nAnalysis only.")]
       (is (false? (boolean (check-fn broken-code "deep-flatten"))))
       (is (false? (boolean (check-fn unclosed-thought "deep-flatten"))))
+      (is (false? (boolean (check-fn closed-thought-only "deep-flatten"))))
       (is (true? (boolean (check-fn valid-code "deep-flatten")))))))
+
+(deftest test-extract-tool-call-fenced-echo-hazard
+  (testing "Ignores echoed clojure_result code fence and extracts the actual candidate definition"
+    (let [text "```clojure_result\nExecution Exception: error\n```\nHere is my fix:\n```clojure\n(defn deep-flatten [coll] (vec coll))\n```"
+          tc (agent/extract-tool-call text :fenced)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(defn deep-flatten [coll] (vec coll))" (:code tc)))))
+
+  (testing "Returns nil when response only contains clojure_result"
+    (let [text "```clojure_result\nExecution Exception: error\n```"
+          tc (agent/extract-tool-call text :fenced)]
+      (is (nil? tc))))
+
+  (testing "Does not trigger semantic-stop? on clojure_result fence"
+    (let [text "```clojure_result\nExecution Exception: error\n```"]
+      (is (false? (boolean (agent/semantic-stop? text {:target-fn "deep-flatten" :tool-syntax :fenced})))))))
+
+(deftest test-run-agent-loop-does-not-short-circuit-on-thought-only-candidate
+  (testing "Candidate code only present inside thinking trace triggers nudge reminder and does not terminate early"
+    (let [scripted-responses ["<|channel>thought\n(defn my-add [a b] (+ a b))\n<channel|>\nI have formulated the approach."
+                              "```clojure\n(defn my-add [a b] (+ a b))\n```"]
+          cand-fn (fn [text] (str/includes? text "defn my-add"))
+          session {:opts {:system "System prompt"
+                          :max-turns 5
+                          :nudge-on-no-tool true
+                          :candidate-check-fn cand-fn
+                          :scripted-responses scripted-responses
+                          :tool-syntax :fenced
+                          :quiet true}}
+          transcript (agent/run-agent-loop session "Implement my-add")]
+      (is (>= (count transcript) 2))
+      (is (some #(and (= (:role %) :user) (str/includes? (or (:content %) "") "Please test your Clojure implementation")) transcript)))))
 

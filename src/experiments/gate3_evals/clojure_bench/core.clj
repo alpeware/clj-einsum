@@ -199,22 +199,26 @@ Only provide your final response once your definition passes all public tests.")
                               (or code-str ""))))))
 
 (defn extract-markdown-code-blocks
-  "Extracts all ```clojure ... ``` or ```clj ... ``` or bare ``` ... ``` code blocks from text."
+  "Extracts all ```clojure ... ``` or ```clj ... ``` or bare ``` ... ``` code blocks from text.
+   Excludes ```clojure_result ... ``` blocks."
   [text]
-  (let [pattern #"(?s)```(?:clojure|clj)?\s*\n?(.*?)(?:```|$)"
-        raw-matches (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq pattern (or text "")))))]
+  (let [tagged (mapv (fn [[_ code]] (str/trim code))
+                     (re-seq #"(?s)```(?:clojure|clj)(?!_)\s*\n?(.*?)(?:```|$)" (or text "")))
+        bare (when (empty? tagged)
+               (mapv (fn [[_ code]] (str/trim code))
+                     (re-seq #"(?s)```\s*\n(.*?)\n```" (or text ""))))]
     (mapv (fn [block]
             (-> block
                 (str/replace #"^```[a-z]*>?" "")
                 (str/replace #"```$" "")
                 str/trim))
-          raw-matches)))
+          (concat tagged bare))))
 
 (defn extract-candidate-code
   "Extracts candidate Clojure code for target `fn-name` from raw text.
-   Checks unwrapped tool calls, XML code blocks, markdown code blocks, and raw s-expressions,
+   Checks unwrapped tool calls, XML code blocks, markdown code blocks, and raw s-expressions outside thought,
    preferring forms that define or declare `fn-name`.
-   Returns nil if no candidate defining `fn-name` is found."
+   Returns nil if no candidate defining `fn-name` is found outside thinking."
   [text fn-name]
   (let [target (name (or fn-name ""))
         clean-text (sanitize-transcript-scaffolding text)
@@ -229,20 +233,8 @@ Only provide your final response once your definition passes all public tests.")
                                                       blocks
                                                       (when raw-sexpr [raw-sexpr])))))
         best-stripped (first (filter #(submission-form? % target) candidates))]
-    (if best-stripped
-      (isolate-submission-forms best-stripped target)
-      ;; Fallback to searching unstripped text if no matching submission found outside thinking
-      (let [fb-tool-code (when-let [tc (agent/extract-tool-call clean-text)] (:code tc))
-            fb-xml (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq #"(?s)<(?:clojure|clj)>\s*(.*?)\s*(?:</(?:clojure|clj)>|$)" clean-text))))
-            fb-blocks (extract-markdown-code-blocks clean-text)
-            fb-sexpr (agent/extract-balanced-sexpr clean-text)
-            fb-candidates (vec (distinct (filter seq (concat (when fb-tool-code [fb-tool-code])
-                                                             fb-xml
-                                                             fb-blocks
-                                                             (when fb-sexpr [fb-sexpr])))))
-            best-fb (first (filter #(submission-form? % target) fb-candidates))]
-        (when best-fb
-          (isolate-submission-forms best-fb target))))))
+    (when best-stripped
+      (isolate-submission-forms best-stripped target))))
 
 ;; =============================================================================
 ;; 5. Hermetic Grading Engine
@@ -460,7 +452,7 @@ Only provide your final response once your definition passes all public tests.")
 (defn format-results-row
   "Formats an individual task evaluation result map for results.edn, persisting
    rich diagnostics (candidate-code, error, test-summary, failure details, stop-reason, transcript on failure)."
-  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha prompt-sha dry-run? transcript repetition-penalty tool-syntax]}]
+  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha prompt-sha dry-run? transcript repetition-penalty temperature tool-syntax]}]
   (let [all-passed? (boolean (:all-passed? grade-res))
         has-error? (seq (or error (:error grade-res)))
         err-msg (or error (:error grade-res))
@@ -488,6 +480,7 @@ Only provide your final response once your definition passes all public tests.")
              :tokens-out (long (or tokens-out 0))
              :max-new-tokens (long (or max-new-tokens 1536))
              :wall-ms (double (or wall-ms 0.0))
+             :temperature (double (or temperature 0.0))
              :repetition-penalty (double (or repetition-penalty 1.0))
              :sealed-sha (str sealed-sha)
              :checkpoint-sha (str checkpoint-sha)

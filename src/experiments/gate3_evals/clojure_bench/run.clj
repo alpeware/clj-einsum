@@ -147,6 +147,7 @@
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
           :prompt-sha (:prompt-sha opts)
+          :temperature (double (or (:temperature opts) 0.0))
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :dry-run? true}))
@@ -204,6 +205,7 @@
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
           :prompt-sha (:prompt-sha opts)
+          :temperature (double (or (:temperature opts) 0.0))
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens max-new
           :dry-run? false})))))
@@ -246,6 +248,7 @@
           :sealed-sha sealed-sha
           :checkpoint-sha checkpoint-sha
           :prompt-sha (:prompt-sha opts)
+          :temperature (double (or (:temperature opts) 0.0))
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :dry-run? true}))
@@ -295,7 +298,8 @@
             candidate-check-fn (when nudge-sc-opt?
                                  (fn [text]
                                    (when-not (agent/inside-unclosed-thought? text)
-                                     (let [candidate (bench-core/extract-candidate-code text fn-name)]
+                                     (let [clean (agent/strip-thinking-trace (or text ""))
+                                           candidate (bench-core/extract-candidate-code clean fn-name)]
                                        (and (seq candidate)
                                             (bench-core/submission-form? candidate fn-name)
                                             (some? (agent/try-parse-sci-reader candidate)))))))
@@ -379,6 +383,7 @@
               :checkpoint-sha checkpoint-sha
               :prompt-sha (:prompt-sha opts)
               :transcript (vec transcript)
+              :temperature (double (or (:temperature opts) 0.0))
               :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
               :max-new-tokens (long (or (:max-new-tokens opts) 1536))
               :dry-run? false}))
@@ -449,6 +454,9 @@
             (println (format "Summary File         : %s" (.getPath summary-file)))
             (println "=================================================="))
 
+        _ (do
+            (io/make-parents results-file)
+            (io/make-parents summary-file))
         _ (when (:overwrite opts)
             (spit results-file ""))
 
