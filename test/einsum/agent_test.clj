@@ -55,6 +55,18 @@
       (is (= "eval_clojure" (:name tc)))
       (is (= "(println \"hello (world)\")" (:code tc)))))
 
+  (testing "Extracting tool call with code:= and quotes"
+    (let [text "<|tool_call>call:eval_clojure{code:=\"(def freqs (fn [coll] coll))\"}<tool_call|>"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(def freqs (fn [coll] coll))" (:code tc)))))
+
+  (testing "Extracting tool call with multi-form bare code"
+    (let [text "<|tool_call>call:eval_clojure{code:(def lazy (fn [] 1))\n(lazy)}<tool_call|>"
+          tc (agent/extract-tool-call text)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (str/includes? (:code tc) "(def lazy (fn [] 1))"))))
+
   (testing "Extracting tool call with bare s-expression"
     (let [text "<|tool_call>call:eval_clojure{(println \"hello\")}<tool_call|>"
           tc (agent/extract-tool-call text)]
@@ -85,15 +97,43 @@
   (testing "Formatting success execution result with native tool response tokens"
     (let [res {:status :success :output "30"}
           resp (agent/format-tool-response "eval_clojure" res)]
-      (is (str/starts-with? resp "<|tool_response>response:eval_clojure{output:<|\"|>"))
+      (is (str/starts-with? resp "<|tool_response>response:eval_clojure{status:<|\"|>success<|\"|>"))
       (is (str/includes? resp "30"))
+      (is (str/includes? resp "output:<|\"|>30<|\"|>"))
       (is (str/ends-with? resp "<|\"|>}<tool_response|>"))))
 
   (testing "Formatting error execution result"
     (let [res {:status :error :output "Execution Exception: Divide by zero"}
           resp (agent/format-tool-response "eval_clojure" res)]
       (is (str/includes? resp "Divide by zero"))
-      (is (str/ends-with? resp "<|\"|>}<tool_response|>")))))
+      (is (str/includes? resp "status:<|\"|>error<|\"|>"))
+      (is (str/ends-with? resp "<|\"|>}<tool_response|>"))))
+
+  (testing "Formatting structured multi-key response with numbers, booleans, failures, nudges"
+    (let [res {:output "#'user/my-fn"
+               :status :failed
+               :tests_passed 1
+               :tests_total 3
+               :failures "Code: (my-fn 5) -> Expected 10, got 5"
+               :nudge "Please double the result before returning."
+               :system_note "Be careful with boundary conditions."}
+          resp (agent/format-tool-response "eval_clojure" res)]
+      (is (str/starts-with? resp "<|tool_response>response:eval_clojure{"))
+      (is (str/ends-with? resp "}<tool_response|>"))
+      (is (str/includes? resp "output:<|\"|>#'user/my-fn<|\"|>"))
+      (is (str/includes? resp "status:<|\"|>failed<|\"|>"))
+      (is (str/includes? resp "tests_passed:1"))
+      (is (str/includes? resp "tests_total:3"))
+      (is (str/includes? resp "failures:<|\"|>Code: (my-fn 5) -> Expected 10, got 5<|\"|>"))
+      (is (str/includes? resp "nudge:<|\"|>Please double the result before returning.<|\"|>"))
+      (is (str/includes? resp "system_note:<|\"|>Be careful with boundary conditions.<|\"|>"))))
+
+  (testing "Stop token IDs conform to Gemma 4 spec (omits 49, includes 50)"
+    (let [k-stop @(requiring-resolve 'einsum.models.gemma4.kernels/GEMMA4-STOP-TOKEN-IDS)]
+      (is (contains? k-stop 1))   ;; <eos>
+      (is (contains? k-stop 106)) ;; <turn|>
+      (is (contains? k-stop 50))  ;; <|tool_response>
+      (is (not (contains? k-stop 49)))))) ;; <tool_call|> must NOT be a stop token
 
 (deftest test-eval-tool-code-success
   (testing "Evaluating math expressions in SCI sandbox"
@@ -226,7 +266,7 @@
           prompt (agent/format-agent-chat-prompt "You are an assistant." history)]
       (is (str/includes? prompt "<|turn>model\n<|tool_call>call:eval_clojure{code:\"(+ 2 2)\"}<tool_call|><|tool_response>response:eval_clojure{output:<|\"|>4<|\"|>}<tool_response|>"))
       (is (not (str/includes? prompt "<turn|>\n<|turn>user\n<|tool_response>")))
-      (is (str/ends-with? prompt "<tool_response|>\n"))))
+      (is (str/ends-with? prompt "<tool_response|>"))))
 
   (testing "Formatting prompt consolidates tool declaration inside system turn"
     (let [decl "<|tool>declaration:eval_clojure{...}<tool|>"
@@ -392,9 +432,17 @@
       (is (not (str/includes? prompt "<|channel>thought"))))))
 
 (deftest test-sanitize-history-model-content
-  (testing "Model reply with tool call returns compact raw tool call"
+  (testing "Model reply with tool call retains thought process per Function Calling Exception"
     (let [tc {:name "eval_clojure" :code "(+ 1 2)" :raw "<|tool_call>call:eval_clojure{code:\"(+ 1 2)\"}<tool_call|>"}
-          res (agent/sanitize-history-model-content tc "" "<|channel>thought...<channel|><|tool_call>...")]
+          raw "<|channel>thought\nNeed to add 1 and 2.\n<channel|>\n<|tool_call>call:eval_clojure{code:\"(+ 1 2)\"}<tool_call|>"
+          res (agent/sanitize-history-model-content tc "" raw)]
+      (is (str/includes? res "Need to add 1 and 2."))
+      (is (str/includes? res "<|channel>thought"))
+      (is (str/includes? res (:raw tc)))))
+
+  (testing "Model reply with tool call but no thoughts returns raw tool call"
+    (let [tc {:name "eval_clojure" :code "(+ 1 2)" :raw "<|tool_call>call:eval_clojure{code:\"(+ 1 2)\"}<tool_call|>"}
+          res (agent/sanitize-history-model-content tc "" (:raw tc))]
       (is (= (:raw tc) res))))
 
   (testing "Model reply with final response returns clean response without thoughts"
@@ -406,6 +454,25 @@
           res (agent/sanitize-history-model-content nil "" truncated-raw)]
       (is (not (str/includes? res "Thinking for 1536 tokens")))
       (is (< (count res) 100)))))
+
+(defspec prop-format-agent-chat-prompt-tool-interaction-invariants
+  50
+  (prop/for-all [thought (gen/not-empty gen/string-alphanumeric)
+                 code (gen/not-empty gen/string-alphanumeric)]
+                (let [thought-str (str "THOUGHT_" thought)
+                      code-str (str "CODE_" code)
+                      model-turn (format "<|channel>thought\n%s\n<channel|>\n<|tool_call>call:eval_clojure{code:\"%s\"}<tool_call|>" thought-str code-str)
+                      history [{:role :user :content "Task"}
+                               {:role :model :content model-turn}
+                               {:role :tool :content "<|tool_response>response:eval_clojure{output:<|\"|>ok<|\"|>}<tool_response|>"}]
+                      prompt (agent/format-agent-chat-prompt "System" history)]
+                  ;; Thoughts pruned per Google line 4428 spec to prevent context exhaustion
+                  (and (not (str/includes? prompt thought-str))
+                       (str/includes? prompt code-str)
+                       (str/includes? prompt "<|tool_call>")
+                       (str/includes? prompt "<|tool_response>")
+                       ;; Native tool response directly attaches without trailing newline or turn boundary
+                       (str/ends-with? prompt "<tool_response|>")))))
 
 (defspec prop-format-agent-chat-prompt-prunes-past-thoughts
   50
@@ -419,6 +486,7 @@
                                {:role :tool :content "Result"}
                                {:role :user :content "Next"}]
                       prompt (agent/format-agent-chat-prompt "System" history)]
+                  ;; Thoughts MUST be pruned when followed by :user turn (standard multi-turn conversation)
                   (and (not (str/includes? prompt thought-str))
                        (not (str/includes? prompt "<|channel>thought"))
                        (str/includes? prompt code-str)))))

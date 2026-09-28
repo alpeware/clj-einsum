@@ -7,8 +7,11 @@
             [einsum.runtime.arena :as arena]))
 
 (def GEMMA4-STOP-TOKEN-IDS
-  "Special token IDs marking end-of-turn or end-of-generation in Gemma 4."
-  #{1 106 49 50})
+  "Special token IDs marking end-of-turn or end-of-generation in Gemma 4.
+   1: <eos>, 106: <turn|>, 50: <|tool_response>.
+   Token 49 (<tool_call|>) is omitted so the model generates its complete
+   closing tag and yields cleanly on <|tool_response>."
+  #{1 106 50})
 
 (defn build-tensor-logic-invars
   "Constructs EDN SSA signature invars for full Gemma 4 model forward pass."

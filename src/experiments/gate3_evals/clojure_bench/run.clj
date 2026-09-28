@@ -261,10 +261,31 @@
                      is-sub? (and (seq candidate) (bench-core/submission-form? candidate fn-name))]
                  (if is-sub?
                    (let [pub-res (bench-core/grade-submission sci-ctx candidate (:public-tests task))
+                         early-exit? (boolean (and early-exit-opt? (:all-passed? pub-res)))
                          feedback (bench-core/format-public-feedback pub-res)
-                         early-exit? (boolean (and early-exit-opt? (:all-passed? pub-res)))]
+                         failures (when-not (:all-passed? pub-res)
+                                    (if (:error pub-res)
+                                      (:error pub-res)
+                                      (str/join "; "
+                                                (map (fn [{:keys [code expected actual error]}]
+                                                       (if error
+                                                         (format "%s -> %s" code error)
+                                                         (format "%s -> Expected %s, got %s" code expected actual)))
+                                                     (filter #(not (:passed? %)) (:results pub-res))))))
+                         nudge-msg (when-not (:all-passed? pub-res)
+                                     "Revise your implementation to pass all public tests.")]
                      (swap! submissions conj {:code candidate :public-res pub-res :turn turn})
-                     (cond-> (update eval-res :output #(str % "\n" feedback))
+                     (cond-> (assoc eval-res
+                                    :status (if (:all-passed? pub-res) :success (if (:error pub-res) :error :failed))
+                                    :tests_passed (:passed-count pub-res)
+                                    :tests_total (:total-count pub-res)
+                                    :output (if (:all-passed? pub-res)
+                                              (if (seq (:output eval-res))
+                                                (str (:output eval-res) "\n" feedback)
+                                                feedback)
+                                              feedback))
+                       (seq failures) (assoc :failures failures)
+                       (seq nudge-msg) (assoc :nudge nudge-msg)
                        early-exit? (assoc :early-exit? true)))
                    eval-res))))
 

@@ -40,6 +40,12 @@ elif [ "$1" = "clj-bench" ] || [ "$1" = "--clj-bench" ] || [ "$1" = "clojure-ben
 elif [ "$1" = "run" ] || [ "$1" = "--run" ] || [ "$1" = "exec" ]; then
   MODE="run"
   shift
+elif [ "$1" = "test" ] || [ "$1" = "--test" ]; then
+  MODE="run"
+  shift
+  set -- "-M:test" "$@"
+elif [[ "$1" == -M* ]] || [[ "$1" == -A* ]] || [[ "$1" == -S* ]] || [[ "$1" == -T* ]] || [[ "$1" == -X* ]]; then
+  MODE="run"
 fi
 
 : < /dev/dri/renderD128 2>/dev/null || true

@@ -83,7 +83,9 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 
 (defn parse-tool-call-code
   "Extracts the Clojure code string from a Gemma 4 tool call argument block.
-   Employs reader-based balanced extraction to prevent greedy swallowing of subsequent fields."
+   Employs reader-based balanced extraction when available and falls back gracefully
+   to raw unescaped code blocks to ensure syntax errors are caught by the evaluator
+   rather than dropping the tool call."
   [args-str]
   (let [trimmed (str/trim (or args-str ""))
         unbraced (-> trimmed
@@ -91,29 +93,43 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                      (str/replace #"\}$" "")
                      str/trim)]
     (cond
-      ;; 1. Gemma 4 native string delimiter: code:<|"|>...<|"|>
-      (re-find #"(?s)code\s*:\s*<\|\"\|>(.*?)(?:<\|\"\|>|$)" unbraced)
-      (second (re-find #"(?s)code\s*:\s*<\|\"\|>(.*?)(?:<\|\"\|>|$)" unbraced))
+      ;; 1. Gemma 4 native string delimiter: code:<|"|>...<|"|> or code:=<|"|>...
+      (re-find #"(?s)code\s*[:=]+\s*<\|\"\|>(.*?)(?:<\|\"\|>|$)" unbraced)
+      (second (re-find #"(?s)code\s*[:=]+\s*<\|\"\|>(.*?)(?:<\|\"\|>|$)" unbraced))
 
-      ;; 2. Standard JSON quotes with escaped string support: code:"..."
-      (re-find #"(?s)code\s*:\s*\"([^\"\\]*(?:\\.[^\"\\]*)*)\"" unbraced)
-      (unescape-json-string (second (re-find #"(?s)code\s*:\s*\"([^\"\\]*(?:\\.[^\"\\]*)*)\"" unbraced)))
+      ;; 2. Standard JSON quotes with escaped string support: code:"..." or code:="..."
+      (re-find #"(?s)code\s*[:=]+\s*\"([^\"\\]*(?:\\.[^\"\\]*)*)\"" unbraced)
+      (unescape-json-string (second (re-find #"(?s)code\s*[:=]+\s*\"([^\"\\]*(?:\\.[^\"\\]*)*)\"" unbraced)))
 
-      ;; 3. Single quotes: code:'...'
-      (re-find #"(?s)code\s*:\s*\'([^\']*)\'" unbraced)
-      (second (re-find #"(?s)code\s*:\s*\'([^\']*)\'" unbraced))
+      ;; 3. Single quotes: code:'...' or code:='...'
+      (re-find #"(?s)code\s*[:=]+\s*\'([^\']*)\'" unbraced)
+      (second (re-find #"(?s)code\s*[:=]+\s*\'([^\']*)\'" unbraced))
 
-      ;; 4. code: followed by an s-expression
-      (re-find #"(?s)code\s*:\s*\(" unbraced)
-      (let [code-idx (.indexOf ^String unbraced "code:")
-            after-code (subs unbraced (+ code-idx 5))]
-        (extract-balanced-sexpr after-code))
+      ;; 4. code: or code:= followed by an s-expression or raw code
+      (re-find #"(?s)code\s*[:=]+" unbraced)
+      (let [m (re-matcher #"(?s)code\s*[:=]+\s*" unbraced)]
+        (when (.find m)
+          (let [after-code (subs unbraced (.end m))
+                code-segment (first (str/split after-code #",\s*[a-zA-Z_][a-zA-Z0-9_-]*\s*:" 2))
+                clean-after (-> (or code-segment after-code)
+                                (str/replace #"(?:<\|\"\|>|\"|\'|[,\}\s])+$" "")
+                                str/trim)
+                balanced (try (extract-balanced-sexpr after-code) (catch Throwable _ nil))]
+            (or (when (and (seq clean-after) (str/starts-with? clean-after "("))
+                  clean-after)
+                (when (seq balanced) balanced)
+                (when (seq clean-after) clean-after)))))
 
-      ;; 5. Any bare s-expression within the tool call argument block (Reader-based balanced extractor)
-      (extract-balanced-sexpr unbraced)
-      (extract-balanced-sexpr unbraced)
-
-      :else nil)))
+      ;; 5. Any bare s-expression or raw code within the tool call argument block
+      :else
+      (let [code-segment (first (str/split unbraced #",\s*[a-zA-Z_][a-zA-Z0-9_-]*\s*:" 2))
+            clean-unbraced (-> (or code-segment unbraced)
+                               (str/replace #"(?:<\|\"\|>|\"|\'|[,\}\s])+$" "")
+                               str/trim)
+            balanced (try (extract-balanced-sexpr unbraced) (catch Throwable _ nil))]
+        (or (when (and (seq clean-unbraced) (str/starts-with? clean-unbraced "("))
+              clean-unbraced)
+            (when (seq balanced) balanced))))))
 
 ;; =============================================================================
 ;; 3. Thought & Reasoning Trace Extraction
@@ -187,13 +203,18 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 
 (defn sanitize-history-model-content
   "Sanitizes model output before recording into conversation history.
-   Prioritizes tool calls, then stripped final responses.
+   When a tool call is present, retains the thought process preceding the tool call
+   in accordance with Google's Gemma 4 Function Calling Exception specification.
+   When output is a final response, strips thinking traces to avoid multi-turn drift.
    When output consists solely of truncated, unclosed thoughts, substitutes a compact reminder
    to prevent context window bloat and compounding prefill latency."
-  [tool-call final-response _model-reply]
+  [tool-call final-response model-reply]
   (cond
     tool-call
-    (:raw tool-call)
+    (let [thinking (extract-thinking-trace model-reply)]
+      (if (seq thinking)
+        (str "<|channel>thought\n" (str/trim thinking) "\n<channel|>" (:raw tool-call))
+        (:raw tool-call)))
 
     (and (string? final-response) (seq (str/trim final-response)))
     (str/trim final-response)
@@ -201,15 +222,51 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
     :else
     "[Incomplete generation: token limit reached without tool call]"))
 
+(defn- format-tool-response-value
+  [v]
+  (cond
+    (nil? v)
+    "<|\"|><|\"|>"
+
+    (or (number? v) (boolean? v))
+    (str v)
+
+    (keyword? v)
+    (format "<|\"|>%s<|\"|>" (name v))
+
+    :else
+    (format "<|\"|>%s<|\"|>" (str/trim (str v)))))
+
 (defn format-tool-response
-  "Formats the SCI execution result as a native Gemma 4 tool response observation."
+  "Formats the tool execution result as a native Gemma 4 tool response observation.
+   Supports structured multi-key responses (e.g. {:output ... :status ... :tests_passed ... :nudge ...})
+   serialized with native Gemma 4 key:val and <|\"|> string escape delimiters."
   ([res]
    (format-tool-response "eval_clojure" res))
   ([tool-name res]
-   (let [content (str/trim (or (:output res) ""))]
-     (format "<|tool_response>response:%s{output:<|\"|>%s<|\"|>}<tool_response|>"
-             (if (seq tool-name) tool-name "eval_clojure")
-             content))))
+   (let [t-name (if (seq tool-name) tool-name "eval_clojure")]
+     (cond
+       (string? res)
+       (format "<|tool_response>response:%s{output:<|\"|>%s<|\"|>}<tool_response|>"
+               t-name (str/trim res))
+
+       (map? res)
+       (let [priority-keys [:status :failures :nudge :tests_passed :tests_total :output :system_note]
+             all-keys (distinct (concat (filter #(contains? res %) priority-keys)
+                                        (sort (keys (apply dissoc res (conj priority-keys :early-exit?))))))
+             entries (keep (fn [k]
+                             (when-let [v (get res k)]
+                               (when (not (and (string? v) (str/blank? v)))
+                                 (str (name k) ":" (format-tool-response-value v)))))
+                           all-keys)
+             body (if (seq entries)
+                    (str/join "," entries)
+                    (str "output:" (format-tool-response-value (or (:output res) ""))))]
+         (format "<|tool_response>response:%s{%s}<tool_response|>" t-name body))
+
+       :else
+       (format "<|tool_response>response:%s{output:<|\"|>%s<|\"|>}<tool_response|>"
+               t-name (str/trim (str res)))))))
 
 (defn extract-clojure-code-blocks
   "Extracts all ```clojure ... ``` or ```clj ... ``` code block strings, Gemma 4 <|tool_call> tags, or raw S-expressions from text.
@@ -378,15 +435,15 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                      (if (>= idx (count trimmed))
                        (.toString acc)
                        (let [{:keys [role content]} (nth trimmed idx)
+                             prev-role (when (pos? idx) (:role (nth trimmed (dec idx))))
+                             next-role (when (< (inc idx) (count trimmed))
+                                         (:role (nth trimmed (inc idx))))
                              clean-content (if (= role :model)
                                              (let [stripped (strip-thinking-trace (or content ""))]
                                                (if (seq (str/trim stripped))
                                                  (str/trim stripped)
                                                  "[Incomplete generation]"))
-                                             (str/trim (or content "")))
-                             prev-role (when (pos? idx) (:role (nth trimmed (dec idx))))
-                             next-role (when (< (inc idx) (count trimmed))
-                                         (:role (nth trimmed (inc idx))))]
+                                             (str/trim (or content "")))]
                          (cond
                            (= role :user)
                            (do
@@ -409,11 +466,8 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 
                            (= role :tool)
                            (do
-                             ;; Native Gemma 4 tool response directly attaches to model tool call
+                             ;; Native Gemma 4 tool response directly attaches to model tool call without trailing newline
                              (.append acc clean-content)
-                             (if (str/ends-with? clean-content "\n")
-                               nil
-                               (.append acc "\n"))
                              (recur (inc idx) acc))
 
                            :else
@@ -732,12 +786,12 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                        error-budget-reached? (and (= (:status eval-res) :error)
                                                   (>= new-consecutive-errors consecutive-error-limit))
                        early-exit? (boolean (:early-exit? eval-res))
-                       base-obs (format-tool-response tool-name eval-res)
-                       obs-str (if error-budget-reached?
-                                 (str base-obs
-                                      (format "\n[System: Consecutive tool error limit (%d) reached. Tool execution is now disabled. Provide your final answer in plain text based on the observations collected so far without calling further tools.]"
-                                              consecutive-error-limit))
-                                 base-obs)]
+                       augmented-res (if error-budget-reached?
+                                       (assoc eval-res :system_note
+                                              (format "Consecutive tool error limit (%d) reached. Tool execution is now disabled. Provide your final answer in plain text based on the observations collected so far without calling further tools."
+                                                      consecutive-error-limit))
+                                       eval-res)
+                       obs-str (format-tool-response tool-name augmented-res)]
 
                    (swap! turn-telemetry conj {:turn turn
                                                :prompt-tokens prompt-tokens

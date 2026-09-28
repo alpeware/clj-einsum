@@ -18,7 +18,7 @@
 
 (def GEMMA4-STOP-TOKEN-IDS
   "Special token IDs marking end-of-turn or end-of-generation in Gemma 4."
-  #{1 106 49 50})
+  #{1 106 50})
 
 (def BOS-ID 2)
 (def EOT-ID 106)

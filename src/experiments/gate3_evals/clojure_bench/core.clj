@@ -73,9 +73,10 @@ Output the complete definition in a ```clojure ... ``` code block without using 
 
 (def AGENT-SYSTEM-PROMPT
   "You are an expert Clojure engineer with access to the eval_clojure tool.
-Keep internal reasoning concise and emit the eval_clojure tool call promptly.
-Always use eval_clojure to execute and test your function or macro definition against the public examples before providing your final answer.
-Once your definition passes all public tests, provide your final response.")
+Keep internal reasoning very concise (1-2 paragraphs max): plan your logic briefly, do not write full code drafts in thought, and emit the eval_clojure tool call immediately to test your code.
+Always use eval_clojure to execute and test your function or macro definition against the public examples.
+If any tests fail, inspect the failure errors, revise your implementation, and call eval_clojure again to re-test.
+Only provide your final response once your definition passes all public tests.")
 
 (defn render-benchmark-prompt
   "Renders the formatted user prompt for a task, embedding public test examples.
@@ -104,24 +105,33 @@ Once your definition passes all public tests, provide your final response.")
         (str/replace #"\[(?:Thought Process|Model Response|Agent|Agent Response|System|User)\]" "")
         str/trim)))
 
+(declare submission-form?)
+
 (defn isolate-submission-forms
   "Given candidate code string, extracts only the valid top-level s-expression forms,
-   dropping any non-form or trailing scaffolding tokens."
-  [code-str]
-  (when (string? code-str)
-    (let [reader-ctx (sci/init {})]
-      (try
-        (loop [reader (sci/source-reader code-str)
-               forms []]
-          (let [[form form-str] (try (sci/parse-next+string reader-ctx reader) (catch Throwable _ nil))]
-            (if (or (nil? form) (= form :sci.core/eof))
-              (if (seq forms) (str/join "\n\n" forms) code-str)
-              (if (and (seq? form) (symbol? (first form)))
-                (recur reader (conj forms form-str))
-                (if (seq forms)
-                  (str/join "\n\n" forms)
-                  (recur reader forms))))))
-        (catch Throwable _ code-str)))))
+   dropping any non-form or trailing scaffolding tokens.
+   If target-fn is supplied and the extracted forms do not define target-fn,
+   falls back to code-str to preserve the submission form for evaluation and grading."
+  ([code-str]
+   (isolate-submission-forms code-str nil))
+  ([code-str target-fn]
+   (when (string? code-str)
+     (let [reader-ctx (sci/init {})
+           extracted (try
+                       (loop [reader (sci/source-reader code-str)
+                              forms []]
+                         (let [[form form-str] (try (sci/parse-next+string reader-ctx reader) (catch Throwable _ nil))]
+                           (if (or (nil? form) (= form :sci.core/eof))
+                             (if (seq forms) (str/join "\n\n" forms) code-str)
+                             (if (and (seq? form) (symbol? (first form)))
+                               (recur reader (conj forms form-str))
+                               (if (seq forms)
+                                 (str/join "\n\n" forms)
+                                 (recur reader forms))))))
+                       (catch Throwable _ code-str))]
+       (if (and target-fn (not (submission-form? extracted target-fn)))
+         code-str
+         extracted)))))
 
 (defn- extract-top-level-symbols
   "Extracts all top-level symbols defined or declared in Clojure code."
@@ -194,7 +204,7 @@ Once your definition passes all public tests, provide your final response.")
                                                       (when raw-sexpr [raw-sexpr])))))
         best-stripped (first (filter #(submission-form? % target) candidates))]
     (if best-stripped
-      (isolate-submission-forms best-stripped)
+      (isolate-submission-forms best-stripped target)
       ;; Fallback to searching unstripped text if no matching submission found outside thinking
       (let [fb-tool-code (when-let [tc (agent/extract-tool-call clean-text)] (:code tc))
             fb-blocks (extract-markdown-code-blocks clean-text)
@@ -204,7 +214,7 @@ Once your definition passes all public tests, provide your final response.")
                                                              (when fb-sexpr [fb-sexpr])))))
             best-fb (first (filter #(submission-form? % target) fb-candidates))]
         (when best-fb
-          (isolate-submission-forms best-fb))))))
+          (isolate-submission-forms best-fb target))))))
 
 ;; =============================================================================
 ;; 5. Hermetic Grading Engine
