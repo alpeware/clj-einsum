@@ -78,6 +78,18 @@ Always use eval_clojure to execute and test your function or macro definition ag
 If any tests fail, inspect the failure errors, revise your implementation, and call eval_clojure again to re-test.
 Only provide your final response once your definition passes all public tests.")
 
+(def AGENT-SYSTEM-PROMPT-XML
+  "You are an expert Clojure engineer with access to an interactive Clojure REPL sandbox.
+Keep internal reasoning very concise (1-2 paragraphs max): plan your logic briefly, do not write full code drafts in thought, and wrap your Clojure code in <clojure>...</clojure> tags to evaluate and test your code against public examples.
+Example:
+<clojure>
+(defn my-fn [x]
+  (* x 2))
+</clojure>
+Execution results will be returned in <clojure_result>...</clojure_result>.
+If any tests fail, inspect the failure errors, revise your implementation, and output revised code in <clojure>...</clojure> to re-test.
+Only provide your final response once your definition passes all public tests.")
+
 (defn render-benchmark-prompt
   "Renders the formatted user prompt for a task, embedding public test examples.
    Never includes sealed/hidden tests to preserve evaluation integrity."
@@ -188,7 +200,7 @@ Only provide your final response once your definition passes all public tests.")
 
 (defn extract-candidate-code
   "Extracts candidate Clojure code for target `fn-name` from raw text.
-   Checks unwrapped tool calls, markdown code blocks, and raw s-expressions,
+   Checks unwrapped tool calls, XML code blocks, markdown code blocks, and raw s-expressions,
    preferring forms that define or declare `fn-name`.
    Returns nil if no candidate defining `fn-name` is found."
   [text fn-name]
@@ -197,9 +209,11 @@ Only provide your final response once your definition passes all public tests.")
         stripped (agent/strip-thinking-trace (or clean-text ""))
         tool-code (when-let [tc (agent/extract-tool-call stripped)]
                     (:code tc))
+        xml-blocks (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq #"(?s)<(?:clojure|clj)>\s*(.*?)\s*(?:</(?:clojure|clj)>|$)" stripped))))
         blocks (extract-markdown-code-blocks stripped)
         raw-sexpr (agent/extract-balanced-sexpr stripped)
         candidates (vec (distinct (filter seq (concat (when tool-code [tool-code])
+                                                      xml-blocks
                                                       blocks
                                                       (when raw-sexpr [raw-sexpr])))))
         best-stripped (first (filter #(submission-form? % target) candidates))]
@@ -207,9 +221,11 @@ Only provide your final response once your definition passes all public tests.")
       (isolate-submission-forms best-stripped target)
       ;; Fallback to searching unstripped text if no matching submission found outside thinking
       (let [fb-tool-code (when-let [tc (agent/extract-tool-call clean-text)] (:code tc))
+            fb-xml (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq #"(?s)<(?:clojure|clj)>\s*(.*?)\s*(?:</(?:clojure|clj)>|$)" clean-text))))
             fb-blocks (extract-markdown-code-blocks clean-text)
             fb-sexpr (agent/extract-balanced-sexpr clean-text)
             fb-candidates (vec (distinct (filter seq (concat (when fb-tool-code [fb-tool-code])
+                                                             fb-xml
                                                              fb-blocks
                                                              (when fb-sexpr [fb-sexpr])))))
             best-fb (first (filter #(submission-form? % target) fb-candidates))]
@@ -299,19 +315,19 @@ Only provide your final response once your definition passes all public tests.")
   [{:keys [all-passed? passed-count total-count results error]}]
   (cond
     (seq error)
-    (format "[Public tests: 0/%d passed. Error encountered: %s]" total-count error)
+    (format "Public tests: 0/%d passed.\nError encountered: %s" total-count error)
 
     all-passed?
-    (format "[Public tests: %d/%d passed. All public examples succeeded!]" passed-count total-count)
+    (format "Public tests: %d/%d passed. All public examples succeeded!" passed-count total-count)
 
     :else
     (let [failures (filter #(not (:passed? %)) results)
           failure-lines (map (fn [{:keys [code expected actual error]}]
                                (if error
-                                 (format "  - Code: %s\n    Error: %s" code error)
-                                 (format "  - Code: %s\n    Expected: %s\n    Actual: %s" code expected actual)))
+                                 (format "• %s -> Error: %s" code error)
+                                 (format "• %s -> Expected: %s, Actual: %s" code expected actual)))
                              failures)]
-      (format "[Public tests: %d/%d passed. Failing tests:\n%s\nPlease revise your implementation.]"
+      (format "Public tests: %d/%d passed.\nFailing tests:\n%s"
               passed-count total-count (str/join "\n" failure-lines)))))
 
 ;; =============================================================================
@@ -432,7 +448,7 @@ Only provide your final response once your definition passes all public tests.")
 (defn format-results-row
   "Formats an individual task evaluation result map for results.edn, persisting
    rich diagnostics (candidate-code, error, test-summary, failure details, stop-reason, transcript on failure)."
-  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha prompt-sha dry-run? transcript repetition-penalty]}]
+  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha prompt-sha dry-run? transcript repetition-penalty tool-syntax]}]
   (let [all-passed? (boolean (:all-passed? grade-res))
         has-error? (seq (or error (:error grade-res)))
         err-msg (or error (:error grade-res))
@@ -472,6 +488,8 @@ Only provide your final response once your definition passes all public tests.")
              :test-summary {:passed (long (or (:passed-count grade-res) 0))
                             :total (long (or (:total-count grade-res) 0))}
              :failures (when (seq raw-failures) raw-failures)}
+      tool-syntax
+      (assoc :tool-syntax (keyword tool-syntax))
       prompt-sha
       (assoc :prompt-sha (str prompt-sha))
       (and (not all-passed?) (seq transcript))

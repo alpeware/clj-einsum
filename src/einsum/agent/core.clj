@@ -17,11 +17,23 @@
 Call eval_clojure to execute or test Clojure code. Once you have the result, provide your final response to the user in plain text without further tool calls.
 Syntax rules: use square brackets for bindings and parameters: [x], [k v], vectors: [1 2 3], and (range start end).")
 
+(def DEFAULT-SYSTEM-PROMPT-XML
+  "You are a Clojure assistant with access to an interactive Clojure REPL sandbox.
+To evaluate or test Clojure code, output your code wrapped in <clojure>...</clojure> tags:
+<clojure>
+(defn my-fn [x]
+  (* x 2))
+</clojure>
+Execution results will be returned in <clojure_result>...</clojure_result>.
+Once you have the result, provide your final response to the user in plain text without further code tags.
+Syntax rules: use square brackets for bindings and parameters: [x], [k v], vectors: [1 2 3], and (range start end).")
+
 (def DEFAULT-AGENT-OPTS
   {:prompt "Write a Clojure function returning the first 10 integers."
    :model ".models/gemma-4-E2B-it"
    :system DEFAULT-SYSTEM-PROMPT
    :tool-declaration DEFAULT-TOOL-DECLARATION
+   :tool-syntax :native
    :max-new-tokens 512
    :max-seq-len 1024
    :max-turns 5
@@ -190,16 +202,31 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 
 (defn extract-tool-call
   "Extracts the tool call from text if present.
+   Supports :native Gemma 4 syntax (<|tool_call>call:eval_clojure{code:...}<tool_call|>)
+   and :xml syntax (<clojure>...</clojure> or <clj>...</clj>).
    Returns a map {:name fn-name :code clojure-code-str :raw raw-tool-call-str} or nil if text is a plain text response or malformed."
-  [text]
-  (let [clean (strip-thinking-trace (or text ""))]
-    (when-let [[raw fn-name args] (re-find #"(?s)<\|tool_call>(?:call:)?(\w+)?\s*(.*?)(?:<tool_call\|>|$)" clean)]
-      (when-let [code (parse-tool-call-code args)]
-        {:name (if (seq fn-name) fn-name "eval_clojure")
-         :code (str/trim code)
-         :raw (if (str/ends-with? raw "<tool_call|>")
-                raw
-                (str raw "<tool_call|>"))}))))
+  ([text]
+   (extract-tool-call text :native))
+  ([text tool-syntax]
+   (let [clean (strip-thinking-trace (or text ""))
+         syntax (keyword (or tool-syntax :native))]
+     (if (= syntax :xml)
+       (when-let [[raw code] (re-find #"(?s)<(?:clojure|clj)>\s*(.*?)\s*(?:</(?:clojure|clj)>|$)" clean)]
+         (let [trimmed-code (str/trim (or code ""))]
+           (when (seq trimmed-code)
+             {:name "eval_clojure"
+              :code trimmed-code
+              :raw (if (or (str/ends-with? (str/trim raw) "</clojure>")
+                           (str/ends-with? (str/trim raw) "</clj>"))
+                     (str/trim raw)
+                     (str "<clojure>\n" trimmed-code "\n</clojure>"))})))
+       (when-let [[raw fn-name args] (re-find #"(?s)<\|tool_call>(?:call:)?(\w+)?\s*(.*?)(?:<tool_call\|>|$)" clean)]
+         (when-let [code (parse-tool-call-code args)]
+           {:name (if (seq fn-name) fn-name "eval_clojure")
+            :code (str/trim code)
+            :raw (if (str/ends-with? raw "<tool_call|>")
+                   raw
+                   (str raw "<tool_call|>"))}))))))
 
 (defn sanitize-history-model-content
   "Sanitizes model output before recording into conversation history.
@@ -238,38 +265,63 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
     (format "<|\"|>%s<|\"|>" (str/trim (str v)))))
 
 (defn format-tool-response
-  "Formats the tool execution result as a native Gemma 4 tool response observation.
-   Supports structured multi-key responses (e.g. {:output ... :status ... :tests_passed ... :nudge ...})
-   serialized with native Gemma 4 key:val and <|\"|> string escape delimiters."
+  "Formats the tool execution result as a tool response observation.
+   Supports :native Gemma 4 syntax (<|tool_response>response:...<tool_response|>)
+   and :xml syntax (<clojure_result>...</clojure_result>)."
   ([res]
-   (format-tool-response "eval_clojure" res))
+   (format-tool-response "eval_clojure" res :native))
   ([tool-name res]
-   (let [t-name (if (seq tool-name) tool-name "eval_clojure")]
-     (cond
-       (string? res)
-       (format "<|tool_response>response:%s{output:<|\"|>%s<|\"|>}<tool_response|>"
-               t-name (str/trim res))
+   (if (keyword? res)
+     (format-tool-response "eval_clojure" tool-name res)
+     (format-tool-response tool-name res :native)))
+  ([tool-name res tool-syntax]
+   (let [syntax (keyword (or tool-syntax :native))]
+     (if (= syntax :xml)
+       (let [content (cond
+                       (string? res) (str/trim res)
+                       (map? res) (let [out (str/trim (or (:output res) ""))
+                                        already-has-summary? (or (str/includes? out "Public tests:")
+                                                                 (str/includes? out "Failing tests:"))
+                                        failures (when (and (not already-has-summary?) (:failures res))
+                                                   (str "Failures: " (str/trim (str (:failures res)))))
+                                        nudge (when (and (not already-has-summary?) (:nudge res))
+                                                (str/trim (str (:nudge res))))
+                                        directive (when (or (= (:status res) :failed)
+                                                            (= (:status res) :error)
+                                                            (seq failures))
+                                                    "Please inspect the test results and provide your revised implementation in <clojure>...</clojure>.")
+                                        pieces (filter seq [out failures nudge directive])]
+                                    (if (seq pieces)
+                                      (str/join "\n\n" pieces)
+                                      (pr-str (dissoc res :early-exit?))))
+                       :else (str/trim (str res)))]
+         (format "<clojure_result>\n%s\n</clojure_result>" content))
+       (let [t-name (if (seq tool-name) tool-name "eval_clojure")]
+         (cond
+           (string? res)
+           (format "<|tool_response>response:%s{output:<|\"|>%s<|\"|>}<tool_response|>"
+                   t-name (str/trim res))
 
-       (map? res)
-       (let [priority-keys [:status :failures :nudge :tests_passed :tests_total :output :system_note]
-             all-keys (distinct (concat (filter #(contains? res %) priority-keys)
-                                        (sort (keys (apply dissoc res (conj priority-keys :early-exit?))))))
-             entries (keep (fn [k]
-                             (when-let [v (get res k)]
-                               (when (not (and (string? v) (str/blank? v)))
-                                 (str (name k) ":" (format-tool-response-value v)))))
-                           all-keys)
-             body (if (seq entries)
-                    (str/join "," entries)
-                    (str "output:" (format-tool-response-value (or (:output res) ""))))]
-         (format "<|tool_response>response:%s{%s}<tool_response|>" t-name body))
+           (map? res)
+           (let [priority-keys [:status :failures :nudge :tests_passed :tests_total :output :system_note]
+                 all-keys (distinct (concat (filter #(contains? res %) priority-keys)
+                                            (sort (keys (apply dissoc res (conj priority-keys :early-exit?))))))
+                 entries (keep (fn [k]
+                                 (when-let [v (get res k)]
+                                   (when (not (and (string? v) (str/blank? v)))
+                                     (str (name k) ":" (format-tool-response-value v)))))
+                               all-keys)
+                 body (if (seq entries)
+                        (str/join "," entries)
+                        (str "output:" (format-tool-response-value (or (:output res) ""))))]
+             (format "<|tool_response>response:%s{%s}<tool_response|>" t-name body))
 
-       :else
-       (format "<|tool_response>response:%s{output:<|\"|>%s<|\"|>}<tool_response|>"
-               t-name (str/trim (str res)))))))
+           :else
+           (format "<|tool_response>response:%s{output:<|\"|>%s<|\"|>}<tool_response|>"
+                   t-name (str/trim (str res)))))))))
 
 (defn extract-clojure-code-blocks
-  "Extracts all ```clojure ... ``` or ```clj ... ``` code block strings, Gemma 4 <|tool_call> tags, or raw S-expressions from text.
+  "Extracts all ```clojure ... ``` or ```clj ... ``` code block strings, XML <clojure> tags, Gemma 4 <|tool_call> tags, or raw S-expressions from text.
    Maintained for backward compatibility."
   [text]
   (let [extract-raw (fn [s allow-loose?]
@@ -281,6 +333,8 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                                        (str/replace #"```$" "")
                                                        str/trim))
                                                  raw-matches)
+                            xml-pattern #"(?s)<(?:clojure|clj)>\s*\n?(.*?)\s*(?:</(?:clojure|clj)>|$)"
+                            xml-matches (mapv str/trim (filter #(seq (str/trim %)) (mapv second (re-seq xml-pattern s))))
                             tool-call-pattern #"(?s)<\|tool_call>call:(\w+)(.*?)(?:<tool_call\|>|$)"
                             tool-call-matches (mapv (fn [[_ fn-name args]]
                                                       (let [clean-args (str/trim (str/replace args #"^\{|\}$" ""))]
@@ -290,6 +344,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                                     (re-seq tool-call-pattern s))]
                         (cond
                           (seq cleaned-blocks) (vec cleaned-blocks)
+                          (seq xml-matches) (vec xml-matches)
                           (seq tool-call-matches) (vec tool-call-matches)
                           allow-loose?
                           (let [raw-fn-pattern #"(?s)\((?:defn|def|range|take|filter|map|reduce|\+|\-|\*|\/|list-files|slurp|system-info|println)\b[^\)]*\)"
@@ -328,6 +383,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
   "Evaluates whether text satisfies semantic early stopping conditions:
    1. Text is NOT actively inside an unclosed thought channel.
    2. Outside thought, text contains:
+      - A complete XML tool call tag: `<clojure>...</clojure>` (when tool-syntax is :xml).
       - A complete Gemma 4 tool call tag: `<|tool_call>...<tool_call|>`.
       - A complete closed markdown code block (```` ```...``` ````) containing target definition or valid form.
       - A balanced top-level definition form (defn, defmacro) outside markdown.
@@ -339,8 +395,14 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
      (if (inside-unclosed-thought? text)
        false
        (let [body (strip-thinking-trace text)
-             target-fn (:target-fn opts)]
+             target-fn (:target-fn opts)
+             tool-syntax (keyword (or (:tool-syntax opts) :native))]
          (cond
+           ;; Case 0: Complete XML tool call tag outside thought
+           (and (= tool-syntax :xml)
+                (boolean (re-find #"(?s)<(?:clojure|clj)>.*?</(?:clojure|clj)>" body)))
+           true
+
            ;; Case 1: Complete tool call tag
            (boolean (re-find #"(?s)<\|tool_call>(?:call:)?\w*?\s*\{.*?\}<tool_call\|>" body))
            true
@@ -370,26 +432,31 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
 (defn format-agent-chat-prompt
   "Formats conversation history into Gemma 4 Turn syntax, placing tool declarations and system instructions in native Gemma 4 turns.
    Applies sliding window context retention for long histories to preserve the initial task and alternating turns.
-   When `thinking?` is enabled, injects the native Gemma 4 `<|think|>` token into the system turn."
+   When `thinking?` is enabled, injects the native Gemma 4 `<|think|>` token into the system turn.
+   Supports :native Gemma 4 tool calling turns as well as :xml alternating user/model turns."
   ([system-prompt history]
-   (format-agent-chat-prompt system-prompt history 8 false nil))
+   (format-agent-chat-prompt system-prompt history 8 false nil :native))
   ([system-prompt history opts-or-max-turns]
    (cond
      (map? opts-or-max-turns)
      (format-agent-chat-prompt system-prompt history
                                (long (get opts-or-max-turns :max-recent-turns 8))
                                (boolean (or (:thinking opts-or-max-turns) (:thinking? opts-or-max-turns)))
-                               (get opts-or-max-turns :tool-declaration))
+                               (get opts-or-max-turns :tool-declaration)
+                               (keyword (or (:tool-syntax opts-or-max-turns) :native)))
 
      (boolean? opts-or-max-turns)
-     (format-agent-chat-prompt system-prompt history 8 opts-or-max-turns nil)
+     (format-agent-chat-prompt system-prompt history 8 opts-or-max-turns nil :native)
 
      :else
-     (format-agent-chat-prompt system-prompt history (long opts-or-max-turns) false nil)))
+     (format-agent-chat-prompt system-prompt history (long opts-or-max-turns) false nil :native)))
   ([system-prompt history max-recent-turns thinking?]
-   (format-agent-chat-prompt system-prompt history max-recent-turns thinking? nil))
+   (format-agent-chat-prompt system-prompt history max-recent-turns thinking? nil :native))
   ([system-prompt history max-recent-turns thinking? tool-declaration]
-   (let [history-vec (vec history)
+   (format-agent-chat-prompt system-prompt history max-recent-turns thinking? tool-declaration :native))
+  ([system-prompt history max-recent-turns thinking? tool-declaration tool-syntax]
+   (let [syntax (keyword (or tool-syntax :native))
+         history-vec (vec history)
          max-turns (long (or max-recent-turns 8))
          trimmed (if (<= (count history-vec) (inc max-turns))
                    history-vec
@@ -401,7 +468,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                      (into [initial] clean-tail)))
          has-system? (boolean (seq system-prompt))
          clean-system (when has-system? (str/trim system-prompt))
-         tool-decl-str (when (seq tool-declaration)
+         tool-decl-str (when (and (seq tool-declaration) (not= syntax :xml))
                          (str (str/trim tool-declaration)))
          already-has-think? (and has-system? (str/includes? clean-system "<|think|>"))
          thinking-needed? (and thinking? (not already-has-think?))
@@ -453,28 +520,40 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                              (recur (inc idx) acc))
 
                            (= role :model)
-                           (do
-                             (when-not (= prev-role :tool)
-                               (.append acc "<|turn>model\n"))
-                             (.append acc clean-content)
-                             (if (= next-role :tool)
-                               ;; Native Gemma 4 in-flow tool interaction: do not close model turn
-                               (recur (inc idx) acc)
-                               (do
-                                 (.append acc "<turn|>\n")
-                                 (recur (inc idx) acc))))
+                           (if (= syntax :xml)
+                             (do
+                               (.append acc "<|turn>model\n")
+                               (.append acc clean-content)
+                               (.append acc "<turn|>\n")
+                               (recur (inc idx) acc))
+                             (do
+                               (when-not (= prev-role :tool)
+                                 (.append acc "<|turn>model\n"))
+                               (.append acc clean-content)
+                               (if (= next-role :tool)
+                                 ;; Native Gemma 4 in-flow tool interaction: do not close model turn
+                                 (recur (inc idx) acc)
+                                 (do
+                                   (.append acc "<turn|>\n")
+                                   (recur (inc idx) acc)))))
 
                            (= role :tool)
-                           (do
-                             ;; Native Gemma 4 tool response directly attaches to model tool call without trailing newline
-                             (.append acc clean-content)
-                             (recur (inc idx) acc))
+                           (if (= syntax :xml)
+                             (do
+                               (.append acc "<|turn>user\n")
+                               (.append acc clean-content)
+                               (.append acc "<turn|>\n")
+                               (recur (inc idx) acc))
+                             (do
+                               ;; Native Gemma 4 tool response directly attaches to model tool call without trailing newline
+                               (.append acc clean-content)
+                               (recur (inc idx) acc)))
 
                            :else
                            (do
                              (.append acc (str "<|turn>" (name role) "\n" clean-content "<turn|>\n"))
                              (recur (inc idx) acc))))))
-         model-prefix (if (= last-role :tool)
+         model-prefix (if (and (= last-role :tool) (not= syntax :xml))
                         ""
                         "<|turn>model\n")]
      (str "<bos>" system-turn turns-str model-prefix))))
@@ -625,11 +704,18 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
    (run-agent-loop session initial-prompt custom-sci-ctx nil))
   ([session initial-prompt custom-sci-ctx custom-tool-eval-fn]
    (let [{:keys [opts]} session
-         {:keys [system max-turns out quiet profile-out thinking tool-declaration max-consecutive-errors sandbox tool-eval-fn candidate-check-fn]} opts
+         {:keys [system max-turns out quiet profile-out thinking tool-declaration max-consecutive-errors sandbox tool-eval-fn candidate-check-fn tool-syntax]} opts
+         syntax (keyword (or tool-syntax :native))
          tool-eval (or custom-tool-eval-fn tool-eval-fn eval-tool-code)
          candidate-fn (or candidate-check-fn (constantly false))
          thinking? (boolean thinking)
-         tool-decl (or tool-declaration DEFAULT-TOOL-DECLARATION)
+         tool-decl (if (= syntax :xml)
+                     nil
+                     (or tool-declaration DEFAULT-TOOL-DECLARATION))
+         sys-prompt (or system
+                        (if (= syntax :xml)
+                          DEFAULT-SYSTEM-PROMPT-XML
+                          DEFAULT-SYSTEM-PROMPT))
          sci-ctx (or custom-sci-ctx
                      (case sandbox
                        :benchmark (create-benchmark-sci-ctx)
@@ -671,7 +757,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
            (when-not quiet (println "\n=================================================="))
            (when-not quiet (println (format "=== Agent Turn %d/%d ===" turn max-turns)))
            (when-not quiet (println "=================================================="))
-           (let [formatted-prompt (format-agent-chat-prompt system @history 8 thinking? tool-decl)
+           (let [formatted-prompt (format-agent-chat-prompt sys-prompt @history 8 thinking? tool-decl syntax)
                  _ (when-not quiet (println "Executing Gemma 4 Agent Forward Pass..."))
                  t-gen-0 (System/nanoTime)
                  gen-res (gen-fn session formatted-prompt)
@@ -684,7 +770,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                  model-reply (str/trim (str/replace (or new-gen "") #"<bos>|<eos>|<turn\|>|<\|turn>" ""))
                  thinking-trace (extract-thinking-trace model-reply)
                  final-response (strip-thinking-trace model-reply)
-                 tool-call (extract-tool-call model-reply)]
+                 tool-call (extract-tool-call model-reply syntax)]
 
              (when (and thinking? (seq thinking-trace) (not quiet))
                (println "\n--------------------------------------------------")
@@ -716,7 +802,9 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                      :model-reply model-reply
                                      :has-candidate? has-candidate?})
                    (let [nudge-msg (or (:nudge-prompt opts)
-                                       "Please test your Clojure implementation by calling the eval_clojure tool.")]
+                                       (if (= syntax :xml)
+                                         "Please test your Clojure implementation by outputting code in <clojure>...</clojure>."
+                                         "Please test your Clojure implementation by calling the eval_clojure tool."))]
                      (when-not quiet (println (format "\n[Agent Loop Nudge (Turn %d)]: Emitting tool reminder." turn)))
                      (swap! history conj {:role :user :content nudge-msg})
                      (swap! transcript conj {:turn turn :role :user :content nudge-msg})
@@ -791,7 +879,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
                                               (format "Consecutive tool error limit (%d) reached. Tool execution is now disabled. Provide your final answer in plain text based on the observations collected so far without calling further tools."
                                                       consecutive-error-limit))
                                        eval-res)
-                       obs-str (format-tool-response tool-name augmented-res)]
+                       obs-str (format-tool-response tool-name augmented-res syntax)]
 
                    (swap! turn-telemetry conj {:turn turn
                                                :prompt-tokens prompt-tokens

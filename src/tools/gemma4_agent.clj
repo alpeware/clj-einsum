@@ -13,6 +13,8 @@
 (def DEFAULT-TOOL-DECLARATION core/DEFAULT-TOOL-DECLARATION)
 (def DEFAULT_SYSTEM_PROMPT core/DEFAULT-SYSTEM-PROMPT)
 (def DEFAULT-SYSTEM-PROMPT core/DEFAULT-SYSTEM-PROMPT)
+(def DEFAULT_SYSTEM_PROMPT_XML core/DEFAULT-SYSTEM-PROMPT-XML)
+(def DEFAULT-SYSTEM-PROMPT-XML core/DEFAULT-SYSTEM-PROMPT-XML)
 (def DEFAULT_AGENT_OPTS core/DEFAULT-AGENT-OPTS)
 (def DEFAULT-AGENT-OPTS core/DEFAULT-AGENT-OPTS)
 
@@ -47,7 +49,9 @@
       (string? (:max-consecutive-errors opts))
       (update :max-consecutive-errors #(Long/parseLong %))
       (string? (:sandbox opts))
-      (update :sandbox #(keyword (str/replace % #"^:+" ""))))))
+      (update :sandbox #(keyword (str/replace % #"^:+" "")))
+      (string? (:tool-syntax opts))
+      (update :tool-syntax #(keyword (str/replace % #"^:+" ""))))))
 
 (defn -main
   "CLI Entrypoint for Gemma 4 Agent."

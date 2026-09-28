@@ -555,3 +555,26 @@
       (is (contains? row :harness-dirty?))
       (is (= (:harness-sha info) (:harness-sha row)))
       (is (= (:harness-dirty? info) (:harness-dirty? row))))))
+
+;; =============================================================================
+;; 13. Tool Syntax (:tool-syntax :native vs :xml)
+;; =============================================================================
+
+(deftest test-extract-candidate-code-xml
+  (testing "Extracting candidate code from <clojure>...</clojure> tags"
+    (let [text "Here is the implementation:\n<clojure>\n(defn my-range [n] (vec (range n)))\n</clojure>\nEnd."
+          code (bench-core/extract-candidate-code text "my-range")]
+      (is (= "(defn my-range [n] (vec (range n)))" code))))
+
+  (testing "Extracting candidate code from <clj>...</clj> tags"
+    (let [text "Running:\n<clj>\n(defn first-n [coll] (vec (take 10 coll)))\n</clj>"
+          code (bench-core/extract-candidate-code text "first-n")]
+      (is (= "(defn first-n [coll] (vec (take 10 coll)))" code)))))
+
+(deftest test-cli-tool-syntax-parsing
+  (testing "Parsing --tool-syntax xml"
+    (let [opts (bench-run/parse-bench-cli-args ["--tool-syntax" "xml"])]
+      (is (= :xml (:tool-syntax opts)))))
+  (testing "Parsing --tool-syntax native"
+    (let [opts (bench-run/parse-bench-cli-args ["--tool-syntax" "native"])]
+      (is (= :native (:tool-syntax opts))))))

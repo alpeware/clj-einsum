@@ -91,7 +91,33 @@
 
   (testing "Returns nil when response has markdown code block but no tool call tag"
     (let [text "Here is the solution:\n```clojure\n(defn square [x] (* x x))\n```\nEnjoy!"]
-      (is (nil? (agent/extract-tool-call text))))))
+      (is (nil? (agent/extract-tool-call text)))))
+
+  (testing "Extracting XML tool call (<clojure> ... </clojure>) when tool-syntax is :xml"
+    (let [text "I will test this code:\n<clojure>\n(defn square [x] (* x x))\n</clojure>\nDone."
+          tc (agent/extract-tool-call text :xml)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(defn square [x] (* x x))" (:code tc)))
+      (is (str/includes? (:raw tc) "<clojure>"))
+      (is (str/includes? (:raw tc) "</clojure>"))))
+
+  (testing "Extracting XML tool call with <clj> tags"
+    (let [text "<clj>(+ 10 20)</clj>"
+          tc (agent/extract-tool-call text :xml)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(+ 10 20)" (:code tc)))))
+
+  (testing "Extracting XML tool call with thoughts present"
+    (let [text "<|channel>thought\nWe should test 5*5.\n<channel|>\n<clojure>(* 5 5)</clojure>"
+          tc (agent/extract-tool-call text :xml)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(* 5 5)" (:code tc)))))
+
+  (testing "Extracting XML tool call unclosed up to EOF"
+    (let [text "<clojure>(defn f [x] (+ x 1))"
+          tc (agent/extract-tool-call text :xml)]
+      (is (= "eval_clojure" (:name tc)))
+      (is (= "(defn f [x] (+ x 1))" (:code tc))))))
 
 (deftest test-format-tool-response
   (testing "Formatting success execution result with native tool response tokens"
@@ -127,6 +153,14 @@
       (is (str/includes? resp "failures:<|\"|>Code: (my-fn 5) -> Expected 10, got 5<|\"|>"))
       (is (str/includes? resp "nudge:<|\"|>Please double the result before returning.<|\"|>"))
       (is (str/includes? resp "system_note:<|\"|>Be careful with boundary conditions.<|\"|>"))))
+
+  (testing "Formatting XML tool response wrapped in <clojure_result> tags"
+    (let [res {:output "[Public tests: 2/2 passed.]"
+               :status :success}
+          resp (agent/format-tool-response "eval_clojure" res :xml)]
+      (is (str/starts-with? resp "<clojure_result>"))
+      (is (str/includes? resp "[Public tests: 2/2 passed.]"))
+      (is (str/ends-with? resp "</clojure_result>"))))
 
   (testing "Stop token IDs conform to Gemma 4 spec (omits 49, includes 50)"
     (let [k-stop @(requiring-resolve 'einsum.models.gemma4.kernels/GEMMA4-STOP-TOKEN-IDS)]
@@ -273,7 +307,16 @@
           history [{:role :user :content "Hi"}]
           prompt (agent/format-agent-chat-prompt "You are a bot." history 8 false decl)]
       (is (str/starts-with? prompt "<bos><|turn>system\nYou are a bot.\n<|tool>declaration:eval_clojure{...}<tool|><turn|>\n"))
-      (is (not (str/starts-with? prompt "<bos><|tool>"))))))
+      (is (not (str/starts-with? prompt "<bos><|tool>")))))
+
+  (testing "Formatting prompt with XML tool syntax formats tool response as user turn and closes model turn"
+    (let [history [{:role :user :content "Calculate 2+2"}
+                   {:role :model :content "<clojure>\n(+ 2 2)\n</clojure>"}
+                   {:role :tool :content "<clojure_result>\n4\n</clojure_result>"}]
+          prompt (agent/format-agent-chat-prompt "You are a Clojure assistant." history 8 false nil :xml)]
+      (is (str/includes? prompt "<|turn>model\n<clojure>\n(+ 2 2)\n</clojure><turn|>\n"))
+      (is (str/includes? prompt "<|turn>user\n<clojure_result>\n4\n</clojure_result><turn|>\n"))
+      (is (str/ends-with? prompt "<|turn>model\n")))))
 
 (defspec prop-format-agent-chat-prompt-invariants
   50
@@ -540,6 +583,24 @@
                 (let [text (format "<|channel>thought\n%s<channel|>\n<|tool_call>call:eval_clojure{code:\"(+ 1 2)\"}<tool_call|>\n%s"
                                    thought trailing)]
                   (true? (agent/semantic-stop? text {:target-fn "target"})))))
+
+(defspec prop-semantic-stop-xml-tool-call-invariant
+  50
+  (prop/for-all [thought (gen/not-empty gen/string-alphanumeric)
+                 trailing gen/string-alphanumeric]
+                (let [text (format "<|channel>thought\n%s<channel|>\n<clojure>\n(defn target [x] x)\n</clojure>\n%s"
+                                   thought trailing)]
+                  (true? (agent/semantic-stop? text {:target-fn "target" :tool-syntax :xml})))))
+
+(defspec prop-extract-tool-call-xml-roundtrip
+  50
+  (prop/for-all [code (gen/not-empty gen/string-alphanumeric)
+                 pre (gen/not-empty gen/string-alphanumeric)
+                 post gen/string-alphanumeric]
+                (let [text (format "%s\n<clojure>\n%s\n</clojure>\n%s" pre code post)
+                      tc (agent/extract-tool-call text :xml)]
+                  (and (= "eval_clojure" (:name tc))
+                       (= code (:code tc))))))
 
 (defspec prop-semantic-stop-balanced-form-invariant
   50

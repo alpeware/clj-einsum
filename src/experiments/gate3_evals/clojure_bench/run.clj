@@ -19,6 +19,7 @@
   {:model ".models/gemma-4-E2B-it-int4"
    :backend :rocm
    :mode :all ;; :single-shot, :agentic, or :all
+   :tool-syntax :native
    :tasks "all"
    :system bench-core/AGENT-SYSTEM-PROMPT
    :max-turns 5
@@ -213,13 +214,14 @@
    The best-public submission is graded against sealed hidden tests exactly once."
   [session task hidden-tests sealed-sha opts]
   (let [{:keys [dry-run quiet max-turns]} opts
+        tool-syntax (keyword (or (:tool-syntax opts) :native))
         task-id (:id task)
         fn-name (:fn-name task)
         prompt (bench-core/render-benchmark-prompt task)
         model-name (.getName (io/file (or (:model-dir session) (:model opts))))
         checkpoint-sha (:checkpoint-sha session)
         submissions (atom [])
-        _ (when-not quiet (println (format "\n[Agentic Loop] Task: %s (%s, max %d turns)..." task-id fn-name (long (or max-turns 5)))))
+        _ (when-not quiet (println (format "\n[Agentic Loop] Task: %s (%s, max %d turns, syntax %s)..." task-id fn-name (long (or max-turns 5)) (name tool-syntax))))
         t0 (System/nanoTime)]
 
     (if dry-run
@@ -234,6 +236,7 @@
          {:model model-name
           :task task-id
           :mode :agentic
+          :tool-syntax tool-syntax
           :candidate-code (:code best-sub)
           :grade-res hidden-res
           :n-submissions (count @submissions)
@@ -299,9 +302,22 @@
 
             stop-pred (when (:semantic-stop opts)
                         (fn [text]
-                          (agent/semantic-stop? text {:target-fn fn-name})))
+                          (agent/semantic-stop? text {:target-fn fn-name :tool-syntax tool-syntax})))
+
+            task-system (or (when-not (= (:system opts) bench-core/AGENT-SYSTEM-PROMPT)
+                              (:system opts))
+                            (if (= tool-syntax :xml)
+                              bench-core/AGENT-SYSTEM-PROMPT-XML
+                              bench-core/AGENT-SYSTEM-PROMPT))
+
+            task-tool-decl (if (= tool-syntax :xml)
+                             nil
+                             (get opts :tool-declaration agent/DEFAULT-TOOL-DECLARATION))
 
             task-session (assoc (update session :opts assoc
+                                        :system task-system
+                                        :tool-declaration task-tool-decl
+                                        :tool-syntax tool-syntax
                                         :sandbox :benchmark
                                         :tool-eval-fn submission-tool-hook
                                         :candidate-check-fn candidate-check-fn
@@ -350,6 +366,7 @@
              {:model model-name
               :task task-id
               :mode :agentic
+              :tool-syntax tool-syntax
               :candidate-code candidate-code
               :grade-res hidden-res
               :error error-msg
@@ -569,6 +586,7 @@
                (string? (:early-exit raw-opts)) (update :early-exit #(Boolean/parseBoolean %))
                (string? (:nudge-short-circuit raw-opts)) (update :nudge-short-circuit #(Boolean/parseBoolean %))
                (string? (:backend raw-opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
+               (string? (:tool-syntax raw-opts)) (update :tool-syntax #(keyword (str/replace % #"^:+" "")))
                (string? (:mode raw-opts)) (update :mode #(keyword (str/replace % #"^:+" ""))))
         opts (assoc opts :user-flags user-flags)]
     opts))
