@@ -7,7 +7,8 @@
             [clojure.string :as str]
             [clojure.walk :as walk]
             [einsum.runtime.tokenizer.protocol :as tok-proto]
-            [sci.core :as sci]))
+            [sci.core :as sci])
+  (:import [java.security MessageDigest]))
 
 ;; =============================================================================
 ;; 1. Candidate System Prompts (P0, P1, P2)
@@ -41,13 +42,13 @@ Turn 2 thought: Predicate used odd? instead of even?. Correcting.
 ```clojure_result
 PASS: (sum-even-squares [1 2 3 4]) -> 20
 ```
-Turn 3: All tests pass. (sum-even-squares [nums]) correctly filters even numbers, squares each, and sums them.")
+Turn 3: All tests pass. (sum-even-squares [nums]) filters evens first.")
 
 (def WORKED-EXAMPLE-2
   "
 
 Worked Example 2:
-Goal: (word-lengths [s]) returning lengths of words in s, or [] if nil/empty.
+Goal: (word-lengths [s]) returning word lengths in s, or [] if blank.
 Turn 1 thought: Split string s by whitespace and count words.
 ```clojure
 (defn word-lengths [s]
@@ -56,7 +57,7 @@ Turn 1 thought: Split string s by whitespace and count words.
 ```clojure_result
 FAIL: (word-lengths \"\") -> Expected [], got [0]
 ```
-Turn 2 thought: Splitting \"\" gives [\"\"], which has count 1. Guard against blank/nil input.
+Turn 2 thought: Splitting \"\" gives [\"\"]. Guard against blank input.
 ```clojure
 (defn word-lengths [s]
   (if (clojure.string/blank? s) [] (mapv count (re-seq #\"\\S+\" s))))
@@ -65,7 +66,7 @@ Turn 2 thought: Splitting \"\" gives [\"\"], which has count 1. Guard against bl
 PASS: (word-lengths \"hello world\") -> [5 5]
 PASS: (word-lengths \"\") -> []
 ```
-Turn 3: All tests pass. (word-lengths [s]) guards against empty input and returns word lengths.")
+Turn 3: All tests pass. (word-lengths [s]) guards against blank input.")
 
 (def PROMPT-V0-ZERO-SHOT
   PROMPT-RULES-BASE)
@@ -85,6 +86,17 @@ Turn 3: All tests pass. (word-lengths [s]) guards against empty input and return
   "Retrieves the system prompt string for a prompt variant key (:p0, :p1, :p2)."
   [variant-key]
   (get-in PROMPT-VARIANTS [variant-key :system]))
+
+(defn compute-prompt-sha
+  "Computes a deterministic lowercase hexadecimal SHA-256 hash for a prompt variant key
+   (:p0, :p1, :p2) or arbitrary prompt string."
+  [variant-or-text]
+  (let [text (if (keyword? variant-or-text)
+               (or (get-system-prompt variant-or-text) (str variant-or-text))
+               (str variant-or-text))
+        digest (MessageDigest/getInstance "SHA-256")
+        bytes (.digest digest (.getBytes (str text) "UTF-8"))]
+    (apply str (map (fn [^Byte b] (format "%02x" (bit-and (int b) 0xff))) bytes))))
 
 ;; =============================================================================
 ;; 2. Token Budget & Disjointness Auditing (Gate 1)
@@ -149,7 +161,7 @@ Turn 3: All tests pass. (word-lengths [s]) guards against empty input and return
 (defn detect-canary-echo
   "Inspects candidate submission code for worked example canary leaks.
    Exempts tasks whose target function name matches the canary symbol itself.
-   Returns {:leak? boolean :reasons [string]}."
+   Returns {:leak? boolean :echo-detected? boolean :reasons [string] :matches [string]}."
   [candidate-code target-fn-name]
   (let [target-name-str (str target-fn-name)
         ast-symbols (extract-ast-symbol-names candidate-code)
@@ -158,9 +170,12 @@ Turn 3: All tests pass. (word-lengths [s]) guards against empty input and return
         leaked-literals (filterv #(str/includes? (or candidate-code "") %) ECHO-CANARY-LITERALS)
         reasons (cond-> []
                   (seq leaked-symbols) (conj (str "Leaked canary symbols: " (str/join ", " leaked-symbols)))
-                  (seq leaked-literals) (conj (str "Leaked canary literals: " (str/join ", " leaked-literals))))]
-    {:leak? (boolean (seq reasons))
-     :reasons reasons}))
+                  (seq leaked-literals) (conj (str "Leaked canary literals: " (str/join ", " leaked-literals))))
+        has-leak? (boolean (seq reasons))]
+    {:leak? has-leak?
+     :echo-detected? has-leak?
+     :reasons reasons
+     :matches reasons}))
 
 ;; =============================================================================
 ;; 4. Paired McNemar Test & Decision Logic
@@ -182,6 +197,21 @@ Turn 3: All tests pass. (word-lengths [s]) guards against empty input and return
                                             (double (factorial (- n i))))))
                                     (range 0 (inc k))))]
       (/ total-prob (Math/pow 2.0 (double n))))))
+
+(def ^:private NORMAL-CDF-COEFFS
+  [1.330274429 -1.821255978 1.781477937 -0.356563782 0.319381530])
+
+(defn standard-normal-tail-p
+  "Computes one-tailed standard normal tail probability P(Z >= z) for Z ~ Normal(0, 1)
+   via Abramowitz & Stegun formula 26.2.17 (absolute error < 7.5e-8)."
+  [^double z]
+  (if (< z 0.0)
+    (- 1.0 (standard-normal-tail-p (- z)))
+    (let [p 0.2316419
+          t (/ 1.0 (+ 1.0 (* p z)))
+          poly (* t (reduce (fn [acc c] (+ (double c) (* t acc))) 0.0 NORMAL-CDF-COEFFS))
+          inv-sqrt-2pi 0.3989422804014327]
+      (* inv-sqrt-2pi (Math/exp (* -0.5 z z)) poly))))
 
 (defn mcnemar-test
   "Computes paired McNemar test on discordant pairs (b, c) across N tasks.
@@ -205,15 +235,17 @@ Turn 3: All tests pass. (word-lengths [s]) guards against empty input and return
            :significant? significant?
            :exact? true})
         ;; Edwards continuity-corrected chi-squared test (1 df)
-        (let [num (Math/pow (max 0.0 (- (Math/abs (double (- b c))) 1.0)) 2.0)
+        (let [diff (Math/abs (double (- b c)))
+              num (Math/pow (max 0.0 (- diff 1.0)) 2.0)
               chi2 (/ num (double total-discordant))
-              ;; Chi-square 1 df critical value for one-tailed alpha=0.05 is 2.706
-              significant? (and (> b c) (>= chi2 2.706))]
+              z (if (> b c) (Math/sqrt chi2) (- (Math/sqrt chi2)))
+              p-val (standard-normal-tail-p z)
+              significant? (and (> b c) (< p-val 0.05))]
           {:b b
            :c c
            :delta delta
            :chi2 chi2
-           :p-value (if (>= chi2 2.706) 0.049 0.50)
+           :p-value p-val
            :significant? significant?
            :exact? false})))))
 

@@ -3,6 +3,7 @@
    Validates token budget invariants (P0, P1, P2 <= 600), strict catalog disjointness,
    mechanical canary echoing detection, McNemar paired tests, and complete decision precedence."
   (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
@@ -19,20 +20,45 @@
 
 (deftest test-prompt-token-budgets
   (testing "Candidate prompt variants conform to strict token budget invariants (<= 600 cap)"
-    (let [model-path ".models/gemma-4-e4b-it-qat-int4"
-          tok (tok-core/from-file model-path)
-          p0 pt-core/PROMPT-V0-ZERO-SHOT
-          p1 pt-core/PROMPT-V1-SINGLE
-          p2 pt-core/PROMPT-V2-DUAL
-          t0 (pt-core/measure-prompt-tokens tok p0)
-          t1 (pt-core/measure-prompt-tokens tok p1)
-          t2 (pt-core/measure-prompt-tokens tok p2)]
-      (is (pos? t0) "P0 token count must be positive")
-      (is (< t0 200) (format "P0 (rules only) must be < 200 tokens (got %d)" t0))
-      (is (< t1 400) (format "P1 (single worked example) must be < 400 tokens (got %d)" t1))
-      (is (<= t2 600) (format "P2 (dual worked examples) must not exceed 600 token cap (got %d)" t2))
-      (is (> t2 t1) "P2 token count must exceed P1")
-      (is (> t1 t0) "P1 token count must exceed P0"))))
+    (let [model-path ".models/gemma-4-e4b-it-qat-int4"]
+      (if (and (.exists (io/file model-path))
+               (.exists (io/file model-path "tokenizer.json")))
+        (let [tok (tok-core/from-file model-path)
+              p0 pt-core/PROMPT-V0-ZERO-SHOT
+              p1 pt-core/PROMPT-V1-SINGLE
+              p2 pt-core/PROMPT-V2-DUAL
+              t0 (pt-core/measure-prompt-tokens tok p0)
+              t1 (pt-core/measure-prompt-tokens tok p1)
+              t2 (pt-core/measure-prompt-tokens tok p2)]
+          (is (pos? t0) "P0 token count must be positive")
+          (is (< t0 200) (format "P0 (rules only) must be < 200 tokens (got %d)" t0))
+          (is (< t1 400) (format "P1 (single worked example) must be < 400 tokens (got %d)" t1))
+          (is (<= t2 600) (format "P2 (dual worked examples) must not exceed 600 token cap (got %d)" t2))
+          (is (> t2 t1) "P2 token count must exceed P1")
+          (is (> t1 t0) "P1 token count must exceed P0"))
+        ;; Fallback when running in minimal CI clone without model weights: approximate char bounds
+        (do
+          (is (< (count pt-core/PROMPT-V0-ZERO-SHOT) 1000))
+          (is (< (count pt-core/PROMPT-V1-SINGLE) 2500))
+          (is (<= (count pt-core/PROMPT-V2-DUAL) 4000)))))))
+
+(deftest test-deterministic-prompt-sha
+  (testing "compute-prompt-sha renders deterministic 64-character lowercase hexadecimal SHA-256 hashes"
+    (let [sha0 (pt-core/compute-prompt-sha :p0)
+          sha1 (pt-core/compute-prompt-sha :p1)
+          sha2 (pt-core/compute-prompt-sha :p2)]
+      (is (re-matches #"^[0-9a-f]{64}$" sha0) "P0 SHA must be 64-char lowercase hex")
+      (is (re-matches #"^[0-9a-f]{64}$" sha1) "P1 SHA must be 64-char lowercase hex")
+      (is (re-matches #"^[0-9a-f]{64}$" sha2) "P2 SHA must be 64-char lowercase hex")
+      (is (distinct? sha0 sha1 sha2) "All prompt variant SHAs must be distinct")
+      ;; Determinism across calls
+      (is (= sha0 (pt-core/compute-prompt-sha :p0)) "P0 SHA must be strictly deterministic")
+      (is (= sha1 (pt-core/compute-prompt-sha :p1)) "P1 SHA must be strictly deterministic")
+      (is (= sha2 (pt-core/compute-prompt-sha :p2)) "P2 SHA must be strictly deterministic")
+      ;; Equivalence between keyword and system prompt text
+      (is (= sha0 (pt-core/compute-prompt-sha pt-core/PROMPT-V0-ZERO-SHOT)))
+      (is (= sha1 (pt-core/compute-prompt-sha pt-core/PROMPT-V1-SINGLE)))
+      (is (= sha2 (pt-core/compute-prompt-sha pt-core/PROMPT-V2-DUAL))))))
 
 ;; =============================================================================
 ;; 2. Strict Catalog Disjointness Invariant (Zero Contamination)
@@ -322,12 +348,46 @@
 
 (deftest test-phase2-pilot-dry-run-e2e
   (testing "End-to-end Phase 2 pilot dry-run executes cleanly and outputs valid summary"
-    (let [res (pt-run/run-pilot {:limit 5
+    (let [tmp-file (java.io.File/createTempFile "pilot-dry-run-test" ".edn")
+          tmp-path (.getAbsolutePath tmp-file)
+          _ (.deleteOnExit tmp-file)
+          res (pt-run/run-pilot {:limit 5
                                  :dry-run true
                                  :quiet true
-                                 :output-file "resources/proposals/gate3_evals/prompt_tuning_v1/pilot_results.edn"})]
+                                 :output-file tmp-path})]
       (is (= 5 (:pilot-size res)))
       (is (= ["humaneval" "mbpp"] (sort (keys (:stratification res)))))
       (is (= [:p0 :p1 :p2] (keys (:variant-stats res))))
       (is (some? (:decision res)))
-      (is (contains? #{:PROCEED-TO-PHASE-3 :REJECT :KILLED} (get-in res [:decision :verdict]))))))
+      (is (contains? #{:PROCEED-TO-PHASE-3 :REJECT :KILLED} (get-in res [:decision :verdict])))
+      (is (.exists tmp-file))
+      (is (pos? (.length tmp-file))))))
+
+(deftest test-pilot-canary-leak-integration
+  (testing "Canary echoing detection triggers and routes through pilot audit path"
+    (let [leaking-code "(defn solve [x] (sum-even-squares x))"
+          clean-code "(defn solve [x] (* x 2))"
+          target-fn "solve"
+          leaking-audit (pt-core/detect-canary-echo leaking-code target-fn)
+          clean-audit (pt-core/detect-canary-echo clean-code target-fn)]
+      ;; 1. Core detector contracts
+      (is (true? (:leak? leaking-audit)))
+      (is (true? (:echo-detected? leaking-audit)))
+      (is (seq (:reasons leaking-audit)))
+      (is (seq (:matches leaking-audit)))
+      (is (false? (:leak? clean-audit)))
+      (is (false? (:echo-detected? clean-audit)))
+
+      ;; 2. Integration with downselect-candidate: leak forces :KILLED
+      (let [stats-with-leak {:p0 {:passed-count 35}
+                             :p1 {:passed-count 40
+                                  :canary-leaks [{:task "mbpp-clj-001"
+                                                  :fn-name "solve"
+                                                  :variant :p1
+                                                  :details leaking-audit}]}
+                             :p2 {:passed-count 38}}
+            decision (pt-run/downselect-candidate stats-with-leak)]
+        (is (= :KILLED (:verdict decision)))
+        (is (nil? (:selected-candidate decision)))
+        (is (true? (:early-stop? decision)))
+        (is (str/includes? (:rationale decision) "Fatal canary echoing leak detected"))))))

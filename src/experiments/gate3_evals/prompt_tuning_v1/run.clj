@@ -156,31 +156,34 @@
     (try
       (doseq [v variants]
         (let [sys-prompt (pt-core/get-system-prompt v)
+              v-prompt-sha (pt-core/compute-prompt-sha v)
               v-opts (assoc session-opts
                             :prompt-variant v
+                            :prompt-sha v-prompt-sha
                             :system sys-prompt
                             :prompt-template :multipl-e-v0
                             :tool-syntax tool-syntax)
               v-rows (atom [])
               v-canary-leaks (atom [])
               _ (when-not quiet?
-                  (println (format "\n--- Evaluating Variant: %s (%s) ---" (name v) (get-in pt-core/PROMPT-VARIANTS [v :name]))))]
+                  (println (format "\n--- Evaluating Variant: %s (%s, sha: %s) ---"
+                                   (name v) (get-in pt-core/PROMPT-VARIANTS [v :name]) v-prompt-sha)))]
 
           (doseq [task pilot-tasks]
             (let [task-id (:id task)
                   fn-name (:fn-name task)
-                  hidden-tests (:public-tests task) ;; In MultiPL-E dev, public-tests serve as reference verification
+                  hidden-tests (or (seq (:hidden-tests task)) (:public-tests task) [])
                   row (bench-run/run-agentic-task session task hidden-tests sealed-sha v-opts)
                   candidate (:candidate-code row)]
               (swap! v-rows conj row)
               ;; Audit candidate submission for canary echoing
               (when (seq candidate)
                 (let [echo-check (pt-core/detect-canary-echo candidate fn-name)]
-                  (when (:echo-detected? echo-check)
+                  (when (:leak? echo-check)
                     (let [leak-info {:task task-id :fn-name fn-name :variant v :details echo-check}]
                       (swap! v-canary-leaks conj leak-info)
                       (println (format "  [!] CANARY ECHO DETECTED on %s (%s): %s"
-                                       task-id fn-name (pr-str (:matches echo-check))))))))))
+                                       task-id fn-name (str/join "; " (:reasons echo-check))))))))))
 
           (let [rows @v-rows
                 passed-cnt (count (filter :passed? rows))
@@ -191,6 +194,7 @@
                 tot-out (reduce + 0 (map :tokens-out rows))
                 stats {:variant v
                        :name (get-in pt-core/PROMPT-VARIANTS [v :name])
+                       :prompt-sha v-prompt-sha
                        :passed-count passed-cnt
                        :total-count total-cnt
                        :pass-rate pass-rate
