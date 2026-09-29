@@ -396,6 +396,32 @@ Only provide your final response once your definition passes all public tests.")
           sorted (sort-by (juxt (comp - :passed) :turn :idx) scored)]
       (:sub (first sorted)))))
 
+(defn stratify-tasks
+  "Selects a deterministic stratified sample of `limit` tasks preserving source prefix proportions."
+  [tasks limit]
+  (if (or (nil? limit) (>= limit (count tasks)) (<= limit 0))
+    (vec tasks)
+    (let [by-source (group-by #(first (str/split (:id %) #"-")) tasks)
+          total (count tasks)
+          sources (sort (keys by-source))
+          target-counts (into {}
+                              (map (fn [src]
+                                     [src (Math/round (double (* limit (/ (count (get by-source src)) total))))]))
+                              sources)
+          sum-counts (reduce + (vals target-counts))
+          adjusted-counts (cond
+                            (< sum-counts limit)
+                            (let [largest (key (apply max-key (comp count val) by-source))]
+                              (update target-counts largest + (- limit sum-counts)))
+                            (> sum-counts limit)
+                            (let [largest (key (apply max-key (comp count val) by-source))]
+                              (update target-counts largest - (- sum-counts limit)))
+                            :else
+                            target-counts)]
+      (vec (mapcat (fn [src]
+                     (take (get adjusted-counts src 0) (get by-source src)))
+                   sources)))))
+
 ;; =============================================================================
 ;; 8. Metrics & Reporting
 ;; =============================================================================
@@ -494,7 +520,7 @@ Only provide your final response once your definition passes all public tests.")
 (defn format-results-row
   "Formats an individual task evaluation result map for results.edn, persisting
    rich diagnostics (candidate-code, error, test-summary, failure details, stop-reason, transcript on failure)."
-  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha prompt-sha dry-run? transcript repetition-penalty temperature tool-syntax]}]
+  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha prompt-sha dry-run? transcript repetition-penalty temperature tool-syntax prompt-variant]}]
   (let [all-passed? (boolean (:all-passed? grade-res))
         has-error? (seq (or error (:error grade-res)))
         err-msg (or error (:error grade-res))
@@ -537,6 +563,8 @@ Only provide your final response once your definition passes all public tests.")
              :failures (when (seq raw-failures) raw-failures)}
       tool-syntax
       (assoc :tool-syntax (keyword tool-syntax))
+      prompt-variant
+      (assoc :prompt-variant (keyword prompt-variant))
       prompt-sha
       (assoc :prompt-sha (str prompt-sha))
       (and (not all-passed?) (seq transcript))

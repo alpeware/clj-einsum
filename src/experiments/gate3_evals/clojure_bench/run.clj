@@ -9,7 +9,8 @@
             [einsum.models.gemma4.config :as cfg]
             [einsum.models.gemma4.runtime :as gemma4-rt]
             [einsum.runtime.arena :as arena]
-            [experiments.gate3-evals.clojure-bench.core :as bench-core]))
+            [experiments.gate3-evals.clojure-bench.core :as bench-core]
+            [experiments.gate3-evals.prompt-tuning-v1.core :as pt-core]))
 
 ;; =============================================================================
 ;; 1. Default Evaluation Configuration
@@ -151,6 +152,7 @@
           :temperature (double (or (:temperature opts) 0.0))
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens (long (or (:max-new-tokens opts) 1536))
+          :prompt-variant (:prompt-variant opts)
           :dry-run? true}))
 
       ;; Actual model inference
@@ -209,6 +211,7 @@
           :temperature (double (or (:temperature opts) 0.0))
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens max-new
+          :prompt-variant (:prompt-variant opts)
           :dry-run? false})))))
 
 (defn run-agentic-task
@@ -252,6 +255,7 @@
           :temperature (double (or (:temperature opts) 0.0))
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens (long (or (:max-new-tokens opts) 1536))
+          :prompt-variant (:prompt-variant opts)
           :dry-run? true}))
 
       ;; Actual agentic loop execution
@@ -387,6 +391,7 @@
               :temperature (double (or (:temperature opts) 0.0))
               :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
               :max-new-tokens (long (or (:max-new-tokens opts) 1536))
+              :prompt-variant (:prompt-variant opts)
               :dry-run? false}))
           (finally
             (when-let [st @task-kv-state]
@@ -448,10 +453,19 @@
         raw-selected (filter-tasks public-tasks (:tasks opts))
         quarantine-ids (load-quarantine-ids)
         include-quarantine? (boolean (:include-quarantine opts))
-        selected-tasks (if include-quarantine?
+        filtered-tasks (if include-quarantine?
                          raw-selected
                          (filterv #(not (contains? quarantine-ids (:id %))) raw-selected))
-        n-quarantined (- (count raw-selected) (count selected-tasks))
+        stratified? (get opts :stratified (or (= (:tasks opts) "multipl-e-dev")
+                                              (= (:tasks opts) "all")))
+        selected-tasks (cond
+                         (and (:limit opts) stratified?)
+                         (bench-core/stratify-tasks filtered-tasks (:limit opts))
+                         (:limit opts)
+                         (vec (take (:limit opts) filtered-tasks))
+                         :else
+                         filtered-tasks)
+        n-quarantined (- (count raw-selected) (count filtered-tasks))
         run-mode (keyword (:mode opts))
 
         _ (when-not (:quiet opts)
@@ -463,7 +477,12 @@
             (println (format "Prompt SHA-256       : %s" prompt-sha))
             (println (format "Sealed SHA-256       : %s" sealed-sha))
             (println (format "Evaluation Mode      : %s" run-mode))
-            (println (format "Selected Tasks       : %d/%d" (count selected-tasks) (count public-tasks)))
+            (println (format "Selected Tasks       : %d/%d%s"
+                             (count selected-tasks)
+                             (count public-tasks)
+                             (if (:limit opts)
+                               (str " (limit: " (:limit opts) (when stratified? ", stratified") ")")
+                               "")))
             (when (pos? n-quarantined)
               (println (format "Quarantine Filter    : Excluded %d quarantined tasks (use --include-quarantine true to evaluate)" n-quarantined)))
             (println (format "Dry Run Mode         : %s" dry-run?))
@@ -583,9 +602,13 @@
                 (let [val (second rem-args)
                       parsed (cond
                                (or (= flag "model") (= flag "model-dir"))
-                               (if (and (string? val) (not (str/starts-with? val ".")) (not (str/starts-with? val "/")))
-                                 (if (.exists (io/file val)) val (str ".models/" (last (str/split val #"/"))))
-                                 val)
+                               (let [path (if (and (string? val) (not (str/starts-with? val ".")) (not (str/starts-with? val "/")))
+                                            (if (.exists (io/file val)) val (str ".models/" (last (str/split val #"/"))))
+                                            val)]
+                                 (cond
+                                   (.exists (io/file path)) path
+                                   (.exists (io/file (str/lower-case path))) (str/lower-case path)
+                                   :else path))
                                :else val)]
                   (recur (subvec rem-args 2) (assoc opts k parsed)))
                 (recur (subvec rem-args 1) opts))))
@@ -597,13 +620,22 @@
   [args]
   (let [user-flags (set (keep #(when (str/starts-with? % "--") (subs % 2)) args))
         raw-opts (parse-raw-cli-args args DEFAULT-BENCH-OPTS)
+        raw-variant (or (:prompt-variant raw-opts)
+                        (when (contains? #{"p0" ":p0" "p1" ":p1" "p2" ":p2"} (str (:prompt-template raw-opts)))
+                          (keyword (str/replace (str (:prompt-template raw-opts)) #"^:+" ""))))
+        variant-sys (when raw-variant (pt-core/get-system-prompt (keyword raw-variant)))
+        raw-opts (cond-> raw-opts
+                   raw-variant (assoc :prompt-variant (keyword raw-variant))
+                   variant-sys (assoc :system variant-sys))
         normalized-tasks-opts
         (cond
           (= (:tasks raw-opts) "multipl-e-dev")
           (assoc raw-opts
                  :public-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_dev.edn"
                  :sealed-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_dev.edn"
-                 :prompt-template (or (:prompt-template raw-opts) :multipl-e-v0)
+                 :prompt-template (if (contains? #{:p0 :p1 :p2} (:prompt-template raw-opts))
+                                    :multipl-e-v0
+                                    (or (:prompt-template raw-opts) :multipl-e-v0))
                  :tool-syntax (if (contains? user-flags "tool-syntax")
                                 (keyword (str/replace (str (:tool-syntax raw-opts)) #"^:+" ""))
                                 :fenced)
@@ -613,7 +645,9 @@
           (assoc raw-opts
                  :public-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_sealed.edn"
                  :sealed-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_sealed.edn"
-                 :prompt-template (or (:prompt-template raw-opts) :multipl-e-v0)
+                 :prompt-template (if (contains? #{:p0 :p1 :p2} (:prompt-template raw-opts))
+                                    :multipl-e-v0
+                                    (or (:prompt-template raw-opts) :multipl-e-v0))
                  :tool-syntax (if (contains? user-flags "tool-syntax")
                                 (keyword (str/replace (str (:tool-syntax raw-opts)) #"^:+" ""))
                                 :fenced)
@@ -628,6 +662,9 @@
           :else
           raw-opts)
         opts (cond-> normalized-tasks-opts
+               (string? (:limit normalized-tasks-opts)) (update :limit #(Long/parseLong %))
+               (string? (:stratified normalized-tasks-opts)) (update :stratified #(Boolean/parseBoolean %))
+               (string? (:prompt-variant normalized-tasks-opts)) (update :prompt-variant #(keyword (str/replace % #"^:+" "")))
                (string? (:max-turns normalized-tasks-opts)) (update :max-turns #(Long/parseLong %))
                (string? (:max-consecutive-errors normalized-tasks-opts)) (update :max-consecutive-errors #(Long/parseLong %))
                (string? (:max-new-tokens normalized-tasks-opts)) (update :max-new-tokens #(Long/parseLong %))

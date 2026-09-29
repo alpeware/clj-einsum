@@ -34,8 +34,11 @@ elif [ "$1" = "cat-q" ] || [ "$1" = "--cat-q" ] || [ "$1" = "ternary" ] || [ "$1
 elif [ "$1" = "train-catq" ] || [ "$1" = "--train-catq" ] || [ "$1" = "train-ternary" ] || [ "$1" = "--train-ternary" ]; then
   MODE="train-catq"
   shift
-elif [ "$1" = "clj-bench" ] || [ "$1" = "--clj-bench" ] || [ "$1" = "clojure-bench" ]; then
+elif [ "$1" = "clj-bench" ] || [ "$1" = "--clj-bench" ] || [ "$1" = "clojure-bench" ] || [ "$1" = "bench" ] || [ "$1" = "--bench" ]; then
   MODE="clj-bench"
+  shift
+elif [ "$1" = "pilot" ] || [ "$1" = "--pilot" ]; then
+  MODE="pilot"
   shift
 elif [ "$1" = "run" ] || [ "$1" = "--run" ] || [ "$1" = "exec" ]; then
   MODE="run"
@@ -60,6 +63,8 @@ elif [ "$MODE" = "train-catq" ]; then
   exec clojure -M:tools -m tools.train-catq "$@"
 elif [ "$MODE" = "clj-bench" ]; then
   exec clojure -M:tools -m tools.clj-bench "$@"
+elif [ "$MODE" = "pilot" ]; then
+  exec clojure -M:tools -m experiments.gate3-evals.prompt-tuning-v1.run "$@"
 elif [ "$MODE" = "run" ]; then
   exec clojure "$@"
 else
