@@ -19,7 +19,7 @@ program).
 
 | Item | Track | Status | Owner | Blocked by / Unlocks | Notes |
 |---|---|---|---|---|---|
-| Prompt tuning v1 (worked agentic trajectories) | experiment | proposed | — | Unlocked by MultiPL-E dev corpus | Freeze reference prompt; v1 with 2–3 disjoint worked trajectories; iterate on dev, report on sealed-10 only |
+| Prompt tuning v1 (worked agentic trajectories) | experiment | active | — | Unlocked by MultiPL-E dev corpus | Stage 1 spec proposed; freeze reference prompt; v1 with 2–3 disjoint worked trajectories; iterate on dev, report on sealed-10 only |
 | LoRA pure-stack trainer | capability | proposed | — | Unlocks distillation SFT | Large ticket. Pure Clojure/XLA stack, no PyTorch (program constraint) |
 | Student perplexity on teacher trajectories | measurement | proposed | — | Student = E4B-QAT-INT4 (3/10); teacher = 31B-QAT-INT4 (7/10); gap is 4 tasks | Inference-only distillation de-risk; runs before the trainer exists |
 | Program-signature versioning | capability | proposed | — | Superseded in part by :harness-sha (freeze) | Extend prompt-sha: hash(prompt, tool defs, turn structure, decoding params, harness version) on every ledger row |
