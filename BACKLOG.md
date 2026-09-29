@@ -20,12 +20,9 @@ program).
 | Item | Track | Status | Owner | Blocked by / Unlocks | Notes |
 |---|---|---|---|---|---|
 | Prompt tuning v1 (worked agentic trajectories) | experiment | proposed | — | Blocked by MultiPL-E dev corpus | Freeze reference prompt; v1 with 2–3 disjoint worked trajectories; iterate on dev, report on sealed-10 only |
-| MultiPL-E humaneval-clj/mbpp-clj port | capability | proposed | — | Unlocks prompt tuning, distillation corpus | 161+397 tasks into harness format; expected values verified in SCI; public dev set |
-| E4B-QAT-INT4 eval | experiment | done | — | — | 3/10 union — beats PTQ-INT4 (1/10) and BF16 (~2/10); **student substrate decided** |
+| MultiPL-E humaneval-clj/mbpp-clj port | capability | active | — | Unlocks prompt tuning, distillation corpus | 161+397 tasks into harness format; expected values verified in SCI; public dev set |
 | LoRA pure-stack trainer | capability | proposed | — | Unlocks distillation SFT | Large ticket. Pure Clojure/XLA stack, no PyTorch (program constraint) |
 | Student perplexity on teacher trajectories | measurement | proposed | — | Student = E4B-QAT-INT4 (3/10); teacher = 31B-QAT-INT4 (7/10); gap is 4 tasks | Inference-only distillation de-risk; runs before the trainer exists |
-| clojure_bench freeze (v1 → catalog) | capability | done | — | — | Moved to `resources/catalog/gate3_evals/clojure_bench/`; rows carry `:harness-sha`/`:harness-dirty?` from 2026-09-27; 240 historical rows pre-versioning (no backfill) |
-| Eval harness v2 (KV cache, stopping, library port) | capability | proposed | — | Unlocks MultiPL-E port at scale, prompt tuning, distillation SFT | Spec at `resources/proposals/gate3_evals/harness_v2/spec.md`; AC2: 20-cell 31B-QAT@1.0 re-run reproduces v1 outcomes exactly |
 | Program-signature versioning | capability | proposed | — | Superseded in part by :harness-sha (freeze) | Extend prompt-sha: hash(prompt, tool defs, turn structure, decoding params, harness version) on every ledger row |
 | Grading-sandbox hardening (slurp/spit) | capability | proposed | — | — | From adversarial review; load-bearing before the loop becomes training infra |
 | Paren-repair as agent-facing tool | experiment | proposed | — | — | Prompt-tuning sub-avenue; explicit tool, never silent harness fixup |
@@ -35,6 +32,9 @@ program).
 
 | Item | Track | Verdict |
 |---|---|---|
+| Eval harness v2 (KV cache, library port, --tool-syntax) | capability | done — 21.3% speedup on 31B; library resident in einsum.agent.core; --tool-syntax fenced unlocks E4B 50% & 31B my-comp |
+| clojure_bench freeze (v1 → catalog) | capability | done — moved to `resources/catalog/gate3_evals/clojure_bench/`; rows carry `:harness-sha`/`:harness-dirty?` from 2026-09-27 |
+| E4B-QAT-INT4 eval | experiment | 3/10 union — beats PTQ-INT4 (1/10) and BF16 (~2/10); **student substrate decided** |
 | clojure_bench v1 instrument | capability | done — 200 ledger rows, sealed fixture, append-only |
 | Best-submission ratchet | capability | done |
 | Prompt-sha ledger tracking | capability | done |

@@ -58,12 +58,12 @@
                   :slug "harness_v2"
                   :title "Eval Harness v2 — Versioned, Fast, Library-Resident"
                   :track :capability
-                  :status :unverified
-                  :verdict :in-progress
+                  :status :active
+                  :verdict :done
                   :generation 0
                   :target-hardware "AMD Radeon RX 7900 XTX (24GB)"
-                  :spec-path "resources/proposals/gate3_evals/harness_v2/spec.md"
-                  :report-path "resources/proposals/gate3_evals/harness_v2/report.md"
-                  :results-path "resources/proposals/gate3_evals/harness_v2/results.edn"
-                  :summary-path "resources/proposals/gate3_evals/harness_v2/summary.csv"
+                  :spec-path "resources/catalog/gate3_evals/harness_v2/spec.md"
+                  :report-path "resources/catalog/gate3_evals/harness_v2/report.md"
+                  :results-path "resources/catalog/gate3_evals/harness_v2/results.edn"
+                  :summary-path "resources/catalog/gate3_evals/harness_v2/summary.csv"
                   :verified-by nil}}}
