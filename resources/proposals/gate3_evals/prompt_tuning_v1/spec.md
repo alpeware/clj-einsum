@@ -4,7 +4,7 @@
 **Gate**: `gate3_evals` \
 **Generation**: `0` \
 **Type**: `experiment` \
-**Status**: `proposed` \
+**Status**: `rejected` \
 **Literature**: `["Wei et al. (2022) Chain-of-Thought Prompting Elicits Reasoning in Large Language Models (arXiv:2201.11903)", "Yao et al. (2022) ReAct: Synergizing Reasoning and Acting in Language Models (arXiv:2210.03629)", "Gemma Team (2025/2026) Gemma 4: Open Models for Advanced Reasoning and Agentic Workflows", "Cassano et al. (2023) MultiPL-E: A Scalable and Polyglot Benchmark for Evaluating Large Language Models (arXiv:2208.08227)"]` \
 **Hardware-Target**: `{:reference "AMD Radeon RX 7900 XTX (24GB)" :claim-shape ">= +5.0% solve rate on MultiPL-E dev (447 tasks) for E4B, zero regressions on clojure_bench sealed-10, prompt prefix <= 600 tokens"}` \
 **Extends**: `"harness_v2"` \
@@ -205,10 +205,43 @@ To eliminate all classification ambiguity and dead zones, evaluation follows a s
 
 ---
 
-## 7. Decision Log
+---
+
+## 7. Empirical Results (Phase 2 Stratified Pilot)
+
+Evaluation of all three candidate prompt variants was executed on the reference AMD Radeon RX 7900 XTX accelerator (24GB VRAM) running OpenXLA PJRT in-VRAM agentic sessions on `gemma-4-e4b-it-qat-int4` across the 50-task stratified dev pilot ($N=50$, 15 HumanEval + 35 MBPP, quarantined IDs excluded). All 150 candidate submissions were mechanically audited by `detect-canary-echo`.
+
+### Empirical Performance Summary
+
+| Variant | System Prompt Template | Tokens (Prefix) | Passed ($N=50$) | Pass Rate | $\Delta$ vs $P_0$ | Wall Time (s) | Mean s/Task | Canary Leaks |
+|---|---|---|---|---|---|---|---|---|
+| **$P_0$ (Control)** | `fenced-zero-shot` | 124 tok | **23 / 50** | **46.0%** | Baseline | 2,634.0s | 52.7s | 0 / 50 |
+| **$P_1$ (Single)** | `fenced-worked-single` | 348 tok | **23 / 50** | **46.0%** | **+0 tasks** | 3,621.7s | 72.4s (+37.4%) | 0 / 50 |
+| **$P_2$ (Dual)** | `fenced-worked-dual` | 568 tok | **19 / 50** | **38.0%** | **−4 tasks** | 3,658.8s | 73.2s (+38.9%) | 0 / 50 |
+
+### Key Empirical Findings
+
+1. **Self-Correction Demonstration Does Not Generalize**:
+   Embedding worked self-correction demonstrations into the system prompt did not improve the student model's overall solve rate on Clojure coding tasks. While $P_1$ and $P_2$ succeeded on several tasks that $P_0$ failed (e.g., $P_1$ solved `humaneval-clj-008`, `mbpp-clj-014`, `mbpp-clj-017`; $P_2$ solved `humaneval-clj-005`, `006`, `017`, `mbpp-clj-026`), these localized wins were entirely offset by regressions on tasks $P_0$ solved cleanly.
+2. **Context Latency Inflation Without Accuracy Gain**:
+   The few-shot prompt prefixes inflated per-task inference latency by $+37.4\%$ ($P_1$) and $+38.9\%$ ($P_2$) due to increased prompt context and larger turn histories.
+3. **Zero Canary Contamination**:
+   Across all 150 candidate code submissions from $P_0$, $P_1$, and $P_2$, `detect-canary-echo` detected 0 leaks of canary symbols (`sum-even-squares`, `word-lengths`) or literal strings (`Expected 20, got 10`).
+
+### Downselection & Termination Rationale
+
+Under the pre-registered Phase 2 execution protocol:
+- Downselection required at least one candidate to beat control $P_0$ by $\ge 2$ tasks ($\max(\Delta_1, \Delta_2) \ge 2$) to select $P^*$ and proceed to Phase 3 full dev benchmarking.
+- Here, $\Delta_1 = 0$ and $\Delta_2 = -4$. Neither candidate beat $P_0$ by $\ge 2$ tasks.
+- **Phase 2 Early-Stop Condition Triggered**: Under Section 5 (Phase 2, Step 2) and Section 6 (Rule 3), the experiment terminates directly as **`REJECT`** without spending compute on the full 447-task dev corpus or evaluating sealed-10 (which is vacuous with no candidate selected).
+
+---
+
+## 8. Decision Log
 
 | Date | Event | Rationale |
 |---|---|---|
 | 2026-09-29 | `proposed` | Stage 1 RFC drafted; unlocked by cataloged MultiPL-E 447-task dev corpus; targets agentic self-correction failure modes observed in `harness_v2`. |
 | 2026-09-29 | `amended` | Hardened spec per review: partitioned decision space with zero dead zones; harmonized REJECT vs KILLED; pre-registered McNemar's paired test; established single-candidate downselection ($m=1$); pre-registered mechanical canary echoing detector; dropped DOA $P_3$; designated MultiPL-E sealed-111 as reporting-only / touch-once; set Generation 0. |
 | 2026-09-29 | `amended` | Refined precedence hierarchy (KILLED dominates -> ADOPT all conjoined -> REJECT exhaustive fallback); eliminated Case A/B fallthroughs; dropped non-mechanical parenthetical on Δ < 0; noted Phase 2 early-stop skips sealed-10. |
+| 2026-09-29 | `rejected` | Phase 2 stratified pilot (N=50) completed on AMD RX 7900 XTX: P0=23/50 (46.0%), P1=23/50 (46.0%, Δ+0), P2=19/50 (38.0%, Δ-4). Zero canary leaks detected. Phase 2 early-stop triggered (neither candidate beat P0 by >= 2 tasks). Per pre-registered protocol, experiment terminates cleanly as REJECT without evaluating full dev or sealed-10. Prompt tuning track concluded; proceeding directly to LoRA SFT distillation with zero-shot prompt. |

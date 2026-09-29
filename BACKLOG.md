@@ -19,7 +19,6 @@ program).
 
 | Item | Track | Status | Owner | Blocked by / Unlocks | Notes |
 |---|---|---|---|---|---|
-| Prompt tuning v1 (worked agentic trajectories) | experiment | active | — | Unlocked by MultiPL-E dev corpus | Stage 1 spec proposed; freeze reference prompt; v1 with 2–3 disjoint worked trajectories; iterate on dev, report on sealed-10 only |
 | LoRA pure-stack trainer | capability | proposed | — | Unlocks distillation SFT | Large ticket. Pure Clojure/XLA stack, no PyTorch (program constraint) |
 | Student perplexity on teacher trajectories | measurement | proposed | — | Student = E4B-QAT-INT4 (3/10); teacher = 31B-QAT-INT4 (7/10); gap is 4 tasks | Inference-only distillation de-risk; runs before the trainer exists |
 | Program-signature versioning | capability | proposed | — | Superseded in part by :harness-sha (freeze) | Extend prompt-sha: hash(prompt, tool defs, turn structure, decoding params, harness version) on every ledger row |
@@ -31,6 +30,7 @@ program).
 
 | Item | Track | Verdict |
 |---|---|---|
+| Prompt tuning v1 (worked agentic trajectories) | experiment | done — **REJECT**: Phase 2 pilot ($N=50$) $P_0=23/50$ (46.0%), $P_1=23/50$ (46.0%, $\Delta+0$), $P_2=19/50$ (38.0%, $\Delta-4$); 0 canary leaks; early-stop triggered ($\max(\Delta_1, \Delta_2) < 2$); worked self-corrections inflated latency $+37\text{--}39\%$ without net accuracy gain; zero-shot prompt retained; proceed directly to LoRA SFT |
 | MultiPL-E humaneval-clj/mbpp-clj port | capability | done — 558 tasks ingested (161 HE + 397 MBPP); 447 dev / 111 sealed partition; 543/558 (97.31%) verified in pure SCI; 15 quarantined with technical adjudications |
 | Eval harness v2 (KV cache, library port, --tool-syntax) | capability | done — 21.3% pre-conformance wall-time reduction on 31B (isolated KV reuse); AC2 verified (no adverse flips vs v1); library in einsum.agent.core; --tool-syntax :fenced lifts E4B agentic from 20% native (30% union) to 50% & unlocks my-comp on 31B (70% agentic suite) |
 | clojure_bench freeze (v1 → catalog) | capability | done — moved to `resources/catalog/gate3_evals/clojure_bench/`; rows carry `:harness-sha`/`:harness-dirty?` from 2026-09-27 |
