@@ -1,0 +1,61 @@
+[{:id "humaneval-clj-160",
+  :source :multipl-e/humaneval-clj,
+  :fn-name string_to_md5,
+  :reason "No verified reference solution available"}
+ {:id "mbpp-clj-035",
+  :source :multipl-e/mbpp-clj,
+  :fn-name get_Char,
+  :reason "Failed 3/3 assertions"}
+ {:id "mbpp-clj-098",
+  :source :multipl-e/mbpp-clj,
+  :fn-name re_arrange_array,
+  :reason "No verified reference solution available"}
+ {:id "mbpp-clj-196",
+  :source :multipl-e/mbpp-clj,
+  :fn-name parabola_directrix,
+  :reason "Failed 3/3 assertions"}
+ {:id "mbpp-clj-204",
+  :source :multipl-e/mbpp-clj,
+  :fn-name count_bidirectional,
+  :reason "Failed 1/3 assertions"}
+ {:id "mbpp-clj-226",
+  :source :multipl-e/mbpp-clj,
+  :fn-name upper_ctr,
+  :reason "Failed 2/3 assertions"}
+ {:id "mbpp-clj-231",
+  :source :multipl-e/mbpp-clj,
+  :fn-name max_product,
+  :reason "Failed 2/3 assertions"}
+ {:id "mbpp-clj-249",
+  :source :multipl-e/mbpp-clj,
+  :fn-name extract_values,
+  :reason "No verified reference solution available"}
+ {:id "mbpp-clj-258",
+  :source :multipl-e/mbpp-clj,
+  :fn-name surfacearea_cylinder,
+  :reason "Failed 3/3 assertions"}
+ {:id "mbpp-clj-262",
+  :source :multipl-e/mbpp-clj,
+  :fn-name find_dissimilar,
+  :reason "Failed 1/3 assertions"}
+ {:id "mbpp-clj-294",
+  :source :multipl-e/mbpp-clj,
+  :fn-name min_Jumps,
+  :reason "Failed 1/3 assertions"}
+ {:id "mbpp-clj-322",
+  :source :multipl-e/mbpp-clj,
+  :fn-name extract_quotation,
+  :reason
+  "Malformed upstream test file or syntax error (e.g. unescaped quotes)"}
+ {:id "mbpp-clj-361",
+  :source :multipl-e/mbpp-clj,
+  :fn-name Diff,
+  :reason "Failed 1/3 assertions"}
+ {:id "mbpp-clj-367",
+  :source :multipl-e/mbpp-clj,
+  :fn-name count_vowels,
+  :reason "Failed 2/3 assertions"}
+ {:id "mbpp-clj-390",
+  :source :multipl-e/mbpp-clj,
+  :fn-name count_rotation,
+  :reason "Failed 2/5 assertions"}]

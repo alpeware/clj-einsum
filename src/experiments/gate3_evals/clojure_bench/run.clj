@@ -123,7 +123,7 @@
   (let [{:keys [dry-run quiet]} opts
         task-id (:id task)
         fn-name (:fn-name task)
-        prompt (bench-core/render-benchmark-prompt task)
+        prompt (bench-core/render-benchmark-prompt task (or (:prompt-template opts) :clojure-bench-v1) :single-shot)
         model-name (.getName (io/file (or (:model-dir session) (:model opts))))
         checkpoint-sha (:checkpoint-sha session)
         _ (when-not quiet (println (format "\n[Single-Shot] Task: %s (%s)..." task-id fn-name)))
@@ -131,7 +131,7 @@
 
     (if dry-run
       ;; Dry-run mode: use verified mock code
-      (let [mock-code (get MOCK-REFERENCE-SOLUTIONS task-id "(defn stub [x] x)")
+      (let [mock-code (get MOCK-REFERENCE-SOLUTIONS task-id (get MOCK-REFERENCE-SOLUTIONS (str fn-name) "(defn stub [x] x)"))
             grade-res (bench-core/grade-submission mock-code hidden-tests)
             wall-ms (/ (- (System/nanoTime) t0) 1e6)]
         (bench-core/format-results-row
@@ -219,7 +219,7 @@
         tool-syntax (keyword (or (:tool-syntax opts) :native))
         task-id (:id task)
         fn-name (:fn-name task)
-        prompt (bench-core/render-benchmark-prompt task)
+        prompt (bench-core/render-benchmark-prompt task (or (:prompt-template opts) :clojure-bench-v1) :agentic)
         model-name (.getName (io/file (or (:model-dir session) (:model opts))))
         checkpoint-sha (:checkpoint-sha session)
         submissions (atom [])
@@ -228,7 +228,7 @@
 
     (if dry-run
       ;; Dry run mode
-      (let [mock-code (get MOCK-REFERENCE-SOLUTIONS task-id "(defn stub [x] x)")
+      (let [mock-code (get MOCK-REFERENCE-SOLUTIONS task-id (get MOCK-REFERENCE-SOLUTIONS (str fn-name) "(defn stub [x] x)"))
             pub-res (bench-core/grade-submission mock-code (:public-tests task))
             _ (swap! submissions conj {:code mock-code :public-res pub-res :turn 1})
             best-sub (bench-core/pick-best-public-submission @submissions)
@@ -476,7 +476,7 @@
         (try
           (doseq [task selected-tasks]
             (let [task-id (:id task)
-                  hidden-tests (get sealed-map task-id [])
+                  hidden-tests (or (get sealed-map task-id) (:hidden-tests task) [])
                   ss-row (run-single-shot-task ss-session task hidden-tests sealed-sha ss-opts)]
               (swap! all-results conj ss-row)
               (spit results-file (str (pr-str ss-row) "\n") :append true)))
@@ -497,7 +497,7 @@
         (try
           (doseq [task selected-tasks]
             (let [task-id (:id task)
-                  hidden-tests (get sealed-map task-id [])
+                  hidden-tests (or (get sealed-map task-id) (:hidden-tests task) [])
                   ag-row (run-agentic-task ag-session task hidden-tests sealed-sha ag-opts)]
               (swap! all-results conj ag-row)
               (spit results-file (str (pr-str ag-row) "\n") :append true)))
@@ -579,24 +579,49 @@
   [args]
   (let [user-flags (set (keep #(when (str/starts-with? % "--") (subs % 2)) args))
         raw-opts (parse-raw-cli-args args DEFAULT-BENCH-OPTS)
-        opts (cond-> raw-opts
-               (string? (:max-turns raw-opts)) (update :max-turns #(Long/parseLong %))
-               (string? (:max-consecutive-errors raw-opts)) (update :max-consecutive-errors #(Long/parseLong %))
-               (string? (:max-new-tokens raw-opts)) (update :max-new-tokens #(Long/parseLong %))
-               (string? (:max-seq-len raw-opts)) (update :max-seq-len #(Long/parseLong %))
-               (string? (:temperature raw-opts)) (update :temperature #(Double/parseDouble %))
-               (string? (:top-k raw-opts)) (update :top-k #(Long/parseLong %))
-               (string? (:repetition-penalty raw-opts)) (update :repetition-penalty #(Double/parseDouble %))
-               (string? (:dry-run raw-opts)) (update :dry-run #(Boolean/parseBoolean %))
-               (string? (:thinking raw-opts)) (update :thinking #(Boolean/parseBoolean %))
-               (string? (:overwrite raw-opts)) (update :overwrite #(Boolean/parseBoolean %))
-               (string? (:nudge-on-no-tool raw-opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
-               (string? (:semantic-stop raw-opts)) (update :semantic-stop #(Boolean/parseBoolean %))
-               (string? (:early-exit raw-opts)) (update :early-exit #(Boolean/parseBoolean %))
-               (string? (:nudge-short-circuit raw-opts)) (update :nudge-short-circuit #(Boolean/parseBoolean %))
-               (string? (:backend raw-opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
-               (string? (:tool-syntax raw-opts)) (update :tool-syntax #(keyword (str/replace % #"^:+" "")))
-               (string? (:mode raw-opts)) (update :mode #(keyword (str/replace % #"^:+" ""))))
+        normalized-tasks-opts
+        (cond
+          (= (:tasks raw-opts) "multipl-e-dev")
+          (assoc raw-opts
+                 :public-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_dev.edn"
+                 :sealed-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_dev.edn"
+                 :prompt-template (or (:prompt-template raw-opts) :multipl-e-v0)
+                 :tasks "all")
+
+          (= (:tasks raw-opts) "multipl-e-sealed")
+          (assoc raw-opts
+                 :public-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_sealed.edn"
+                 :sealed-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_sealed.edn"
+                 :prompt-template (or (:prompt-template raw-opts) :multipl-e-v0)
+                 :tasks "all")
+
+          (or (= (:tasks raw-opts) "dev-50") (= (:tasks raw-opts) "multipl-e-dev-50"))
+          (assoc raw-opts
+                 :public-tasks-file "resources/catalog/gate3_evals/multipl_e/dev_50_public.edn"
+                 :sealed-tasks-file "resources/catalog/gate3_evals/multipl_e/dev_50_sealed.edn"
+                 :tasks "all")
+
+          :else
+          raw-opts)
+        opts (cond-> normalized-tasks-opts
+               (string? (:max-turns normalized-tasks-opts)) (update :max-turns #(Long/parseLong %))
+               (string? (:max-consecutive-errors normalized-tasks-opts)) (update :max-consecutive-errors #(Long/parseLong %))
+               (string? (:max-new-tokens normalized-tasks-opts)) (update :max-new-tokens #(Long/parseLong %))
+               (string? (:max-seq-len normalized-tasks-opts)) (update :max-seq-len #(Long/parseLong %))
+               (string? (:temperature normalized-tasks-opts)) (update :temperature #(Double/parseDouble %))
+               (string? (:top-k normalized-tasks-opts)) (update :top-k #(Long/parseLong %))
+               (string? (:repetition-penalty normalized-tasks-opts)) (update :repetition-penalty #(Double/parseDouble %))
+               (string? (:dry-run normalized-tasks-opts)) (update :dry-run #(Boolean/parseBoolean %))
+               (string? (:thinking normalized-tasks-opts)) (update :thinking #(Boolean/parseBoolean %))
+               (string? (:overwrite normalized-tasks-opts)) (update :overwrite #(Boolean/parseBoolean %))
+               (string? (:nudge-on-no-tool normalized-tasks-opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
+               (string? (:semantic-stop normalized-tasks-opts)) (update :semantic-stop #(Boolean/parseBoolean %))
+               (string? (:early-exit normalized-tasks-opts)) (update :early-exit #(Boolean/parseBoolean %))
+               (string? (:nudge-short-circuit normalized-tasks-opts)) (update :nudge-short-circuit #(Boolean/parseBoolean %))
+               (string? (:backend normalized-tasks-opts)) (update :backend #(keyword (str/replace % #"^:+" "")))
+               (string? (:tool-syntax normalized-tasks-opts)) (update :tool-syntax #(keyword (str/replace % #"^:+" "")))
+               (string? (:mode normalized-tasks-opts)) (update :mode #(keyword (str/replace % #"^:+" "")))
+               (string? (:prompt-template normalized-tasks-opts)) (update :prompt-template #(keyword (str/replace % #"^:+" ""))))
         opts (assoc opts :user-flags user-flags)]
     opts))
 

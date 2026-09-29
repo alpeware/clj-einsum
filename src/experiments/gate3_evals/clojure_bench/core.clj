@@ -57,7 +57,16 @@
    Strictly isolates file I/O (no slurp, spit, list-files), system inspection, and reflection."
   []
   (sci/init
-   {:classes {'Math Math}
+   {:classes {'Math Math
+              'Character Character
+              'Integer Integer
+              'Long Long
+              'Double Double
+              'Float Float
+              'Short Short
+              'Byte Byte
+              'Boolean Boolean
+              'String String}
     :bindings {'println println
                'print print
                'prn prn
@@ -104,16 +113,39 @@ Only provide your final response once your definition passes all public tests.")
 
 (defn render-benchmark-prompt
   "Renders the formatted user prompt for a task, embedding public test examples.
-   Never includes sealed/hidden tests to preserve evaluation integrity."
-  [{:keys [title fn-name prompt public-tests]}]
-  (let [fn-str (str fn-name)
-        tests-formatted (str/join "\n"
-                                  (map (fn [{:keys [code expected]}]
-                                         (format "  - Code: %s\n    Expected: %s" code expected))
-                                       public-tests))]
-    (format
-     "Task: %s\nTarget Identifier: `%s`\n\nInstructions:\n%s\n\nPublic Examples & Unit Tests:\n%s\n\nImplement `%s` in pure, idiomatic Clojure. Use standard bindings and collections."
-     title fn-str prompt tests-formatted fn-str)))
+   Never includes sealed/hidden tests to preserve evaluation integrity.
+   Supports named prompt templates via optional template-key (defaults to :clojure-bench-v1).
+   Registered templates:
+     - :clojure-bench-v1 (default): Title, target identifier, instructions, and formatted public examples
+     - :multipl-e-v0: Verbatim MultiPL-E prompt/docstring; in :agentic mode, appends public examples"
+  ([task]
+   (render-benchmark-prompt task :clojure-bench-v1 :agentic))
+  ([task template-key]
+   (render-benchmark-prompt task template-key :agentic))
+  ([task template-key mode]
+   (case template-key
+     :multipl-e-v0
+     (let [{:keys [prompt public-tests]} task]
+       (if (= mode :single-shot)
+         prompt
+         (let [tests-formatted (when (seq public-tests)
+                                 (str "\n\nPublic Examples & Unit Tests:\n"
+                                      (str/join "\n"
+                                                (map (fn [{:keys [code expected]}]
+                                                       (format "  - Code: %s\n    Expected: %s" code expected))
+                                                     public-tests))))]
+           (str prompt (or tests-formatted "")))))
+
+     ;; Default :clojure-bench-v1
+     (let [{:keys [title fn-name prompt public-tests]} task
+           fn-str (str fn-name)
+           tests-formatted (str/join "\n"
+                                     (map (fn [{:keys [code expected]}]
+                                            (format "  - Code: %s\n    Expected: %s" code expected))
+                                          public-tests))]
+       (format
+        "Task: %s\nTarget Identifier: `%s`\n\nInstructions:\n%s\n\nPublic Examples & Unit Tests:\n%s\n\nImplement `%s` in pure, idiomatic Clojure. Use standard bindings and collections."
+        (or title fn-str) fn-str prompt tests-formatted fn-str)))))
 
 ;; =============================================================================
 ;; 4. Submission Detection

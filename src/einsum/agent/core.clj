@@ -607,7 +607,16 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
    No file I/O (slurp, spit, list-files), no system inspection (system-info, System/), and no reflection."
   []
   (sci/init
-   {:classes {'Math Math}
+   {:classes {'Math Math
+              'Character Character
+              'Integer Integer
+              'Long Long
+              'Double Double
+              'Float Float
+              'Short Short
+              'Byte Byte
+              'Boolean Boolean
+              'String String}
     :bindings {'println println
                'print print
                'prn prn
@@ -617,7 +626,16 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
   "Creates a safe SCI sandbox context for the general coding agent, populated with safe file and system introspection helpers."
   []
   (sci/init
-   {:classes {'Math Math}
+   {:classes {'Math Math
+              'Character Character
+              'Integer Integer
+              'Long Long
+              'Double Double
+              'Float Float
+              'Short Short
+              'Byte Byte
+              'Boolean Boolean
+              'String String}
     :bindings {'println println
                'print print
                'prn prn
