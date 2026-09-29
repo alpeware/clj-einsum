@@ -31,8 +31,8 @@ program).
 
 | Item | Track | Verdict |
 |---|---|---|
-| MultiPL-E humaneval-clj/mbpp-clj port | capability | done — 558 tasks ingested (161 HE + 397 MBPP); 447 dev / 111 sealed partition; 543/558 (97.31%) verified in pure SCI; 15 quarantined with diagnostics |
-| Eval harness v2 (KV cache, library port, --tool-syntax) | capability | done — 21.3% speedup on 31B; library resident in einsum.agent.core; --tool-syntax fenced unlocks E4B 50% & 31B my-comp |
+| MultiPL-E humaneval-clj/mbpp-clj port | capability | done — 558 tasks ingested (161 HE + 397 MBPP); 447 dev / 111 sealed partition; 543/558 (97.31%) verified in pure SCI; 15 quarantined with technical adjudications |
+| Eval harness v2 (KV cache, library port, --tool-syntax) | capability | done — 17.5%–21.3% speedup on 31B; library resident in einsum.agent.core; --tool-syntax fenced unlocks 30%–50% on E4B & 31B my-comp |
 | clojure_bench freeze (v1 → catalog) | capability | done — moved to `resources/catalog/gate3_evals/clojure_bench/`; rows carry `:harness-sha`/`:harness-dirty?` from 2026-09-27 |
 | E4B-QAT-INT4 eval | experiment | 3/10 union — beats PTQ-INT4 (1/10) and BF16 (~2/10); **student substrate decided** |
 | clojure_bench v1 instrument | capability | done — 200 ledger rows, sealed fixture, append-only |

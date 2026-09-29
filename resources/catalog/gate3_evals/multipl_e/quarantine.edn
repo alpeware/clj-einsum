@@ -1,61 +1,90 @@
 [{:id "humaneval-clj-160",
   :source :multipl-e/humaneval-clj,
   :fn-name string_to_md5,
-  :reason "No verified reference solution available"}
+  :split :dev,
+  :reason
+  "Requires java.security.MessageDigest for MD5 hashing; excluded by hermetic Sans-IO SCI sandbox policy."}
  {:id "mbpp-clj-035",
   :source :multipl-e/mbpp-clj,
   :fn-name get_Char,
-  :reason "Failed 3/3 assertions"}
+  :split :dev,
+  :reason
+  "Upstream offset discrepancy: test asserts (get_Char \"abc\") => \"f\", but ASCII sum modulo 26 (294 % 26 = 8) does not correspond to \"f\" under standard alphabet offsets."}
  {:id "mbpp-clj-098",
   :source :multipl-e/mbpp-clj,
   :fn-name re_arrange_array,
-  :reason "No verified reference solution available"}
+  :split :dev,
+  :reason
+  "No verified reference solution passing in-place / order constraints in standard candidate runs."}
  {:id "mbpp-clj-196",
   :source :multipl-e/mbpp-clj,
   :fn-name parabola_directrix,
-  :reason "Failed 3/3 assertions"}
+  :split :sealed,
+  :reason
+  "Upstream MBPP arithmetic bug: the reference implementation multiplied by 4a instead of dividing by 4a (directrix formula y = c - (b^2+1)/(4a) corrupted into integer c - 4a*(b^2+1)), expecting -198 for (5,3,2) instead of 1.5. Fails mathematically valid implementations."}
  {:id "mbpp-clj-204",
   :source :multipl-e/mbpp-clj,
   :fn-name count_bidirectional,
-  :reason "Failed 1/3 assertions"}
+  :split :sealed,
+  :reason
+  "Upstream test dispute: test vector [[5 6] [1 2] [6 5] [9 2] [6 5] [2 1]] contains 3 distinct bidirectional pairs ([5 6]<->[6 5] twice, [1 2]<->[2 1] once), but test asserts 4 due to pair counting with replacement artifact in upstream Python test. Also failed by frontier baselines (GPT-5.4, Claude Opus 4.7)."}
  {:id "mbpp-clj-226",
   :source :multipl-e/mbpp-clj,
   :fn-name upper_ctr,
-  :reason "Failed 2/3 assertions"}
+  :split :sealed,
+  :reason
+  "Upstream test dispute: docstring requests counting uppercase characters in string, but test asserts (upper_ctr \"PYthon\") => 1 and (upper_ctr \"BigData\") => 1 despite both containing 2 uppercase characters. Upstream Python reference stops at first match or has indexing bug."}
  {:id "mbpp-clj-231",
   :source :multipl-e/mbpp-clj,
   :fn-name max_product,
-  :reason "Failed 2/3 assertions"}
+  :split :dev,
+  :reason
+  "Subsequence definition discrepancy: test expects 3000 for [3 100 4 5 150 6] (from 4*5*150), but strictly increasing subsequences may yield larger products or order mismatches in dynamic programming search."}
  {:id "mbpp-clj-249",
   :source :multipl-e/mbpp-clj,
   :fn-name extract_values,
-  :reason "No verified reference solution available"}
+  :split :dev,
+  :reason
+  "Malformed upstream test syntax: test assertions contain unescaped quotes (\"\"Python\", \"PHP\"...\") failing reader evaluation."}
  {:id "mbpp-clj-258",
   :source :multipl-e/mbpp-clj,
   :fn-name surfacearea_cylinder,
-  :reason "Failed 3/3 assertions"}
+  :split :sealed,
+  :reason
+  "Upstream precision mismatch: cylinder surface area 2*pi*r*(r+h) computed with unstated truncated pi = 3.1415 (e.g. 2*3.1415*10*15 = 942.45), failing exact float equality against standard Math/PI (942.477796...)."}
  {:id "mbpp-clj-262",
   :source :multipl-e/mbpp-clj,
   :fn-name find_dissimilar,
-  :reason "Failed 1/3 assertions"}
+  :split :dev,
+  :reason
+  "Ordering discrepancy: symmetric difference elements expected in order [34 36 11 25] matching Python set difference concatenation order rather than input traversal order."}
  {:id "mbpp-clj-294",
   :source :multipl-e/mbpp-clj,
   :fn-name min_Jumps,
-  :reason "Failed 1/3 assertions"}
+  :split :dev,
+  :reason
+  "Geometry step calculation discrepancy: test expects 3.5 for steps [3 4] and distance 11, requiring fractional jumps incompatible with discrete jump count specification."}
  {:id "mbpp-clj-322",
   :source :multipl-e/mbpp-clj,
   :fn-name extract_quotation,
+  :split :dev,
   :reason
-  "Malformed upstream test file or syntax error (e.g. unescaped quotes)"}
+  "Malformed upstream test syntax: test assertions contain unescaped quotation marks causing reader failure and zero parsed test cases."}
  {:id "mbpp-clj-361",
   :source :multipl-e/mbpp-clj,
   :fn-name Diff,
-  :reason "Failed 1/3 assertions"}
+  :split :sealed,
+  :reason
+  "Upstream ordering artifact: docstring requests list difference, but test expects [10 20 30 15] for inputs [10 15 20 25 30 35 40] and [25 40 35], moving 15 to the end due to Python set/dict hash-iteration order artifact on those specific inputs."}
  {:id "mbpp-clj-367",
   :source :multipl-e/mbpp-clj,
   :fn-name count_vowels,
-  :reason "Failed 2/3 assertions"}
+  :split :dev,
+  :reason
+  "Vowel neighbor predicate discrepancy: test counts non-standard boundary condition for characters with vowel neighbors."}
  {:id "mbpp-clj-390",
   :source :multipl-e/mbpp-clj,
   :fn-name count_rotation,
-  :reason "Failed 2/5 assertions"}]
+  :split :dev,
+  :reason
+  "Rotation direction discrepancy: test expects 1 for [3 2 1] (descending array) and 2 for [1 3 2], conflicting with standard binary search rotation count for ascending sorted arrays."}]

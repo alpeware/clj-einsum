@@ -170,28 +170,105 @@
 ;; =============================================================================
 
 (deftest test-dry-run-harness-execution
-  (testing "clojure_bench runner executes --dry-run on multipl-e-sealed with valid ledger output"
+  (testing "clojure_bench runner executes --dry-run on multipl-e-sealed with quarantine filtering"
     (let [tmp-results (str "scratch/test_multipl_e_sealed_results_" (System/currentTimeMillis) ".edn")
           tmp-summary (str "scratch/test_multipl_e_sealed_summary_" (System/currentTimeMillis) ".csv")
           _ (io/make-parents (io/file tmp-results))
           _ (io/make-parents (io/file tmp-summary))
-          opts (bench-run/parse-bench-cli-args
-                ["--tasks" "multipl-e-sealed"
-                 "--dry-run" "true"
-                 "--mode" "single-shot"
-                 "--quiet" "true"
-                 "--overwrite" "true"
-                 "--results-file" tmp-results
-                 "--summary-file" tmp-summary])
-          _ (bench-run/run-benchmark opts)
-          rows (with-open [r (io/reader tmp-results)]
-                 (mapv edn/read-string (line-seq r)))]
-      (is (= 111 (count rows)) "Dry-run on multipl-e-sealed must yield exactly 111 rows")
-      (is (every? #(and (string? (:harness-sha %)) (pos? (count (:harness-sha %)))) rows))
-      (is (every? #(and (string? (:sealed-sha %)) (pos? (count (:sealed-sha %)))) rows))
-      (is (every? #(and (string? (:prompt-sha %)) (pos? (count (:prompt-sha %)))) rows))
-      (is (every? #(number? (:temperature %)) rows))
-      (is (every? #(boolean? (:dry-run? %)) rows))
+
+          ;; 1. Default run excludes 5 quarantined tasks (111 - 5 = 106 rows)
+          opts-filtered (bench-run/parse-bench-cli-args
+                         ["--tasks" "multipl-e-sealed"
+                          "--dry-run" "true"
+                          "--mode" "single-shot"
+                          "--quiet" "true"
+                          "--overwrite" "true"
+                          "--results-file" tmp-results
+                          "--summary-file" tmp-summary])
+          _ (bench-run/run-benchmark opts-filtered)
+          rows-filtered (with-open [r (io/reader tmp-results)]
+                          (mapv edn/read-string (line-seq r)))]
+      (is (= 106 (count rows-filtered)) "Dry-run without quarantine must yield 106 filtered rows")
+      (is (every? #(and (string? (:harness-sha %)) (pos? (count (:harness-sha %)))) rows-filtered))
+      (is (every? #(and (string? (:sealed-sha %)) (pos? (count (:sealed-sha %)))) rows-filtered))
+      (is (every? #(and (string? (:prompt-sha %)) (pos? (count (:prompt-sha %)))) rows-filtered))
+      (is (every? #(number? (:temperature %)) rows-filtered))
+      (is (every? #(boolean? (:dry-run? %)) rows-filtered))
+
+      ;; 2. Run with --include-quarantine true includes all 111 tasks
+      (io/delete-file tmp-results true)
+      (let [opts-all (bench-run/parse-bench-cli-args
+                      ["--tasks" "multipl-e-sealed"
+                       "--include-quarantine" "true"
+                       "--dry-run" "true"
+                       "--mode" "single-shot"
+                       "--quiet" "true"
+                       "--overwrite" "true"
+                       "--results-file" tmp-results
+                       "--summary-file" tmp-summary])
+            _ (bench-run/run-benchmark opts-all)
+            rows-all (with-open [r (io/reader tmp-results)]
+                       (mapv edn/read-string (line-seq r)))]
+        (is (= 111 (count rows-all)) "Dry-run with --include-quarantine true must yield 111 rows"))
+
       ;; Cleanup temporary files
       (io/delete-file tmp-results true)
       (io/delete-file tmp-summary true))))
+
+;; =============================================================================
+;; 6. Review Follow-ups: Zero-Test Hole, Truthiness Coercion, Fenced Preset & Provenance
+;; =============================================================================
+
+(deftest test-zero-test-grading-hole
+  (testing "grade-submission does not score empty test cases as a vacuous pass"
+    (let [res (bench-core/grade-submission "(defn foo [x] x)" [])]
+      (is (false? (:all-passed? res)) "Empty test cases must fail")
+      (is (= 0 (:passed-count res)))
+      (is (= 0 (:total-count res)))
+      (is (str/includes? (:error res) "Zero test cases provided")))))
+
+(deftest test-truthiness-coercion
+  (testing "is-form->test-case applies boolean coercion to non-equality assertion forms"
+    (let [eq-tc (ingest/is-form->test-case '(is (= (candidate 1) 2)) 'my-fn)
+          bare-tc (ingest/is-form->test-case '(is (pos? (candidate 1))) 'my-fn)]
+      (is (= {:code "(my-fn 1)" :expected "2"} eq-tc)
+          "Equality assertions retain direct expected value")
+      (is (= {:code "(boolean (pos? (my-fn 1)))" :expected "true"} bare-tc)
+          "Bare assertions wrap expression in (boolean ...) with expected true"))))
+
+(deftest test-fenced-tool-syntax-wiring
+  (testing "MultiPL-E task presets default to :tool-syntax :fenced and respect override"
+    (let [dev-opts (bench-run/parse-bench-cli-args ["--tasks" "multipl-e-dev"])
+          sealed-opts (bench-run/parse-bench-cli-args ["--tasks" "multipl-e-sealed"])
+          override-opts (bench-run/parse-bench-cli-args ["--tasks" "multipl-e-dev" "--tool-syntax" "native"])]
+      (is (= :fenced (:tool-syntax dev-opts)) "multipl-e-dev must default to :fenced")
+      (is (= :fenced (:tool-syntax sealed-opts)) "multipl-e-sealed must default to :fenced")
+      (is (= :native (:tool-syntax override-opts)) "--tool-syntax native must override default"))))
+
+(deftest test-sealed-quarantine-adjudications
+  (testing "All 5 sealed quarantined tasks have specific technical adjudications"
+    (let [quarantine (edn/read-string (slurp "resources/catalog/gate3_evals/multipl_e/quarantine.edn"))
+          q-map (into {} (map (juxt :id identity) quarantine))
+          sealed-q-ids #{"mbpp-clj-196" "mbpp-clj-204" "mbpp-clj-226" "mbpp-clj-258" "mbpp-clj-361"}]
+      (is (= 15 (count quarantine)) "Total 15 quarantined tasks in catalog")
+      (is (every? #(contains? q-map %) sealed-q-ids) "All 5 sealed tasks present in quarantine")
+      (doseq [id sealed-q-ids
+              :let [entry (get q-map id)]]
+        (is (= :sealed (:split entry)) (str id " must have :split :sealed"))
+        (is (not (str/starts-with? (:reason entry) "Failed"))
+            (str id " must have technical adjudication, not generic assertion failure: " (:reason entry)))
+        (is (> (count (:reason entry)) 50)
+            (str id " must have substantive diagnostic rationale"))))))
+
+(deftest test-provenance-ledger
+  (testing "provenance.edn catalog file tracks exact source for every reference solution"
+    (let [prov-file (io/file "resources/catalog/gate3_evals/multipl_e/provenance.edn")
+          _ (is (.exists prov-file) "provenance.edn must exist in catalog")
+          prov (edn/read-string (slurp prov-file))
+          origins (set (map :origin prov))]
+      (is (= 604 (count prov)) "Exactly 604 reference solution provenance entries")
+      (is (set/subset? origins #{:clojure-llm/run :synthetic-reference :dev-50-legacy :patch-fix})
+          "Every entry must have an audited origin")
+      (is (every? #(string? (:source %)) prov) "Every entry must identify source run/file")
+      (is (every? #(contains? #{:verified :quarantined} (:status %)) prov)
+          "Every entry must record verification status"))))

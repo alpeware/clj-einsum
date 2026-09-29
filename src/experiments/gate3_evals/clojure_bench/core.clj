@@ -301,12 +301,22 @@ Only provide your final response once your definition passes all public tests.")
    (grade-submission (create-tightened-grading-ctx) code-str test-cases))
   ([sci-ctx code-str test-cases]
    (let [clean-code (str/trim (or code-str ""))]
-     (if (empty? clean-code)
+     (cond
+       (empty? clean-code)
        {:all-passed? false
         :passed-count 0
         :total-count (count test-cases)
         :results []
         :error "Empty candidate code"}
+
+       (empty? test-cases)
+       {:all-passed? false
+        :passed-count 0
+        :total-count 0
+        :results []
+        :error "Zero test cases provided for grading"}
+
+       :else
        (try
          ;; 1. Evaluate candidate definition in the tightened context with timeout
          (eval-with-timeout sci-ctx clean-code 5000)
@@ -330,7 +340,7 @@ Only provide your final response once your definition passes all public tests.")
                              test-cases)
                passed-count (count (filter :passed? results))
                total-count (count test-cases)]
-           {:all-passed? (= passed-count total-count)
+           {:all-passed? (and (pos? total-count) (= passed-count total-count))
             :passed-count passed-count
             :total-count total-count
             :results results

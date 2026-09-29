@@ -35,6 +35,7 @@
    :early-exit false
    :nudge-short-circuit false
    :overwrite false
+   :include-quarantine false
    :dry-run false
    :quiet false
    :public-tasks-file "resources/catalog/gate3_evals/clojure_bench/tasks_public.edn"
@@ -397,6 +398,14 @@
 ;; 4. Benchmark Orchestration & Reporting
 ;; =============================================================================
 
+(defn- load-quarantine-ids
+  "Loads set of quarantined task IDs from catalog if present."
+  []
+  (let [qf (io/file "resources/catalog/gate3_evals/multipl_e/quarantine.edn")]
+    (if (.exists qf)
+      (set (keep :id (try (edn/read-string (slurp qf)) (catch Throwable _ nil))))
+      #{})))
+
 (defn- filter-tasks
   "Filters task collection based on `--tasks` flag."
   [tasks task-filter-str]
@@ -436,7 +445,13 @@
                           "under sha " harness-sha ". Record runs should use a clean tree.")))
         public-tasks (edn/read-string (slurp public-file))
         sealed-map (into {} (map (juxt :id :hidden-tests) (edn/read-string (slurp sealed-file))))
-        selected-tasks (filter-tasks public-tasks (:tasks opts))
+        raw-selected (filter-tasks public-tasks (:tasks opts))
+        quarantine-ids (load-quarantine-ids)
+        include-quarantine? (boolean (:include-quarantine opts))
+        selected-tasks (if include-quarantine?
+                         raw-selected
+                         (filterv #(not (contains? quarantine-ids (:id %))) raw-selected))
+        n-quarantined (- (count raw-selected) (count selected-tasks))
         run-mode (keyword (:mode opts))
 
         _ (when-not (:quiet opts)
@@ -449,6 +464,8 @@
             (println (format "Sealed SHA-256       : %s" sealed-sha))
             (println (format "Evaluation Mode      : %s" run-mode))
             (println (format "Selected Tasks       : %d/%d" (count selected-tasks) (count public-tasks)))
+            (when (pos? n-quarantined)
+              (println (format "Quarantine Filter    : Excluded %d quarantined tasks (use --include-quarantine true to evaluate)" n-quarantined)))
             (println (format "Dry Run Mode         : %s" dry-run?))
             (println (format "Results File         : %s" (.getPath results-file)))
             (println (format "Summary File         : %s" (.getPath summary-file)))
@@ -557,7 +574,8 @@
           (let [flag (subs arg 2)
                 k (keyword flag)]
             (if (or (= flag "dry-run") (= flag "quiet") (= flag "overwrite")
-                    (= flag "thinking") (= flag "nudge-on-no-tool"))
+                    (= flag "thinking") (= flag "nudge-on-no-tool")
+                    (= flag "include-quarantine"))
               (if (and (> (count rem-args) 1) (not (str/starts-with? (second rem-args) "--")))
                 (recur (subvec rem-args 2) (assoc opts k (Boolean/parseBoolean (second rem-args))))
                 (recur (subvec rem-args 1) (assoc opts k true)))
@@ -586,6 +604,9 @@
                  :public-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_dev.edn"
                  :sealed-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_dev.edn"
                  :prompt-template (or (:prompt-template raw-opts) :multipl-e-v0)
+                 :tool-syntax (if (contains? user-flags "tool-syntax")
+                                (keyword (str/replace (str (:tool-syntax raw-opts)) #"^:+" ""))
+                                :fenced)
                  :tasks "all")
 
           (= (:tasks raw-opts) "multipl-e-sealed")
@@ -593,6 +614,9 @@
                  :public-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_sealed.edn"
                  :sealed-tasks-file "resources/catalog/gate3_evals/multipl_e/tasks_sealed.edn"
                  :prompt-template (or (:prompt-template raw-opts) :multipl-e-v0)
+                 :tool-syntax (if (contains? user-flags "tool-syntax")
+                                (keyword (str/replace (str (:tool-syntax raw-opts)) #"^:+" ""))
+                                :fenced)
                  :tasks "all")
 
           (or (= (:tasks raw-opts) "dev-50") (= (:tasks raw-opts) "multipl-e-dev-50"))
@@ -612,6 +636,7 @@
                (string? (:top-k normalized-tasks-opts)) (update :top-k #(Long/parseLong %))
                (string? (:repetition-penalty normalized-tasks-opts)) (update :repetition-penalty #(Double/parseDouble %))
                (string? (:dry-run normalized-tasks-opts)) (update :dry-run #(Boolean/parseBoolean %))
+               (string? (:include-quarantine normalized-tasks-opts)) (update :include-quarantine #(Boolean/parseBoolean %))
                (string? (:thinking normalized-tasks-opts)) (update :thinking #(Boolean/parseBoolean %))
                (string? (:overwrite normalized-tasks-opts)) (update :overwrite #(Boolean/parseBoolean %))
                (string? (:nudge-on-no-tool normalized-tasks-opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
