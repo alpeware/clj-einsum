@@ -157,7 +157,7 @@ To prevent multi-hypothesis shopping across variants and models, execution follo
    ./tools/gemma4.sh bench --tasks multipl-e-dev --limit 50 --prompt-template <variant> --model .models/gemma-4-E4B-it-qat-int4
    ```
 2. **Downselection Rule**: Select **at most one** winning candidate $P^*$ (highest solve rate on the 50-task pilot; ties broken by smaller token count).
-   - *Early Stop*: If neither $P_1$ nor $P_2$ beats $P_0$ by $\ge 2$ tasks on the pilot, the experiment terminates as `REJECT` without spending compute on the full 447-task dev corpus.
+   - *Early Stop*: If neither $P_1$ nor $P_2$ beats $P_0$ by $\ge 2$ tasks on the pilot, the experiment terminates directly as `REJECT` without spending compute on the full 447-task dev corpus or evaluating sealed-10 (no candidate selected).
 3. Multiplicity is resolved: exactly **one** candidate $P^*$ advances to Phase 3 ($m=1$).
 
 ### Phase 3: Full MultiPL-E Dev Benchmark ($N=447$)
@@ -177,15 +177,31 @@ To prevent multi-hypothesis shopping across variants and models, execution follo
 
 ## 6. Complete Decision Rules (Zero Dead Zones)
 
-Let $\Delta_{\text{E4B}} = \text{PassRate}(P^*) - \text{PassRate}(P_0)$ on MultiPL-E dev ($N=447$):
+To eliminate all classification ambiguity and dead zones, evaluation follows a strict **precedence hierarchy**:
 
-| Outcome | Quantitative Criteria on Primary Substrate (`E4B-QAT`) | Action |
+1. **`KILLED` Triggers Dominate**: If any fatal condition occurs, the experiment terminates immediately as `KILLED`:
+   - $\Delta_{\text{E4B}} < 0.0\%$ (net negative flips on the dev corpus, $b < c$)
+   - OR any adverse flip on previously passing tasks in `clojure_bench` sealed-10
+   - OR any canary leak detected by the mechanical echoing detector
+   - OR candidate prompt length $> 600$ tokens
+   - OR average per-task wall-clock time inflation $> 25\%$ vs zero-shot `:fenced` baseline.
+2. **`ADOPT` Requires All Conjoined Criteria**: If no `KILLED` trigger occurs, the candidate is `ADOPT` if and only if **all** of the following hold:
+   - $\Delta_{\text{E4B}} \ge +5.0\%$ on the 447-task MultiPL-E dev corpus
+   - AND statistical significance holds via McNemar's test ($p < 0.05$)
+   - AND $\Delta_{\text{31B}} \ge 0.0\%$ on the dev corpus (teacher non-regression)
+   - AND zero adverse flips on `clojure_bench` sealed-10 (both E4B and 31B)
+   - AND zero canary leaks detected
+   - AND prompt length $\le 600$ tokens.
+3. **`REJECT` is the Exhaustive Fallback**: If no `KILLED` trigger occurs and the candidate fails to meet all conjoined `ADOPT` criteria (e.g. $+0.0\% \le \Delta_{\text{E4B}} < +5.0\%$, or $\Delta_{\text{E4B}} \ge +5.0\%$ but failing McNemar's $p < 0.05$, or $\Delta_{\text{31B}} < 0.0\%$, or Phase 2 early-stop triggered), the outcome is deterministically `REJECT`.
+   - *Phase 2 Early-Stop Note*: If neither $P_1$ nor $P_2$ beats $P_0$ by $\ge 2$ tasks on the pilot, the experiment terminates directly as `REJECT` without evaluating sealed-10 (vacuous with no candidate selected).
+
+| Outcome | Summary Criteria | Action |
 |---|---|---|
-| **ADOPT** | $\Delta_{\text{E4B}} \ge +5.0\%$ with McNemar's test $p < 0.05$<br>AND zero adverse flips on `clojure_bench` sealed-10 (both E4B and 31B)<br>AND $\Delta_{\text{31B}} \ge 0.0\%$ on dev<br>AND zero canary leaks detected<br>AND prompt length $\le 600$ tokens | Promote $P^*$ as default agentic prompt in `einsum.agent.core`; export 31B teacher self-correction trajectories for distillation |
-| **REJECT** | $0.0\% \le \Delta_{\text{E4B}} < +5.0\%$ (insufficient capability gain to justify few-shot overhead)<br>AND zero adverse flips on `clojure_bench` sealed-10<br>AND zero canary leaks detected | Reject few-shot worked examples; document null result; proceed directly to LoRA SFT distillation with zero-shot prompt |
-| **KILLED** | $\Delta_{\text{E4B}} < 0.0\%$ (statistically significant negative transfer)<br>OR any adverse flip on `clojure_bench` sealed-10<br>OR any canary leak detected<br>OR prompt length $> 600$ tokens<br>OR wall-clock inflation $> 25\%$ | Immediately terminate prompt tuning track; record fatal failure mode in decision record |
+| **ADOPT** | All conjoined ADOPT criteria satisfied ($\Delta_{\text{E4B}} \ge +5.0\%$, McNemar $p < 0.05$, $\Delta_{\text{31B}} \ge 0.0\%$, zero sealed-10 regressions, zero canary leaks, prompt $\le 600$ tok) | Promote $P^*$ as default agentic prompt in `einsum.agent.core`; export 31B teacher self-correction trajectories for distillation |
+| **REJECT** | No KILLED trigger, but fails to satisfy all conjoined ADOPT criteria (e.g. $+0.0\% \le \Delta_{\text{E4B}} < +5.0\%$, or non-significant gain $p \ge 0.05$, or $\Delta_{\text{31B}} < 0.0\%$, or Phase 2 pilot early-stop) | Reject few-shot worked examples; document null result; proceed directly to LoRA SFT distillation with zero-shot prompt |
+| **KILLED** | Any fatal condition triggered ($\Delta_{\text{E4B}} < 0.0\%$, or any adverse flip on sealed-10, or any canary leak, or prompt $> 600$ tok, or wall-clock inflation $> 25\%$) | Immediately terminate prompt tuning track; record fatal failure mode in decision record |
 
-*Note on Complete Partition*: Every real value of $\Delta_{\text{E4B}}$ maps deterministically to exactly one outcome: $(-\infty, 0.0\%) \to \text{KILLED}$, $[0.0\%, 5.0\%) \to \text{REJECT}$, $[5.0\%, \infty) \to \text{ADOPT}$. Zero dead zones or classification gaps exist.
+*Note on Complete Partition*: The precedence order guarantees every possible outcome maps deterministically to exactly one verdict. Edge cases such as $\Delta_{\text{E4B}} \ge +5.0\%$ with $p \ge 0.05$ or $\Delta_{\text{31B}} < 0.0\%$ without a KILLED trigger route cleanly to `REJECT`. Zero unclassified states exist.
 
 ---
 
@@ -195,3 +211,4 @@ Let $\Delta_{\text{E4B}} = \text{PassRate}(P^*) - \text{PassRate}(P_0)$ on Multi
 |---|---|---|
 | 2026-09-29 | `proposed` | Stage 1 RFC drafted; unlocked by cataloged MultiPL-E 447-task dev corpus; targets agentic self-correction failure modes observed in `harness_v2`. |
 | 2026-09-29 | `amended` | Hardened spec per review: partitioned decision space with zero dead zones; harmonized REJECT vs KILLED; pre-registered McNemar's paired test; established single-candidate downselection ($m=1$); pre-registered mechanical canary echoing detector; dropped DOA $P_3$; designated MultiPL-E sealed-111 as reporting-only / touch-once; set Generation 0. |
+| 2026-09-29 | `amended` | Refined precedence hierarchy (KILLED dominates -> ADOPT all conjoined -> REJECT exhaustive fallback); eliminated Case A/B fallthroughs; dropped non-mechanical parenthetical on Δ < 0; noted Phase 2 early-stop skips sealed-10. |
