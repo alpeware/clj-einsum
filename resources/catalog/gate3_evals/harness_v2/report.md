@@ -3,16 +3,17 @@
 **Capability**: `harness_v2` \
 **Gate**: `gate3_evals` \
 **Type**: `capability` \
-**Status**: `in-progress` \
+**Status**: `done` \
+**Verdict**: `done` \
 **Target Hardware**: AMD Radeon RX 7900 XTX (24GB) \
 **Verification Commit**: `HEAD` \
-**Date**: 2026-09-27
+**Date**: 2026-09-29
 
 ---
 
 ## 1. Executive Summary
 
-RFC [`resources/proposals/gate3_evals/harness_v2/spec.md`](spec.md) proposed runtime and harness optimizations to accelerate evaluation throughput ahead of the 1,116-cell MultiPL-E port.
+RFC [`resources/catalog/gate3_evals/harness_v2/spec.md`](spec.md) proposed runtime and harness optimizations to accelerate evaluation throughput ahead of the 1,116-cell MultiPL-E port.
 
 Initial runs of the combined optimizations exhibited a severe pass-rate regression (falling from 11/20 in v1 to 6/20). To isolate the root cause, a controlled falsification experiment was executed:
 1. **Root Cause Analysis**: Identified that the regression was driven by two structural runtime bugs:
