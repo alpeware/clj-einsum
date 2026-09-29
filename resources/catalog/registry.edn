@@ -66,4 +66,21 @@
                   :report-path "resources/catalog/gate3_evals/harness_v2/report.md"
                   :results-path "resources/catalog/gate3_evals/harness_v2/results.edn"
                   :summary-path "resources/catalog/gate3_evals/harness_v2/summary.csv"
+                  :verified-by nil}
+   :multipl-e    {:gate :gate3-evals
+                  :slug "multipl_e"
+                  :title "MultiPL-E humaneval-clj/mbpp-clj Port"
+                  :track :capability
+                  :status :active
+                  :verdict :done
+                  :frozen "2026-09-29"
+                  :generation 0
+                  :target-hardware "AMD Radeon RX 7900 XTX (24GB)"
+                  :spec-path "resources/catalog/gate3_evals/multipl_e/spec.md"
+                  :tasks-dev-path "resources/catalog/gate3_evals/multipl_e/tasks_dev.edn"
+                  :tasks-sealed-path "resources/catalog/gate3_evals/multipl_e/tasks_sealed.edn"
+                  :solutions-path "resources/catalog/gate3_evals/multipl_e/solutions.edn"
+                  :quarantine-path "resources/catalog/gate3_evals/multipl_e/quarantine.edn"
+                  :provenance-path "resources/catalog/gate3_evals/multipl_e/provenance.edn"
+                  :sealed-sha256 "c5bce6c97e320f1e491e67fc9f0c0d8037ef2889ecd3e130ac1ca75a614d309f"
                   :verified-by nil}}}
