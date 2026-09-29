@@ -78,14 +78,20 @@
 
 (defn is-form->test-case
   "Converts a single `(is ...)` form into normalized `{:code ... :expected ...}`.
-   Applies `(boolean ...)` coercion on non-equality assertions to match Clojure test truthiness semantics."
+   Applies `(boolean ...)` coercion on all assertions expecting \"true\" (including bare forms)
+   to match Clojure test truthiness semantics."
   [is-form target-sym]
   (let [inner (second is-form)
         replaced (walk/postwalk (fn [x] (if (= x 'candidate) target-sym x)) inner)]
     (if (and (seq? replaced) (= '= (first replaced)) (= 3 (count replaced)))
-      {:code (pr-str (nth replaced 1))
-       :expected (pr-str (nth replaced 2))}
-      {:code (pr-str (list 'boolean replaced))
+      (let [c (nth replaced 1)
+            exp (pr-str (nth replaced 2))]
+        (if (= exp "true")
+          {:code (pr-str (if (and (seq? c) (= 'boolean (first c))) c (list 'boolean c)))
+           :expected "true"}
+          {:code (pr-str c)
+           :expected exp}))
+      {:code (pr-str (if (and (seq? replaced) (= 'boolean (first replaced))) replaced (list 'boolean replaced)))
        :expected "true"})))
 
 (defn parse-test-cases
@@ -252,21 +258,31 @@
    "mbpp-clj-390"
    "Rotation direction discrepancy: test expects 1 for [3 2 1] (descending array) and 2 for [1 3 2], conflicting with standard binary search rotation count for ascending sorted arrays."})
 
-(defn- load-supplementary-solutions []
-  (let [patch-f (io/file "scratch/patch_fixes.clj")
-        solve-f (io/file "scratch/solve_remaining.clj")]
-    (when (.exists patch-f)
-      (try (load-file (.getPath patch-f)) (catch Throwable _ nil)))
-    (when (.exists solve-f)
-      (try (load-file (.getPath solve-f)) (catch Throwable _ nil)))))
+(def PATCH-FIX-IDS
+  #{"mbpp-clj-157" "mbpp-clj-183" "mbpp-clj-197" "mbpp-clj-204" "mbpp-clj-206"
+    "mbpp-clj-266" "mbpp-clj-295" "mbpp-clj-368" "mbpp-clj-390"})
+
+(def SYNTHETIC-REFERENCE-IDS
+  #{"humaneval-clj-020" "humaneval-clj-089" "humaneval-clj-093" "humaneval-clj-138"
+    "humaneval-clj-149" "humaneval-clj-150" "humaneval-clj-152" "mbpp-clj-020"
+    "mbpp-clj-024" "mbpp-clj-035" "mbpp-clj-036" "mbpp-clj-038" "mbpp-clj-052"
+    "mbpp-clj-055" "mbpp-clj-079" "mbpp-clj-081" "mbpp-clj-101" "mbpp-clj-112"
+    "mbpp-clj-117" "mbpp-clj-118" "mbpp-clj-122" "mbpp-clj-143" "mbpp-clj-145"
+    "mbpp-clj-146" "mbpp-clj-148" "mbpp-clj-153" "mbpp-clj-160" "mbpp-clj-163"
+    "mbpp-clj-165" "mbpp-clj-166" "mbpp-clj-167" "mbpp-clj-168" "mbpp-clj-170"
+    "mbpp-clj-175" "mbpp-clj-179" "mbpp-clj-189" "mbpp-clj-193" "mbpp-clj-196"
+    "mbpp-clj-198" "mbpp-clj-208" "mbpp-clj-209" "mbpp-clj-210" "mbpp-clj-211"
+    "mbpp-clj-217" "mbpp-clj-224" "mbpp-clj-226" "mbpp-clj-231" "mbpp-clj-236"
+    "mbpp-clj-256" "mbpp-clj-258" "mbpp-clj-262" "mbpp-clj-274" "mbpp-clj-281"
+    "mbpp-clj-286" "mbpp-clj-290" "mbpp-clj-292" "mbpp-clj-294" "mbpp-clj-298"
+    "mbpp-clj-301" "mbpp-clj-305" "mbpp-clj-313" "mbpp-clj-327" "mbpp-clj-344"
+    "mbpp-clj-361" "mbpp-clj-364" "mbpp-clj-365" "mbpp-clj-367" "mbpp-clj-382"
+    "mbpp-clj-388"})
 
 (defn generate-provenance-records
   "Builds a comprehensive provenance catalog for all solutions and quarantined tasks."
   [base-dir sols quarantine normalized-tasks]
-  (load-supplementary-solutions)
-  (let [patch-sols (try (var-get (resolve 'scratch.patch-fixes/fixes)) (catch Throwable _ {}))
-        solve-sols (try (var-get (resolve 'scratch.solve-remaining/solutions)) (catch Throwable _ {}))
-        verified-json (try (json/read-str (slurp (io/file base-dir "data/sft/verified_solutions.json")) :key-fn keyword) (catch Throwable _ {}))
+  (let [verified-json (try (json/read-str (slurp (io/file base-dir "data/sft/verified_solutions.json")) :key-fn keyword) (catch Throwable _ {}))
         task-map (into {} (map (juxt :id identity) normalized-tasks))
         runs-dir (io/file base-dir "benchmark/results")
         run-names (when (.exists runs-dir)
@@ -276,11 +292,11 @@
             (let [str-id (str id)
                   q (get quarantine-map str-id)
                   orig (cond
-                         (contains? patch-sols str-id)
-                         {:origin :patch-fix :source "scratch/patch_fixes.clj"}
+                         (contains? PATCH-FIX-IDS str-id)
+                         {:origin :patch-fix :source "resources/catalog/gate3_evals/multipl_e/solutions.edn"}
 
-                         (contains? solve-sols str-id)
-                         {:origin :synthetic-reference :source "scratch/solve_remaining.clj"}
+                         (contains? SYNTHETIC-REFERENCE-IDS str-id)
+                         {:origin :synthetic-reference :source "resources/catalog/gate3_evals/multipl_e/solutions.edn"}
 
                          :else
                          (let [t (get task-map str-id)
@@ -298,7 +314,7 @@
                                (if v
                                  {:origin :clojure-llm/verified-sft :source "data/sft/verified_solutions.json" :contributors (:contributors v)}
                                  (if (re-matches #"(humaneval|mbpp)-clj-\d+" str-id)
-                                   {:origin :synthetic-reference :source "scratch/solve_remaining.clj"}
+                                   {:origin :synthetic-reference :source "resources/catalog/gate3_evals/multipl_e/solutions.edn"}
                                    {:origin :dev-50-legacy :source "resources/catalog/gate3_evals/multipl_e/dev_50_public.edn"}))))))]
               (merge orig
                      {:id str-id

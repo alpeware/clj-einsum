@@ -228,13 +228,24 @@
       (is (str/includes? (:error res) "Zero test cases provided")))))
 
 (deftest test-truthiness-coercion
-  (testing "is-form->test-case applies boolean coercion to non-equality assertion forms"
+  (testing "is-form->test-case applies boolean coercion to non-equality assertion forms and equality expecting true"
     (let [eq-tc (ingest/is-form->test-case '(is (= (candidate 1) 2)) 'my-fn)
+          eq-true-tc (ingest/is-form->test-case '(is (= (candidate 1) true)) 'my-fn)
           bare-tc (ingest/is-form->test-case '(is (pos? (candidate 1))) 'my-fn)]
       (is (= {:code "(my-fn 1)" :expected "2"} eq-tc)
           "Equality assertions retain direct expected value")
+      (is (= {:code "(boolean (my-fn 1))" :expected "true"} eq-true-tc)
+          "Equality assertions expecting true wrap expression in (boolean ...)")
       (is (= {:code "(boolean (pos? (my-fn 1)))" :expected "true"} bare-tc)
-          "Bare assertions wrap expression in (boolean ...) with expected true"))))
+          "Bare assertions wrap expression in (boolean ...) with expected true")))
+  (testing "Committed catalog contains boolean coercion for all assertions expecting true"
+    (let [dev-tasks (edn/read-string (slurp "resources/catalog/gate3_evals/multipl_e/tasks_dev.edn"))
+          sealed-tasks (edn/read-string (slurp "resources/catalog/gate3_evals/multipl_e/tasks_sealed.edn"))
+          all-tc (mapcat (fn [t] (concat (:public-tests t) (:hidden-tests t))) (concat dev-tasks sealed-tasks))
+          true-tc (filter #(= (:expected %) "true") all-tc)]
+      (is (= 232 (count true-tc)) "Exactly 232 test cases in committed catalog expect true")
+      (is (every? #(str/starts-with? (:code %) "(boolean ") true-tc)
+          "All 232 test cases expecting true must wrap code in (boolean ...)"))))
 
 (deftest test-fenced-tool-syntax-wiring
   (testing "MultiPL-E task presets default to :tool-syntax :fenced and respect override"
@@ -267,7 +278,7 @@
           prov (edn/read-string (slurp prov-file))
           origins (set (map :origin prov))]
       (is (= 604 (count prov)) "Exactly 604 reference solution provenance entries")
-      (is (set/subset? origins #{:clojure-llm/run :synthetic-reference :dev-50-legacy :patch-fix})
+      (is (set/subset? origins #{:clojure-llm/run :synthetic-reference :dev-50-legacy :patch-fix :clojure-llm/verified-sft})
           "Every entry must have an audited origin")
       (is (every? #(string? (:source %)) prov) "Every entry must identify source run/file")
       (is (every? #(contains? #{:verified :quarantined} (:status %)) prov)

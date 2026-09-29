@@ -1,18 +1,20 @@
 [{:hidden-tests
-  [{:code "(has_close_elements [1.0 2.0 5.9 4.0 5.0] 0.95)",
+  [{:code "(boolean (has_close_elements [1.0 2.0 5.9 4.0 5.0] 0.95))",
     :expected "true"}
    {:code "(has_close_elements [1.0 2.0 5.9 4.0 5.0] 0.8)",
     :expected "false"}
-   {:code "(has_close_elements [1.0 2.0 3.0 4.0 5.0 2.0] 0.1)",
+   {:code
+    "(boolean (has_close_elements [1.0 2.0 3.0 4.0 5.0 2.0] 0.1))",
     :expected "true"}
-   {:code "(has_close_elements [1.1 2.2 3.1 4.1 5.1] 1.0)",
+   {:code "(boolean (has_close_elements [1.1 2.2 3.1 4.1 5.1] 1.0))",
     :expected "true"}
    {:code "(has_close_elements [1.1 2.2 3.1 4.1 5.1] 0.5)",
     :expected "false"}],
   :fn-name has_close_elements,
   :source :multipl-e/humaneval-clj,
   :public-tests
-  [{:code "(has_close_elements [1.0 2.0 3.9 4.0 5.0 2.2] 0.3)",
+  [{:code
+    "(boolean (has_close_elements [1.0 2.0 3.9 4.0 5.0 2.2] 0.3))",
     :expected "true"}
    {:code "(has_close_elements [1.0 2.0 3.9 4.0 5.0 2.2] 0.05)",
     :expected "false"}],
@@ -100,10 +102,12 @@
   "(defn get_positive\n  \"Return only positive numbers in the list.\n  >>> (get_positive [-1 2 -4 5 6])\n  [2 5 6]\n  >>> (get_positive [5 3 -5 2 -3 3 9 0 123 1 -10])\n  [5 3 2 3 9 123 1]\"\n  [l]\n  ",
   :id "humaneval-clj-031"}
  {:hidden-tests
-  [{:code "(triples_sum_to_zero [1 3 -2 1])", :expected "true"}
+  [{:code "(boolean (triples_sum_to_zero [1 3 -2 1]))",
+    :expected "true"}
    {:code "(triples_sum_to_zero [1 2 3 7])", :expected "false"}
    {:code "(triples_sum_to_zero [1 2 5 7])", :expected "false"}
-   {:code "(triples_sum_to_zero [2 4 -5 3 9 7])", :expected "true"}
+   {:code "(boolean (triples_sum_to_zero [2 4 -5 3 9 7]))",
+    :expected "true"}
    {:code "(triples_sum_to_zero [1])", :expected "false"}
    {:code "(triples_sum_to_zero [1 3 5 -100])", :expected "false"}
    {:code "(triples_sum_to_zero [100 3 5 -100])", :expected "false"}],
@@ -233,19 +237,19 @@
   "(defn strange_sort_list\n  \"Given list of integers, return list in strange order.\n  Strange sorting, is when you start with the minimum value,\n  then maximum of the remaining integers, then minimum and so on.\n  Examples:\n  >>> (strange_sort_list [1 2 3 4])\n  [1 4 2 3]\n  >>> (strange_sort_list [5 5 5 5])\n  [5 5 5 5]\n  >>> (strange_sort_list [])\n  []\"\n  [lst]\n  ",
   :id "humaneval-clj-068"}
  {:hidden-tests
-  [{:code "(is_multiply_prime 8)", :expected "true"}
+  [{:code "(boolean (is_multiply_prime 8))", :expected "true"}
    {:code "(is_multiply_prime 10)", :expected "false"}
-   {:code "(is_multiply_prime 125)", :expected "true"}
-   {:code "(is_multiply_prime 105)", :expected "true"}
+   {:code "(boolean (is_multiply_prime 125))", :expected "true"}
+   {:code "(boolean (is_multiply_prime 105))", :expected "true"}
    {:code "(is_multiply_prime 126)", :expected "false"}
    {:code "(is_multiply_prime 729)", :expected "false"}
    {:code "(is_multiply_prime 891)", :expected "false"}
-   {:code "(is_multiply_prime 1001)", :expected "true"}],
+   {:code "(boolean (is_multiply_prime 1001))", :expected "true"}],
   :fn-name is_multiply_prime,
   :source :multipl-e/humaneval-clj,
   :public-tests
   [{:code "(is_multiply_prime 5)", :expected "false"}
-   {:code "(is_multiply_prime 30)", :expected "true"}],
+   {:code "(boolean (is_multiply_prime 30))", :expected "true"}],
   :title "humaneval clj 073",
   :prompt
   "(defn is_multiply_prime\n  \"Write a function that returns true if the given number is the multiplication of 3 prime numbers\n  and false otherwise.\n  Knowing that (a) is less then 100. \n  Example:\n  >>> (is_multiply_prime 30)\n  true\n  30 = 2 * 3 * 5\"\n  [a]\n  ",
@@ -282,16 +286,16 @@
  {:hidden-tests
   [{:code "(any_int 1.5 5 3.5)", :expected "false"}
    {:code "(any_int 2 6 2)", :expected "false"}
-   {:code "(any_int 4 2 2)", :expected "true"}
+   {:code "(boolean (any_int 4 2 2))", :expected "true"}
    {:code "(any_int 2.2 2.2 2.2)", :expected "false"}
-   {:code "(any_int -4 6 2)", :expected "true"}
-   {:code "(any_int 2 1 1)", :expected "true"}
-   {:code "(any_int 3 4 7)", :expected "true"}
+   {:code "(boolean (any_int -4 6 2))", :expected "true"}
+   {:code "(boolean (any_int 2 1 1))", :expected "true"}
+   {:code "(boolean (any_int 3 4 7))", :expected "true"}
    {:code "(any_int 3.0 4 7)", :expected "false"}],
   :fn-name any_int,
   :source :multipl-e/humaneval-clj,
   :public-tests
-  [{:code "(any_int 2 3 1)", :expected "true"}
+  [{:code "(boolean (any_int 2 3 1))", :expected "true"}
    {:code "(any_int 2.5 2 3)", :expected "false"}],
   :title "Create a function that takes 3 numbers.",
   :prompt
@@ -378,21 +382,21 @@
   :id "humaneval-clj-123"}
  {:hidden-tests
   [{:code "(is_sorted [1 3 2 4 5])", :expected "false"}
-   {:code "(is_sorted [1 2 3 4 5 6])", :expected "true"}
-   {:code "(is_sorted [1 2 3 4 5 6 7])", :expected "true"}
+   {:code "(boolean (is_sorted [1 2 3 4 5 6]))", :expected "true"}
+   {:code "(boolean (is_sorted [1 2 3 4 5 6 7]))", :expected "true"}
    {:code "(is_sorted [1 3 2 4 5 6 7])", :expected "false"}
-   {:code "(is_sorted [])", :expected "true"}
-   {:code "(is_sorted [1])", :expected "true"}
+   {:code "(boolean (is_sorted []))", :expected "true"}
+   {:code "(boolean (is_sorted [1]))", :expected "true"}
    {:code "(is_sorted [3 2 1])", :expected "false"}
    {:code "(is_sorted [1 2 2 2 3 4])", :expected "false"}
    {:code "(is_sorted [1 2 3 3 3 4])", :expected "false"}
-   {:code "(is_sorted [1 2 2 3 3 4])", :expected "true"}
-   {:code "(is_sorted [1 2 3 4])", :expected "true"}],
+   {:code "(boolean (is_sorted [1 2 2 3 3 4]))", :expected "true"}
+   {:code "(boolean (is_sorted [1 2 3 4]))", :expected "true"}],
   :fn-name is_sorted,
   :source :multipl-e/humaneval-clj,
   :public-tests
-  [{:code "(is_sorted [5])", :expected "true"}
-   {:code "(is_sorted [1 2 3 4 5])", :expected "true"}],
+  [{:code "(boolean (is_sorted [5]))", :expected "true"}
+   {:code "(boolean (is_sorted [1 2 3 4 5]))", :expected "true"}],
   :title
   "Given a list of numbers, return whether or not they are sorted",
   :prompt
@@ -401,7 +405,8 @@
  {:hidden-tests
   [{:code "(check_if_last_char_is_a_letter \"eeeee\")",
     :expected "false"}
-   {:code "(check_if_last_char_is_a_letter \"A\")", :expected "true"}
+   {:code "(boolean (check_if_last_char_is_a_letter \"A\"))",
+    :expected "true"}
    {:code "(check_if_last_char_is_a_letter \"Pumpkin pie \")",
     :expected "false"}
    {:code "(check_if_last_char_is_a_letter \"Pumpkin pie 1\")",
@@ -418,7 +423,7 @@
   :public-tests
   [{:code "(check_if_last_char_is_a_letter \"apple\")",
     :expected "false"}
-   {:code "(check_if_last_char_is_a_letter \"apple pi e\")",
+   {:code "(boolean (check_if_last_char_is_a_letter \"apple pi e\"))",
     :expected "true"}],
   :title "Create a function that returns true if the last character",
   :prompt
@@ -595,7 +600,7 @@
   :fn-name text_lowercase_underscore,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(text_lowercase_underscore \"aab_cbbbc\")",
+  [{:code "(boolean (text_lowercase_underscore \"aab_cbbbc\"))",
     :expected "true"}
    {:code "(text_lowercase_underscore \"aab_Abbbc\")",
     :expected "false"}],
@@ -696,11 +701,11 @@
   "(defn hexagonal_num\n  \"\tWrite a function to find the nth hexagonal number.\"\n  [n]\n  ",
   :id "mbpp-clj-075"}
  {:hidden-tests
-  [{:code "(is_Sum_Of_Powers_Of_Two 14)", :expected "true"}],
+  [{:code "(boolean (is_Sum_Of_Powers_Of_Two 14))", :expected "true"}],
   :fn-name is_Sum_Of_Powers_Of_Two,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(is_Sum_Of_Powers_Of_Two 10)", :expected "true"}
+  [{:code "(boolean (is_Sum_Of_Powers_Of_Two 10))", :expected "true"}
    {:code "(is_Sum_Of_Powers_Of_Two 7)", :expected "false"}],
   :title "mbpp clj 076",
   :prompt
@@ -720,7 +725,8 @@
   :prompt
   "(defn remove_elements\n  \"\tWrite a function to remove all elements from a given list present in another list.\"\n  [list1 list2]\n  ",
   :id "mbpp-clj-082"}
- {:hidden-tests [{:code "(are_equivalent 23 47)", :expected "true"}],
+ {:hidden-tests
+  [{:code "(boolean (are_equivalent 23 47))", :expected "true"}],
   :fn-name are_equivalent,
   :source :multipl-e/mbpp-clj,
   :public-tests
@@ -754,12 +760,13 @@
   "(defn count_occurance\n  \"\tWrite a function to count the number of occurence of the string 'std' in a given string.\"\n  [s]\n  ",
   :id "mbpp-clj-091"}
  {:hidden-tests
-  [{:code "(is_majority [1 1 1 2 2] 5 1)", :expected "true"}
+  [{:code "(boolean (is_majority [1 1 1 2 2] 5 1))", :expected "true"}
    {:code "(is_majority [1 1 2 2] 5 1)", :expected "false"}],
   :fn-name is_majority,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(is_majority [1 2 3 3 3 3 10] 7 3)", :expected "true"}
+  [{:code "(boolean (is_majority [1 2 3 3 3 3 10] 7 3))",
+    :expected "true"}
    {:code "(is_majority [1 1 2 4 4 4 6 6] 8 4)", :expected "false"}],
   :title "mbpp clj 093",
   :prompt
@@ -771,8 +778,9 @@
   :fn-name all_Bits_Set_In_The_Given_Range,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(all_Bits_Set_In_The_Given_Range 4 1 2)", :expected "true"}
-   {:code "(all_Bits_Set_In_The_Given_Range 17 2 4)",
+  [{:code "(boolean (all_Bits_Set_In_The_Given_Range 4 1 2))",
+    :expected "true"}
+   {:code "(boolean (all_Bits_Set_In_The_Given_Range 17 2 4))",
     :expected "true"}],
   :title "mbpp clj 097",
   :prompt
@@ -1036,12 +1044,14 @@
   "(defn parabola_directrix\n  \"\tWrite a function to find the directrix of a parabola.\"\n  [a b c]\n  ",
   :id "mbpp-clj-196"}
  {:hidden-tests
-  [{:code "(common_element [\"a\" \"b\" \"c\"] [\"d\" \"b\" \"e\"])",
+  [{:code
+    "(boolean (common_element [\"a\" \"b\" \"c\"] [\"d\" \"b\" \"e\"]))",
     :expected "true"}],
   :fn-name common_element,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(common_element [1 2 3 4 5] [5 6 7 8 9])", :expected "true"}
+  [{:code "(boolean (common_element [1 2 3 4 5] [5 6 7 8 9]))",
+    :expected "true"}
    {:code "(common_element [1 2 3 4 5] [6 7 8 9])", :expected "nil"}],
   :title "mbpp clj 197",
   :prompt
@@ -1105,7 +1115,7 @@
   :fn-name check_monthnumb_number,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(check_monthnumb_number 5)", :expected "true"}
+  [{:code "(boolean (check_monthnumb_number 5))", :expected "true"}
    {:code "(check_monthnumb_number 2)", :expected "false"}],
   :title "mbpp clj 220",
   :prompt
@@ -1176,7 +1186,8 @@
   :source :multipl-e/mbpp-clj,
   :public-tests
   [{:code "(is_Sub_Array [1 4 3 5] [1 2])", :expected "false"}
-   {:code "(is_Sub_Array [1 2 1] [1 2 1])", :expected "true"}],
+   {:code "(boolean (is_Sub_Array [1 2 1] [1 2 1]))",
+    :expected "true"}],
   :title
   "Write a cljthon function to check whether a list is sublist of another or not.",
   :prompt
@@ -1432,7 +1443,8 @@
   :source :multipl-e/mbpp-clj,
   :public-tests
   [{:code "(all_Characters_Same \"python\")", :expected "false"}
-   {:code "(all_Characters_Same \"aaa\")", :expected "true"}],
+   {:code "(boolean (all_Characters_Same \"aaa\"))",
+    :expected "true"}],
   :title
   "Write a cljthon function to check whether all the characters are same or not.",
   :prompt
@@ -1457,8 +1469,9 @@
   :fn-name check_min_heap,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(check_min_heap [1 2 3 4 5 6])", :expected "true"}
-   {:code "(check_min_heap [2 3 4 5 10 15])", :expected "true"}],
+  [{:code "(boolean (check_min_heap [1 2 3 4 5 6]))", :expected "true"}
+   {:code "(boolean (check_min_heap [2 3 4 5 10 15]))",
+    :expected "true"}],
   :title "mbpp clj 346",
   :prompt
   "(defn check_min_heap\n  \"\tWrite a function to check if the given vector represents min heap or not. https://www.geeksforgeeks.org/how-to-check-if-a-given-vector-represents-a-binary-heap/\"\n  [arr]\n  ",
@@ -1490,11 +1503,13 @@
   "(defn Diff\n  \"\tWrite a cljthon function to get the difference between two lists.\"\n  [li1 li2]\n  ",
   :id "mbpp-clj-361"}
  {:hidden-tests
-  [{:code "(check_expression \"{()}[{}][]({})\")", :expected "true"}],
+  [{:code "(boolean (check_expression \"{()}[{}][]({})\"))",
+    :expected "true"}],
   :fn-name check_expression,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(check_expression \"{()}[{}]\")", :expected "true"}
+  [{:code "(boolean (check_expression \"{()}[{}]\"))",
+    :expected "true"}
    {:code "(check_expression \"{()}[{]\")", :expected "false"}],
   :title "mbpp clj 363",
   :prompt
@@ -1504,8 +1519,9 @@
   :fn-name odd_position,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(odd_position [2 1 4 3 6 7 6 3])", :expected "true"}
-   {:code "(odd_position [4 1 2])", :expected "true"}],
+  [{:code "(boolean (odd_position [2 1 4 3 6 7 6 3]))",
+    :expected "true"}
+   {:code "(boolean (odd_position [4 1 2]))", :expected "true"}],
   :title "mbpp clj 366",
   :prompt
   "(defn odd_position\n  \"\tWrite a cljthon function to check whether every odd index contains odd numbers of a given list.\"\n  [nums]\n  ",
@@ -1521,11 +1537,12 @@
   :prompt
   "(defn find_sum\n  \"\tWrite a cljthon function to find the sum of non-repeated elements in a given list.\"\n  [arr]\n  ",
   :id "mbpp-clj-368"}
- {:hidden-tests [{:code "(count_divisors 125)", :expected "true"}],
+ {:hidden-tests
+  [{:code "(boolean (count_divisors 125))", :expected "true"}],
   :fn-name count_divisors,
   :source :multipl-e/mbpp-clj,
   :public-tests
-  [{:code "(count_divisors 10)", :expected "true"}
+  [{:code "(boolean (count_divisors 10))", :expected "true"}
    {:code "(count_divisors 100)", :expected "false"}],
   :title "mbpp clj 371",
   :prompt

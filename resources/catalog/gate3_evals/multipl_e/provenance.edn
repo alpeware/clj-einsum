@@ -229,7 +229,7 @@
   :adjudication nil,
   :code-length 578}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "humaneval-clj-020",
   :status :verified,
   :adjudication nil,
@@ -648,7 +648,7 @@
   :adjudication nil,
   :code-length 510}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "humaneval-clj-089",
   :status :verified,
   :adjudication nil,
@@ -672,7 +672,7 @@
   :adjudication nil,
   :code-length 556}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "humaneval-clj-093",
   :status :verified,
   :adjudication nil,
@@ -944,7 +944,7 @@
   :adjudication nil,
   :code-length 464}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "humaneval-clj-138",
   :status :verified,
   :adjudication nil,
@@ -1010,13 +1010,13 @@
   :adjudication nil,
   :code-length 747}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "humaneval-clj-149",
   :status :verified,
   :adjudication nil,
   :code-length 194}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "humaneval-clj-150",
   :status :verified,
   :adjudication nil,
@@ -1028,7 +1028,7 @@
   :adjudication nil,
   :code-length 1307}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "humaneval-clj-152",
   :status :verified,
   :adjudication nil,
@@ -1244,7 +1244,7 @@
   :adjudication nil,
   :code-length 136}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-020",
   :status :verified,
   :adjudication nil,
@@ -1268,7 +1268,7 @@
   :adjudication nil,
   :code-length 134}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-024",
   :status :verified,
   :adjudication nil,
@@ -1335,14 +1335,14 @@
   :adjudication nil,
   :code-length 155}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-035",
   :status :quarantined,
   :adjudication
   "Upstream offset discrepancy: test asserts (get_Char \"abc\") => \"f\", but ASCII sum modulo 26 (294 % 26 = 8) does not correspond to \"f\" under standard alphabet offsets.",
   :code-length 91}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-036",
   :status :verified,
   :adjudication nil,
@@ -1354,7 +1354,7 @@
   :adjudication nil,
   :code-length 122}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-038",
   :status :verified,
   :adjudication nil,
@@ -1438,7 +1438,7 @@
   :adjudication nil,
   :code-length 137}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-052",
   :status :verified,
   :adjudication nil,
@@ -1456,7 +1456,7 @@
   :adjudication nil,
   :code-length 138}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-055",
   :status :verified,
   :adjudication nil,
@@ -1602,7 +1602,7 @@
   :adjudication nil,
   :code-length 253}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-079",
   :status :verified,
   :adjudication nil,
@@ -1614,7 +1614,7 @@
   :adjudication nil,
   :code-length 253}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-081",
   :status :verified,
   :adjudication nil,
@@ -1729,7 +1729,7 @@
   :adjudication nil,
   :code-length 109}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-101",
   :status :verified,
   :adjudication nil,
@@ -1796,7 +1796,7 @@
   :adjudication nil,
   :code-length 221}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-112",
   :status :verified,
   :adjudication nil,
@@ -1827,13 +1827,13 @@
   :adjudication nil,
   :code-length 156}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-117",
   :status :verified,
   :adjudication nil,
   :code-length 109}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-118",
   :status :verified,
   :adjudication nil,
@@ -1857,7 +1857,7 @@
   :adjudication nil,
   :code-length 183}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-122",
   :status :verified,
   :adjudication nil,
@@ -1983,7 +1983,7 @@
   :adjudication nil,
   :code-length 208}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-143",
   :status :verified,
   :adjudication nil,
@@ -1995,13 +1995,13 @@
   :adjudication nil,
   :code-length 608}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-145",
   :status :verified,
   :adjudication nil,
   :code-length 34}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-146",
   :status :verified,
   :adjudication nil,
@@ -2013,7 +2013,7 @@
   :adjudication nil,
   :code-length 201}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-148",
   :status :verified,
   :adjudication nil,
@@ -2043,7 +2043,7 @@
   :adjudication nil,
   :code-length 619}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-153",
   :status :verified,
   :adjudication nil,
@@ -2067,7 +2067,7 @@
   :adjudication nil,
   :code-length 107}
  {:origin :patch-fix,
-  :source "scratch/patch_fixes.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-157",
   :status :verified,
   :adjudication nil,
@@ -2085,7 +2085,7 @@
   :adjudication nil,
   :code-length 274}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-160",
   :status :verified,
   :adjudication nil,
@@ -2103,7 +2103,7 @@
   :adjudication nil,
   :code-length 672}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-163",
   :status :verified,
   :adjudication nil,
@@ -2115,25 +2115,25 @@
   :adjudication nil,
   :code-length 184}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-165",
   :status :verified,
   :adjudication nil,
   :code-length 134}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-166",
   :status :verified,
   :adjudication nil,
   :code-length 88}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-167",
   :status :verified,
   :adjudication nil,
   :code-length 67}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-168",
   :status :verified,
   :adjudication nil,
@@ -2145,7 +2145,7 @@
   :adjudication nil,
   :code-length 176}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-170",
   :status :verified,
   :adjudication nil,
@@ -2175,7 +2175,7 @@
   :adjudication nil,
   :code-length 117}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-175",
   :status :verified,
   :adjudication nil,
@@ -2199,7 +2199,7 @@
   :adjudication nil,
   :code-length 178}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-179",
   :status :verified,
   :adjudication nil,
@@ -2223,7 +2223,7 @@
   :adjudication nil,
   :code-length 216}
  {:origin :patch-fix,
-  :source "scratch/patch_fixes.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-183",
   :status :verified,
   :adjudication nil,
@@ -2259,7 +2259,7 @@
   :adjudication nil,
   :code-length 184}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-189",
   :status :verified,
   :adjudication nil,
@@ -2283,7 +2283,7 @@
   :adjudication nil,
   :code-length 98}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-193",
   :status :verified,
   :adjudication nil,
@@ -2302,20 +2302,20 @@
   :adjudication nil,
   :code-length 166}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-196",
   :status :quarantined,
   :adjudication
   "Upstream MBPP arithmetic bug: the reference implementation multiplied by 4a instead of dividing by 4a (directrix formula y = c - (b^2+1)/(4a) corrupted into integer c - 4a*(b^2+1)), expecting -198 for (5,3,2) instead of 1.5. Fails mathematically valid implementations.",
   :code-length 86}
  {:origin :patch-fix,
-  :source "scratch/patch_fixes.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-197",
   :status :verified,
   :adjudication nil,
   :code-length 80}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-198",
   :status :verified,
   :adjudication nil,
@@ -2351,7 +2351,7 @@
   :adjudication nil,
   :code-length 138}
  {:origin :patch-fix,
-  :source "scratch/patch_fixes.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-204",
   :status :quarantined,
   :adjudication
@@ -2364,7 +2364,7 @@
   :adjudication nil,
   :code-length 167}
  {:origin :patch-fix,
-  :source "scratch/patch_fixes.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-206",
   :status :verified,
   :adjudication nil,
@@ -2376,25 +2376,25 @@
   :adjudication nil,
   :code-length 114}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-208",
   :status :verified,
   :adjudication nil,
   :code-length 144}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-209",
   :status :verified,
   :adjudication nil,
   :code-length 64}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-210",
   :status :verified,
   :adjudication nil,
   :code-length 104}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-211",
   :status :verified,
   :adjudication nil,
@@ -2430,7 +2430,7 @@
   :adjudication nil,
   :code-length 186}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-217",
   :status :verified,
   :adjudication nil,
@@ -2472,7 +2472,7 @@
   :adjudication nil,
   :code-length 93}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-224",
   :status :verified,
   :adjudication nil,
@@ -2484,7 +2484,7 @@
   :adjudication nil,
   :code-length 111}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-226",
   :status :quarantined,
   :adjudication
@@ -2515,7 +2515,7 @@
   :adjudication nil,
   :code-length 137}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-231",
   :status :quarantined,
   :adjudication
@@ -2546,7 +2546,7 @@
   :adjudication nil,
   :code-length 300}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-236",
   :status :verified,
   :adjudication nil,
@@ -2662,7 +2662,7 @@
   :adjudication nil,
   :code-length 128}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-256",
   :status :verified,
   :adjudication nil,
@@ -2674,7 +2674,7 @@
   :adjudication nil,
   :code-length 163}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-258",
   :status :quarantined,
   :adjudication
@@ -2699,7 +2699,7 @@
   :adjudication nil,
   :code-length 175}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-262",
   :status :quarantined,
   :adjudication
@@ -2724,7 +2724,7 @@
   :adjudication nil,
   :code-length 263}
  {:origin :patch-fix,
-  :source "scratch/patch_fixes.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-266",
   :status :verified,
   :adjudication nil,
@@ -2772,7 +2772,7 @@
   :adjudication nil,
   :code-length 358}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-274",
   :status :verified,
   :adjudication nil,
@@ -2814,7 +2814,7 @@
   :adjudication nil,
   :code-length 129}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-281",
   :status :verified,
   :adjudication nil,
@@ -2844,7 +2844,7 @@
   :adjudication nil,
   :code-length 141}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-286",
   :status :verified,
   :adjudication nil,
@@ -2868,7 +2868,7 @@
   :adjudication nil,
   :code-length 219}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-290",
   :status :verified,
   :adjudication nil,
@@ -2880,7 +2880,7 @@
   :adjudication nil,
   :code-length 200}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-292",
   :status :verified,
   :adjudication nil,
@@ -2892,14 +2892,14 @@
   :adjudication nil,
   :code-length 178}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-294",
   :status :quarantined,
   :adjudication
   "Geometry step calculation discrepancy: test expects 3.5 for steps [3 4] and distance 11, requiring fractional jumps incompatible with discrete jump count specification.",
   :code-length 164}
  {:origin :patch-fix,
-  :source "scratch/patch_fixes.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-295",
   :status :verified,
   :adjudication nil,
@@ -2917,7 +2917,7 @@
   :adjudication nil,
   :code-length 625}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-298",
   :status :verified,
   :adjudication nil,
@@ -2935,7 +2935,7 @@
   :adjudication nil,
   :code-length 269}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-301",
   :status :verified,
   :adjudication nil,
@@ -2959,7 +2959,7 @@
   :adjudication nil,
   :code-length 117}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-305",
   :status :verified,
   :adjudication nil,
@@ -3007,7 +3007,7 @@
   :adjudication nil,
   :code-length 297}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-313",
   :status :verified,
   :adjudication nil,
@@ -3086,7 +3086,7 @@
   :adjudication nil,
   :code-length 220}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-327",
   :status :verified,
   :adjudication nil,
@@ -3190,7 +3190,7 @@
   :adjudication nil,
   :code-length 365}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-344",
   :status :verified,
   :adjudication nil,
@@ -3292,7 +3292,7 @@
   :adjudication nil,
   :code-length 1107}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-361",
   :status :quarantined,
   :adjudication
@@ -3311,13 +3311,13 @@
   :adjudication nil,
   :code-length 708}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-364",
   :status :verified,
   :adjudication nil,
   :code-length 130}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-365",
   :status :verified,
   :adjudication nil,
@@ -3329,14 +3329,14 @@
   :adjudication nil,
   :code-length 212}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-367",
   :status :quarantined,
   :adjudication
   "Vowel neighbor predicate discrepancy: test counts non-standard boundary condition for characters with vowel neighbors.",
   :code-length 359}
  {:origin :patch-fix,
-  :source "scratch/patch_fixes.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-368",
   :status :verified,
   :adjudication nil,
@@ -3421,7 +3421,7 @@
   :adjudication nil,
   :code-length 160}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-382",
   :status :verified,
   :adjudication nil,
@@ -3457,7 +3457,7 @@
   :adjudication nil,
   :code-length 328}
  {:origin :synthetic-reference,
-  :source "scratch/solve_remaining.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-388",
   :status :verified,
   :adjudication nil,
@@ -3469,7 +3469,7 @@
   :adjudication nil,
   :code-length 170}
  {:origin :patch-fix,
-  :source "scratch/patch_fixes.clj",
+  :source "resources/catalog/gate3_evals/multipl_e/solutions.edn",
   :id "mbpp-clj-390",
   :status :quarantined,
   :adjudication
