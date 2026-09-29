@@ -5,7 +5,7 @@
 **Gate**: `gate3_evals` \
 **Generation**: `1` \
 **Literature**: `["Cassano et al. (2023) MultiPL-E: A Scalable and Extensible Polyglot Benchmark for Large Language Models (arXiv:2208.08227)", "nuprl/MultiPL-E Pull Request #136: Add Clojure programming language (2023)", "nibzard (2026) clojure-llm: Benchmark-first autoresearch for Clojure code models (https://github.com/nibzard/clojure-llm)"]` \
-**Hardware-Target**: `{:reference "AMD Radeon RX 7900 XTX (24GB)" :claim-shape "558-cell MultiPL-E evaluation completes in < 4 hours on E4B-QAT-INT4 with prefix KV reuse"}` \
+**Hardware-Target**: `{:reference "AMD Radeon RX 7900 XTX (24GB)" :claim-shape "558-cell single-shot evaluation completes in ~2.3h; full 1116-cell two-mode suite completes overnight in ~7.4h on E4B-QAT-INT4 with prefix KV reuse"}` \
 **Extends**: `harness_v2` \
 **Refutes**: `nil` \
 **Supersedes**: `nil` \
@@ -47,7 +47,7 @@ the **MultiPL-E Clojure suite** (161 `humaneval-clj` + 397 `mbpp-clj` = **558 ta
    MultiPL-E benchmark suite. It established canonical translations of docstrings,
    function signatures, and test cases using `clojure.test`.
 3. **`clojure-llm` (nibzard, 2026)**:
-   A pioneering autoresearch program exploring whether smaller open models
+   An autoresearch program exploring whether smaller open models
    (Qwen3-8B/30B) with fast verification loops (REPL, `clj-kondo`, `clojure.test`)
    can beat frontier models (GPT-5.4, Opus 4.7) on Clojure generation.
    Crucial insights from `clojure-llm`:
@@ -73,7 +73,32 @@ in `resources/catalog/gate3_evals/multipl_e/` to test multi-task harness plumbin
 - However, having only a 50-task partial subset in the catalog is incomplete.
 - **Disposition Plan**:
   - We will **retain and canonicalize** `dev_50` as a fast smoke test fixture (`smoke_50_*.edn` or preserved `dev_50_*.edn`).
-  - We will **expand the catalog pod** to house the complete, verified 558-task suite partitioned into `tasks_dev.edn` (447 tasks) and `tasks_sealed.edn` (111 tasks), accompanied by complete ground-truth solutions in `solutions.edn`.
+  - We will **expand the catalog pod** to house the complete, verified 558-task suite partitioned into `tasks_dev.edn` (447 tasks) and `tasks_sealed.edn` (111 tasks), accompanied by complete ground-truth solutions in `solutions.edn` and a quarantined task record `quarantine.edn`.
+
+### 1.3 Dataset Provenance & Pinned SHAs
+
+To eliminate ambiguity and ensure reproducibility, data ingestion is strictly pinned:
+- **Upstream Hugging Face Repository**:
+  - URL: `https://huggingface.co/datasets/nuprl/MultiPL-E`
+  - Commit SHA: `28441b6024e71d4a1c1c0f6bf171c935cd5a43f2`
+- **Upstream GitHub Repository**:
+  - URL: `https://github.com/nuprl/MultiPL-E`
+  - Commit SHA: `3025a531af7450e7df8b96fe0440e9804480bbad`
+- **Independent Cross-Check Reference**:
+  - `nibzard/clojure-llm` commit SHA: `8ed80ac59ad26413ed8f9e7f167860b384478e41` (`benchmark/tasks-v0.edn`).
+  - Cross-check against local copies when available to verify task inventory bit-for-bit.
+
+### 1.4 Runtime & Cell Timing Arithmetic
+
+Evaluation costs are partitioned cleanly across modes on AMD Radeon RX 7900 XTX (E4B-QAT-INT4):
+- **Single-Shot (1 turn, no tools)**:
+  - Average wall-clock latency: ~15.0s per cell (greedy decoding, 200–500 tokens).
+  - 558 tasks × 1 mode = **558 cells** → ~8,370s (**~2.33 hours**, < 2.5h).
+- **Agentic Mode (multi-turn, up to 5 turns, prefix KV cache reuse active)**:
+  - Average wall-clock latency: ~32.5s per cell (empirically 21.3%–26.7% faster than v1 42s baseline due to prefix KV reuse, early exit on public pass, and nudge short-circuit).
+  - 558 tasks × 1 mode = **558 cells** → ~18,135s (**~5.04 hours**).
+- **Full Two-Mode Suite (1,116 cells)**:
+  - 2.33h + 5.04h = **~7.37 hours** total wall-time, executing comfortably overnight unattended in a single session.
 
 ---
 
@@ -82,26 +107,34 @@ in `resources/catalog/gate3_evals/multipl_e/` to test multi-task harness plumbin
 Every capability must state measurable done-conditions *before* work starts.
 When all criteria hold, the capability is done.
 
-- **AC1: Full 558-Task Ingestion**:
-  Ingest all 161 `humaneval-clj` tasks and 397 `mbpp-clj` tasks from the official
-  `nuprl/MultiPL-E` dataset. Each task is normalized to the canonical harness schema:
+- **AC1: Pinned 558-Task Ingestion**:
+  Ingest all 161 `humaneval-clj` tasks and 397 `mbpp-clj` tasks from `nuprl/MultiPL-E` pinned at commit `28441b6`. Each task is normalized to the canonical harness schema:
   `{:id ... :source ... :fn-name ... :prompt ... :public-tests [...] :hidden-tests [...]}`.
-- **AC2: 100% SCI Sandbox Verification**:
-  Every ground-truth reference solution in `solutions.edn` must execute cleanly and
-  pass all associated `:public-tests` and `:hidden-tests` within `create-benchmark-sci-ctx`.
-  Zero uncaught reflection exceptions, zero missing standard library functions,
-  and zero external host I/O dependencies.
-- **AC3: Deterministic Partitioning (447 Dev / 111 Sealed)**:
-  Partition the 558 tasks into:
-  - `tasks_dev.edn` (447 tasks): An open development partition available for prompt
-    tuning (`prompt_tuning_v1`), few-shot trajectory mining, and teacher rollout generation.
-  - `tasks_sealed.edn` (111 tasks): A strictly held-out evaluation partition (matching the
-    `clojure-llm` 20% test split convention) reserved for un-snooped model capability reporting.
-- **AC4: Existing Test Suite Non-Regression**:
+- **AC2: SCI Sandbox Verification & Quarantine Escape Hatch**:
+  Every ground-truth reference solution in `solutions.edn` must execute in `create-benchmark-sci-ctx`.
+  - **Verification Floor**: $\ge 95\%$ of tasks (at least 530 out of 558) must pass 100% of their test assertions in pure SCI.
+  - **Quarantine Escape Hatch**: Any task requiring unsupported Java reflection, unseeded randomness, or un-emulatable host I/O is isolated in a committed artifact `quarantine.edn` with a recorded per-task diagnostic rationale. No task is silently waived or deleted.
+- **AC3: Exact 111 Held-Out Task ID Alignment**:
+  Adopt verbatim the 111 held-out task IDs established by `nibzard/clojure-llm` (`2026-04-20-rlvr-qwen3-30b-heldout.edn`), stratified 20% across sources:
+  - **32 HumanEval tasks**: `humaneval-clj-001`, `003`, `012`, `018`, `019`, `020`, `031`, `039`, `043`, `053`, `062`, `067`, `068`, `073`, `077`, `086`, `090`, `095`, `097`, `105`, `121`, `123`, `124`, `132`, `134`, `137`, `141`, `143`, `144`, `153`, `157`, `158`.
+  - **79 MBPP tasks**: `mbpp-clj-006`, `007`, `009`, `022`, `047`, `057`, `060`, `069`, `074`, `075`, `076`, `082`, `084`, `087`, `091`, `093`, `097`, `117`, `119`, `120`, `132`, `133`, `137`, `144`, `148`, `154`, `156`, `162`, `163`, `176`, `179`, `180`, `181`, `185`, `191`, `196`, `197`, `201`, `204`, `214`, `216`, `220`, `226`, `245`, `248`, `252`, `258`, `259`, `266`, `267`, `268`, `269`, `279`, `283`, `286`, `287`, `295`, `297`, `299`, `303`, `306`, `308`, `313`, `316`, `326`, `330`, `336`, `342`, `346`, `350`, `361`, `363`, `366`, `368`, `371`, `375`, `376`, `384`, `395`.
+  - Partition files: `tasks_dev.edn` (447 tasks, open) and `tasks_sealed.edn` (111 tasks, held-out). Matching these exact IDs ensures direct comparability with published frontier baselines (GPT-5.4 64.0%, Gemini 3.1 Pro 72.8%).
+- **AC4: Public / Hidden Test Split Rule**:
+  Define a deterministic split rule across the parsed `(is (= ...))` assertion forms $[a_1, a_2, \dots, a_K]$:
+  - If $K \ge 3$: the first 2 assertions become `:public-tests`; the remaining $K-2$ assertions become `:hidden-tests`.
+  - If $K = 2$: assertion $a_1$ is public; assertion $a_2$ is hidden.
+  - If $K = 1$: assertion $a_1$ is present in both public and hidden.
+  This rule matches the existing `dev_50` convention identically and guarantees that models receive concrete examples for agentic self-correction while reserving the majority for held-out grading.
+- **AC5: Named Default Prompt Template (`:multipl-e-v0`)**:
+  Establish versioned prompt rendering for the port:
+  - Template name: `:multipl-e-v0`.
+  - Single-shot: System prompt `SINGLE-SHOT-SYSTEM-PROMPT`, user turn contains verbatim docstring and function signature.
+  - Agentic: System prompt `AGENT-SYSTEM-PROMPT`, `--tool-syntax :fenced`, user turn contains docstring plus public examples formatted for interactive testing.
+- **AC6: Existing Test Suite Non-Regression**:
   Preserve backwards compatibility for `test/einsum/agent_test.clj`
   (`test-multipl-e-dev-50-fixture-and-ledger`) so existing regression tests pass with
   zero errors.
-- **AC5: Harness Integration & Dry-Run Ledgering**:
+- **AC7: Harness Integration & Dry-Run Ledgering**:
   `experiments.gate3-evals.clojure-bench.run/run-benchmark` must execute successfully
   in `--dry-run` mode against both `tasks_dev.edn` and `tasks_sealed.edn`, recording valid
   rows with `:harness-sha`, `:tool-syntax`, `:temperature`, and `:sealed-sha256`.
@@ -125,7 +158,8 @@ When all criteria hold, the capability is done.
 - **Catalog Artifacts** (`resources/catalog/gate3_evals/multipl_e/`):
   - `tasks_dev.edn`: 447 open dev tasks.
   - `tasks_sealed.edn`: 111 held-out eval tasks.
-  - `solutions.edn`: 558 verified reference solutions.
+  - `solutions.edn`: 558 reference solutions.
+  - `quarantine.edn`: Quarantined tasks failing pure SCI sandbox criteria with documented rationales.
   - `dev_50_public.edn` / `dev_50_sealed.edn`: preserved for fast CI smoke testing.
 - **Harness Flags**:
   `--tasks multipl-e-dev` and `--tasks multipl-e-sealed` added to `clojure_bench/run.clj`
@@ -146,3 +180,4 @@ When all criteria hold, the capability is done.
 | Date | Event | Rationale |
 |---|---|---|
 | 2026-09-29 | `proposed` | `harness_v2` promoted to catalog. Unlocks MultiPL-E port to address $N=10$ sample variance, unblock prompt tuning, and establish distillation corpus. Spec pre-registers 447/111 partition, SCI sandboxing, and existing `dev_50` compatibility. |
+| 2026-09-29 | `amended` | Hardened spec per review recommendations (R1–R6): adopted exact 111 held-out IDs from `clojure-llm`, added `quarantine.edn` escape hatch ($\ge 95\%$ verification floor), specified deterministic public/hidden test split rule, pinned upstream SHAs (HF `28441b6`, GitHub `3025a53`), named `:multipl-e-v0` prompt template, and reconciled cell arithmetic (single-shot ~2.3h, agentic ~5.0h, 1116-cell suite ~7.4h). |
