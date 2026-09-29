@@ -118,10 +118,15 @@
         quiet? (boolean (:quiet opts))
         tasks-file (io/file (:tasks-file opts))
         q-file (io/file (:quarantine-file opts))
-        output-file (io/file (:output-file opts))
+        output-file (io/file (or (:output-file opts) (:output opts) (:results-file opts)))
         limit (long (or (:limit opts) 50))
         stratified? (boolean (get opts :stratified true))
-        variants (vec (or (:variants opts) [:p0 :p1 :p2]))
+        raw-variants (:variants opts)
+        variants (cond
+                   (nil? raw-variants) [:p0 :p1 :p2]
+                   (string? raw-variants) (mapv #(keyword (str/replace % #"^:+" "")) (str/split raw-variants #","))
+                   (sequential? raw-variants) (mapv #(keyword (str/replace (clojure.core/name %) #"^:+" "")) raw-variants)
+                   :else [:p0 :p1 :p2])
 
         _ (when-not (.exists tasks-file)
             (throw (IllegalArgumentException. (str "Tasks file not found: " tasks-file))))

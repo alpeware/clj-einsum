@@ -442,7 +442,9 @@
             (throw (IllegalArgumentException. (str "Sealed tasks file not found: " sealed-file))))
 
         sealed-sha (bench-core/compute-file-sha256 sealed-file)
-        prompt-sha (bench-core/compute-file-sha256 public-file)
+        prompt-sha (if-let [pv (:prompt-variant opts)]
+                     (pt-core/compute-prompt-sha pv)
+                     (bench-core/compute-file-sha256 public-file))
         opts (assoc opts :prompt-sha prompt-sha)
         {:keys [harness-sha harness-dirty?]} (bench-core/harness-version-info)
         _ (when (and (not dry-run?) harness-dirty?)
