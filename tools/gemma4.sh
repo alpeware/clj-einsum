@@ -40,6 +40,9 @@ elif [ "$1" = "clj-bench" ] || [ "$1" = "--clj-bench" ] || [ "$1" = "clojure-ben
 elif [ "$1" = "pilot" ] || [ "$1" = "--pilot" ]; then
   MODE="pilot"
   shift
+elif [ "$1" = "turbo-kv" ] || [ "$1" = "--turbo-kv" ] || [ "$1" = "tiered-turbo-kv" ] || [ "$1" = "--tiered-turbo-kv" ]; then
+  MODE="turbo-kv"
+  shift
 elif [ "$1" = "run" ] || [ "$1" = "--run" ] || [ "$1" = "exec" ]; then
   MODE="run"
   shift
@@ -65,6 +68,8 @@ elif [ "$MODE" = "clj-bench" ]; then
   exec clojure -M:tools -m tools.clj-bench "$@"
 elif [ "$MODE" = "pilot" ]; then
   exec clojure -M:tools -m experiments.gate3-evals.prompt-tuning-v1.run "$@"
+elif [ "$MODE" = "turbo-kv" ]; then
+  exec clojure -M:tools -m experiments.gate1-compression.tiered-turbo-kv.run "$@"
 elif [ "$MODE" = "run" ]; then
   exec clojure "$@"
 else

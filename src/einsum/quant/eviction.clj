@@ -24,8 +24,18 @@
 ;; ==============================================================================
 
 (defn- to-double-array ^doubles [v ^long n]
-  (if (instance? (Class/forName "[D") v)
+  (cond
+    (instance? (Class/forName "[D") v)
     ^doubles v
+
+    (instance? (Class/forName "[F") v)
+    (let [arr (double-array n)
+          ^floats fv v]
+      (dotimes [i n]
+        (aset-double arr i (double (aget fv i))))
+      arr)
+
+    :else
     (let [arr (double-array n)]
       (dotimes [i n]
         (aset-double arr i (double (nth v i 0.0))))
@@ -56,18 +66,18 @@
                           (pyramidal-heavy-budget layer-idx num-layers k-base))]
          (if (<= intermediate-count k-heavy)
            (vec (range total-len))
-           (let [mass-arr (to-double-array attn-mass total-len)
+           (let [^doubles mass-arr (to-double-array attn-mass total-len)
                  cmp (reify Comparator
                        (compare [_ a b]
-                         (Double/compare (aget mass-arr (long a))
-                                         (aget mass-arr (long b)))))
+                         (Double/compare (aget mass-arr (int (long a)))
+                                         (aget mass-arr (int (long b))))))
                  pq (PriorityQueue. (int k-heavy) cmp)]
              ;; Find top k-heavy candidates in [k-sink, window-start - 1] using min-heap
-             (loop [i k-sink]
-               (when (< i window-start)
-                 (if (< (.size pq) k-heavy)
+             (loop [i (int k-sink)]
+               (when (< i (int window-start))
+                 (if (< (.size pq) (int k-heavy))
                    (.offer pq (long i))
-                   (let [min-idx (long (.peek pq))]
+                   (let [min-idx (int (long (.peek pq)))]
                      (when (> (aget mass-arr i) (aget mass-arr min-idx))
                        (.poll pq)
                        (.offer pq (long i)))))

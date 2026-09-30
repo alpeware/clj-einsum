@@ -87,6 +87,7 @@
             [einsum.tools.cli-test]
             [einsum.tools.download-hf-test]
             [einsum.tools.fetch-pjrt-test]
+            [experiments.gate1-compression.tiered-turbo-kv-test]
             [experiments.gate3-evals.clojure-bench-test]
             [experiments.gate3-evals.multipl-e-test]
             [experiments.gate3-evals.prompt-tuning-v1-test]
@@ -131,6 +132,7 @@
    'experiments.gate3-evals.multipl-e-test
    'experiments.gate3-evals.prompt-tuning-v1-test
    'experiments.gate3-evals.perplexity-probe-v1-test
+   'experiments.gate1-compression.tiered-turbo-kv-test
    'einsum.logic.gather-test])
 
 (def logic-namespaces
