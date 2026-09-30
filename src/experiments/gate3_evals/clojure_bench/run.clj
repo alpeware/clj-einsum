@@ -39,6 +39,7 @@
    :include-quarantine false
    :dry-run false
    :quiet false
+   :save-transcripts false
    :public-tasks-file "resources/catalog/gate3_evals/clojure_bench/tasks_public.edn"
    :sealed-tasks-file "resources/catalog/gate3_evals/clojure_bench/tasks_sealed.edn"
    :results-file "resources/catalog/gate3_evals/clojure_bench/results.edn"
@@ -256,6 +257,8 @@
           :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
           :max-new-tokens (long (or (:max-new-tokens opts) 1536))
           :prompt-variant (:prompt-variant opts)
+          :transcript [{:turn 1 :role :model :content (str "(defn " fn-name " ...)")}]
+          :save-transcripts? (boolean (or (:save-transcripts opts) (:save-transcripts? opts)))
           :dry-run? true}))
 
       ;; Actual agentic loop execution
@@ -392,6 +395,7 @@
               :repetition-penalty (double (or (:repetition-penalty opts) 1.0))
               :max-new-tokens (long (or (:max-new-tokens opts) 1536))
               :prompt-variant (:prompt-variant opts)
+              :save-transcripts? (boolean (or (:save-transcripts opts) (:save-transcripts? opts)))
               :dry-run? false}))
           (finally
             (when-let [st @task-kv-state]
@@ -678,6 +682,7 @@
                (string? (:include-quarantine normalized-tasks-opts)) (update :include-quarantine #(Boolean/parseBoolean %))
                (string? (:thinking normalized-tasks-opts)) (update :thinking #(Boolean/parseBoolean %))
                (string? (:overwrite normalized-tasks-opts)) (update :overwrite #(Boolean/parseBoolean %))
+               (string? (:save-transcripts normalized-tasks-opts)) (update :save-transcripts #(Boolean/parseBoolean %))
                (string? (:nudge-on-no-tool normalized-tasks-opts)) (update :nudge-on-no-tool #(Boolean/parseBoolean %))
                (string? (:semantic-stop normalized-tasks-opts)) (update :semantic-stop #(Boolean/parseBoolean %))
                (string? (:early-exit normalized-tasks-opts)) (update :early-exit #(Boolean/parseBoolean %))

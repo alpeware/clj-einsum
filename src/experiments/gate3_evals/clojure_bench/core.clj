@@ -520,7 +520,7 @@ Only provide your final response once your definition passes all public tests.")
 (defn format-results-row
   "Formats an individual task evaluation result map for results.edn, persisting
    rich diagnostics (candidate-code, error, test-summary, failure details, stop-reason, transcript on failure)."
-  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha prompt-sha dry-run? transcript repetition-penalty temperature tool-syntax prompt-variant]}]
+  [{:keys [model task mode candidate-code grade-res error n-submissions tokens-in tokens-out max-new-tokens wall-ms sealed-sha checkpoint-sha prompt-sha dry-run? transcript repetition-penalty temperature tool-syntax prompt-variant save-transcripts?]}]
   (let [all-passed? (boolean (:all-passed? grade-res))
         has-error? (seq (or error (:error grade-res)))
         err-msg (or error (:error grade-res))
@@ -528,7 +528,7 @@ Only provide your final response once your definition passes all public tests.")
         raw-failures (when-not all-passed?
                        (mapv (fn [{:keys [code expected actual error]}]
                                (let [m {:code code
-                                        :expected (str expected)}]
+                                         :expected (str expected)}]
                                  (cond-> m
                                    actual (assoc :actual (str actual))
                                    error (assoc :error (str error)))))
@@ -567,7 +567,8 @@ Only provide your final response once your definition passes all public tests.")
       (assoc :prompt-variant (keyword prompt-variant))
       prompt-sha
       (assoc :prompt-sha (str prompt-sha))
-      (and (not all-passed?) (seq transcript))
+      (or (and (not all-passed?) (seq transcript))
+          (and save-transcripts? (seq transcript)))
       (assoc :transcript (vec transcript)))))
 
 (defn read-results-edn

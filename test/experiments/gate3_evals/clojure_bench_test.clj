@@ -458,6 +458,30 @@
       (is (true? (:passed? row)))
       (is (nil? (:transcript row)))))
 
+  (testing "Preserves transcript on passing row when :save-transcripts? is true"
+    (let [grade-res {:all-passed? true
+                     :passed-count 5
+                     :total-count 5
+                     :results [{:code "(first-n [1])" :expected "[1]" :actual "[1]" :passed? true}]
+                     :error nil}
+          row (bench-core/format-results-row
+               {:model "gemma-4-E2B-it-int4"
+                :task "first-n"
+                :mode :agentic
+                :candidate-code "(defn first-n [coll] (vec (take 10 coll)))"
+                :grade-res grade-res
+                :tokens-in 266
+                :tokens-out 512
+                :wall-ms 8000.0
+                :sealed-sha "dummy-sha"
+                :checkpoint-sha "dummy-cp"
+                :transcript [{:turn 1 :role :model :content "pass"}]
+                :save-transcripts? true
+                :dry-run? false})]
+      (is (= :passed-all (:stop-reason row)))
+      (is (true? (:passed? row)))
+      (is (= [{:turn 1 :role :model :content "pass"}] (:transcript row)))))
+
   (testing "Formats no-extraction row with clear stop-reason and error"
     (let [row (bench-core/format-results-row
                {:model "gemma-4-E2B-it-int4"
