@@ -45,21 +45,33 @@ Teacher/student substrates (pinned):
 trajectories is substantially higher on the four gap tasks than on the two contrast tasks
 the student already solves.
 
-**Decision rule (pre-registered)**: Let `PPL_gap` be the mean perplexity over the four
-gap-task trajectories (teacher-generated tokens only, §4) and `PPL_ref` the mean over the
-two contrast-task trajectories, both scored by the student.
+**Primary Metric & Aggregation Formula**:
+Perplexity across sequences is computed via **micro-average (token-weighted corpus cross-entropy)**
+over scored teacher tokens, preventing outlier sequences from skewing the aggregate:
 
-- **GO** iff `PPL_gap / PPL_ref >= 1.5`.
+```
+PPL_gap = exp( - (Σ_{k ∈ gap} Σ_{i ∈ S_k} log p(x_{k,i} | x_{k,<i})) / (Σ_{k ∈ gap} |S_k|) )
+PPL_ref = exp( - (Σ_{k ∈ ref} Σ_{i ∈ S_k} log p(x_{k,i} | x_{k,<i})) / (Σ_{k ∈ ref} |S_k|) )
+```
+
+For diagnostic transparency, macro-average perplexities (`(1/K) * Σ PPL_k`) and per-task
+perplexities (`PPL_k`) are also computed and persisted in `results.edn` and `summary.csv`.
+
+**Decision rule (pre-registered)**:
+- **GO** iff `PPL_gap / PPL_ref >= 1.50`.
 - **NO-GO** otherwise.
 
-**Verdict mapping**: GO → adopt the LoRA SFT ticket with the four gap tasks as first
-targets. NO-GO → do not proceed to LoRA on these trajectories; rethink (sampling,
-harness, or target selection) and record the rationale in the decision log.
+**Verdict mapping & downstream SFT filtering**:
+- **GO** → Adopt the LoRA SFT ticket. For initial dataset composition, include gap tasks whose individual
+  headroom ratio `r_k = PPL_k / PPL_ref >= 1.30`. If any gap task exhibits `r_k < 1.30` despite
+  aggregate GO, flag it for sampling/prompting investigation rather than unconditional inclusion in the initial SFT mix.
+- **NO-GO** → Do not proceed to LoRA on these trajectories; rethink (sampling, harness, or target selection)
+  and record the rationale in the decision log.
 
 **Kill criteria** (abort the probe, verdict `killed`):
 
-- Teacher trajectories cannot be captured (31B fails to solve a gap task within the
-  standard agentic budget after re-run).
+- Teacher trajectories cannot be captured: 31B fails to solve a gap task under deterministic greedy
+  decoding (`T=0.0`, seed 0) and fails after up to 2 seed-perturbed retries (`T=0.2`, seeds 1 and 2).
 - Tokenizer mismatch: E4B and 31B tokenizers are not the identical Gemma 4 BPE vocab
   (262144). Abort rather than score across vocabularies.
 - Checkpoint SHA mismatch on either substrate vs the pinned values in §4.
@@ -90,34 +102,49 @@ harness, or target selection) and record the rationale in the decision log.
 ## 3. Mathematical Specification
 
 Per-position log-probability of target tokens under teacher forcing. Given token ids
-`x[0..n-1]` (prompt ++ teacher-generated tokens) and the same sequence as targets
-shifted by one, the model defines
+`x[0..n-1]` (prompt ++ teacher-generated tokens), the model defines:
 
 ```
-log p(x[i] | x[<i]) = log_softmax(logits[i-1])[x[i]]
+log p(x[i] | x[<i]) = log_softmax(logits[i-1])[x[i]]  for i ∈ [1, n-1]
 ```
 
-where `logits[i-1]` are the model's output logits at position `i-1`. Perplexity over a
-scored span `S` of teacher-generated tokens:
+where `logits[i-1]` are the model's output logits at position `i-1`. Position 0 has no
+preceding context and is un-scored.
+
+Perplexity over a scored token span `S ⊆ {1, ..., n-1}` of teacher-generated tokens:
 
 ```
 PPL(S) = exp( - (1/|S|) * Σ_{i ∈ S} log p(x[i] | x[<i]) )
 ```
 
-Implementation constraint: the prefill executable is compiled with `:last-token-only?`
-today, so only the final position's logits materialize. The scoring op is a prefill
-*variant* that, instead of emitting `[seq_len × vocab]` logits (2048 × 262144 bf16 ≈
-1 GB per forward — forbidden), takes target token ids as an additional input and
-emits a `[seq_len]` vector of `log_softmax(logits)[pos, target[pos]]` via a fused
-gather. The per-position `[:logits :b :p :v]` tensor already exists in the model AST
-(`gemma4.clj`); it is currently just not emitted. This is one additional output
-variable plus a gather — declarative Tensor Logic, no new math.
+**Masking & Segment Delineation**:
+Each trajectory is structured via Gemma 4 turn tags:
+- Scored span `S`: tokens in `<start_of_turn>model\n...<end_of_turn>` turns. System prompts, user
+  instructions, and tool results (`<start_of_turn>tool\n...`) provide context to the causal attention
+  mask but have scoring mask 0.
+- Thinking segment `S_think ⊆ S`: tokens enclosed by `<|channel>thought\n` (token ID 108)
+  and `<channel|>` (token ID 109).
+- Code/syntax segment `S_code ⊆ S`: model turn tokens outside the thinking channel.
+
+**Implementation constraint & Tensor Logic Lowering**:
+The existing prefill executable is compiled with `:last-token-only?` to emit only final-position logits.
+The scoring op is a prefill *variant* that takes target token ids as an input and emits a `[seq_len]`
+vector of target log-probabilities `log_softmax(logits)[pos, target[pos]]`. Returning only the
+`[seq_len]` vector (`2048 × 4` bytes = 8 KB) to the host adheres to Rule 4 (zero off-heap
+bandwidth waste), strictly avoiding materializing full `[seq_len × vocab]` logits (`2048 × 262144`
+bf16 ≈ 1 GB per forward).
+
+*Lowering Scope*: `lower-gather!` in `einsum.logic.lower` is currently specialized for rank-2 table
+embedding lookup (`:collapsed_slice_dims [0]`, `:start_index_map [0]`). Step 2 will generalize
+Tensor Logic lowering to support gathering target logits along axis `:v` (dimension 2 of rank-3
+logits `[:log_probs :b :p :v]`) across both the PJRT MLIR lowering compiler and the pure-JVM
+StableHLO interpreter.
 
 ## 4. Execution Harness & Silicon Verification Plan
 
 - **Harness Namespace**: `experiments.gate3-evals.perplexity-probe-v1.run`
 - **Output Artifacts**: `results.edn`, `summary.csv` (per-task PPL overall, thinking-segment
-  PPL, code/tool-call-segment PPL, the GO/NO-GO verdict)
+  PPL, code/tool-call-segment PPL, ratio to reference, and the GO/NO-GO verdict)
 
 ### Step 1 — Trajectory capture (host, 31B-QAT)
 
@@ -127,10 +154,14 @@ trajectories are on disk. Required harness change: a `--save-transcripts` flag (
 equivalent opt) that bypasses the failure-only filter. Keep the ledger append-only;
 do not alter existing rows.
 
-Then run 31B-QAT agentic (fenced, rep-pen 1.0, current defaults) on the four gap tasks
-plus the two contrast tasks. Keep only successful trajectories (hidden tests all-pass).
-Save full transcripts: every `:model` turn's response text in order, with turn boundaries
-and tool-result interleaving preserved.
+Protocol:
+1. Run 31B-QAT agentic (fenced, rep-pen 1.0, current defaults) with deterministic greedy decoding
+   (`T=0.0`, seed 0) on the four gap tasks (`first-n`, `my-range`, `deep-update-vals`, `lazy-interleave`)
+   plus the two contrast tasks (`freqs`, `partition-by-parity`).
+2. If any task fails under greedy decoding due to environment non-determinism, retry up to 2 times
+   with fixed seeds (`T=0.2`, seeds 1 and 2). If any task fails all 3 attempts, abort with verdict `killed`.
+3. Keep only successful trajectories (hidden tests all-pass). Save full transcripts: every `:model`
+   turn's response text in order, with turn boundaries and tool-result interleaving preserved.
 
 Pinned checkpoint SHAs (verify before running; fail loudly on mismatch):
 
@@ -138,33 +169,36 @@ Pinned checkpoint SHAs (verify before running; fail loudly on mismatch):
 - Student E4B-QAT-INT4: source `google/gemma-4-E4B-it-qat-q4_0-unquantized`, project SHA
   `33ebfa9b85f077df19c0526c9f0e039c044d4e64eef47368730208b478dc05ec`
 
-### Step 2 — Scoring op
+### Step 2 — Scoring op & Tensor Logic generalization
 
-New runtime fn, e.g. `einsum.models.gemma4.runtime/score-sequence-log-probs`: inputs are
-the token-id vector and target ids; runs the prefill-variant executable with the fused
-target gather; returns the `[seq_len]` log-prob vector.
+Strict TDD per repo rules (generative tests first on the pure-JVM StableHLO interpreter):
 
-Strict TDD per repo rules, generative tests first. Test on the pure-JVM StableHLO
-interpreter with a tiny model config (first-class backend for this):
-
-1. Scored log-probs are finite, ≤ 0, and length matches input.
-2. Consistency (property test, small n): scoring a sequence prefix-by-prefix equals the
-   per-step logits from the existing stepwise generation path.
-3. `perplexity = exp(-mean(log-probs))` sanity on a known sequence.
-
-Host-verify on the real E4B-QAT checkpoint before trusting numbers.
+1. **Tensor Logic Gather Generalization**:
+   - Extend `einsum.logic.lower` and `einsum.logic.interpret` to support gathering along axis 2
+     (e.g., extracting `target[p]` from `[1, seq_len, vocab_size]` log-softmax distribution).
+   - Generative property test: verify axis-gather matches slice-and-index references for arbitrary shapes.
+2. **Runtime Scoring Op** (`einsum.models.gemma4.runtime/score-sequence-log-probs`):
+   - Compiles prefill scoring executable with target gather, returning `[seq_len]` log-prob vector.
+   - Property tests:
+     - Scored log-probs are finite, $\le 0.0$, and length matches sequence input.
+     - Consistency test: scoring a sequence matches the per-step logits from stepwise generation.
+     - Known-sequence test: verifies `PPL = exp(-mean(log-probs))` against analytical ground truth.
+   - Silicon verification: test forward pass on host RX 7900 XTX with `gemma-4-e4b-it-qat-int4`.
 
 ### Step 3 — Probe
 
-For each trajectory: tokenize the teacher's model-turn texts with the verified tokenizer;
-teacher-force through E4B-QAT-INT4. **Score only teacher-generated tokens** (thinking,
-code, tool-call syntax); condition on the full context (prompt + prior turns + tool
-results) but do not score tool outputs — the student didn't generate them and scoring
-them would muddy the signal.
-
-Report per task: overall PPL, thinking-segment PPL, code/tool-call-segment PPL. Apply
-the §2 decision rule and record GO or NO-GO with the ratio. The report states the
-numbers, the ratio, and the verdict — no stronger claim (cf. §1 necessity caveat).
+For each trajectory:
+1. Tokenize the teacher's transcript with the pinned BPE tokenizer.
+2. Construct the boolean evaluation mask vector:
+   - Mark position 0 as un-scored.
+   - For positions $1 \dots n-1$, mark as 1 iff target token belongs to a `:model` turn.
+   - Mark thinking segment tokens (`<|channel>thought\n` to `<channel|>`).
+   - Mark code/syntax segment tokens (model tokens outside thinking).
+3. Teacher-force through E4B-QAT-INT4 using `score-sequence-log-probs`.
+4. Report per task: overall PPL, thinking-segment PPL, code/syntax-segment PPL, scored token counts,
+   and individual ratio `r_k = PPL_k / PPL_ref`.
+5. Compute corpus micro-average `PPL_gap` and `PPL_ref`, apply the §2 decision rule,
+   and record GO or NO-GO with the aggregate ratio.
 
 ---
 
@@ -173,3 +207,5 @@ numbers, the ratio, and the verdict — no stronger claim (cf. §1 necessity cav
 | Date | Event | Rationale |
 |---|---|---|
 | 2026-09-30 | `proposed` | Stage 1 RFC drafted. Motivated by the `prompt_tuning_v1` REJECT dissociation (behavior change without conversion → capacity gap, not elicitation gap). Scoping found two blockers: no successful teacher trajectories on disk (ledger keeps transcripts on failure only) and no scoring path in the generation-only runtime. Pre-registered GO/NO-GO rule: `PPL_gap / PPL_ref >= 1.5`. |
+| 2026-09-30 | `hardened` | Hardened Stage 1 spec following review: formalized micro-average (token-weighted cross-entropy) primary decision rule, disaggregated per-task SFT filtering criterion (`r_k >= 1.30`), pre-registered greedy capture with bounded retry, defined turn/channel boundary token masks, and scheduled Tensor Logic gather generalization in Step 2. |
+
