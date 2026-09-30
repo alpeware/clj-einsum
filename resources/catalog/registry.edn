@@ -83,4 +83,17 @@
                   :quarantine-path "resources/catalog/gate3_evals/multipl_e/quarantine.edn"
                   :provenance-path "resources/catalog/gate3_evals/multipl_e/provenance.edn"
                   :sealed-sha256 "c5bce6c97e320f1e491e67fc9f0c0d8037ef2889ecd3e130ac1ca75a614d309f"
-                  :verified-by nil}}}
+                  :verified-by nil}
+   :prompt-tuning-v1 {:gate :gate3-evals
+                      :slug "prompt_tuning_v1"
+                      :title "Prompt Tuning v1 (Worked Agentic Self-Correction)"
+                      :track :experiment
+                      :status :active
+                      :verdict :rejected
+                      :frozen "2026-09-30"
+                      :generation 0
+                      :target-hardware "AMD Radeon RX 7900 XTX (24GB)"
+                      :spec-path "resources/catalog/gate3_evals/prompt_tuning_v1/spec.md"
+                      :results-path "resources/catalog/gate3_evals/prompt_tuning_v1/pilot_results.edn"
+                      :summary-path "resources/catalog/gate3_evals/prompt_tuning_v1/summary.csv"
+                      :verified-by nil}}}
