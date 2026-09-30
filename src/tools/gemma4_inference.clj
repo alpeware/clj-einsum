@@ -70,6 +70,7 @@
 (def compile-tensor-logic-executable kernels/compile-tensor-logic-executable)
 (def compile-gemma4-prefill-executable kernels/compile-gemma4-prefill-executable)
 (def compile-gemma4-kv-executable kernels/compile-gemma4-kv-executable)
+(def compile-gemma4-attention-decode-executable kernels/compile-gemma4-attention-decode-executable)
 (def compile-in-vram-loop-executable kernels/compile-in-vram-loop-executable)
 (def compile-executable kernels/compile-tensor-logic-executable)
 

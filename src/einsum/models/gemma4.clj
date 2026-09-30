@@ -628,9 +628,12 @@
                                     (or (= (:backend config) :rocm) (= (:target config) :rocm)))))
          proj-attrs {:use-w4a16-gemv? use-w4a16?}
          norm-dtype (get config :norm-dtype (if (or is-int8? is-int4? is-ternary?) :bf16 (get config :weight-dtype :bf16)))
+         turboquant? (boolean (or (:turboquant-kv? config)
+                                  (= (:kv-quant config) :turboquant)
+                                  (= (:kv-quant config) :turbo-kv)))
 
-         actual-k-cache (if is-shared? shared-k [:k_cache_out i])
-         actual-v-cache (if is-shared? shared-v [:v_cache_out i])]
+         actual-k-cache (if is-shared? shared-k (if turboquant? [:k_cache_in i] [:k_cache_out i]))
+         actual-v-cache (if is-shared? shared-v (if turboquant? [:v_cache_in i] [:v_cache_out i]))]
 
      [:block {:name [:gemma4_kv_layer i]}
       ;; 1. Pre-Attention RMSNorm
@@ -656,18 +659,28 @@
          [:reshape [:k_normed_3d :b :p :kvd] [:k_normed_4d :b :p :kvh :dh] {:shape [1 1 kv-dim]}]
          [:rope [:k_rope :b :p :kvd] [:k_normed_3d :b :p :kvd] {:head-dim head-dim :theta theta :rope-proportion rope-prop :pos :pos :max-seq-len max-seq-len}]
          [:reshape [:k_ro :b :p :kvh :dh] [:k_rope :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
-         [:dynamic-update-slice [[:k_cache_out i] :b :kvs :kvh :dh] [:k_cache_in :b :kvs :kvh :dh] [:k_ro :b :p :kvh :dh]
-          (merge {:start-indices [0 :pos 0 0]}
-                 (when ring-buffer? {:window window}))]
-         [:dynamic-update-slice [[:v_cache_out i] :b :kvs :kvh :dh] [:v_cache_in :b :kvs :kvh :dh] [:v_heads :b :p :kvh :dh]
-          (merge {:start-indices [0 :pos 0 0]}
-                 (when ring-buffer? {:window window}))]])
+         (if turboquant?
+           [:block {:name [:tq_cache_passthrough i]}
+            [:= [[:k_cache_out i] :b :kvs :kvh :pdh] [:k_cache_in :b :kvs :kvh :pdh]]
+            [:= [[:v_cache_out i] :b :kvs :kvh :pdh] [:v_cache_in :b :kvs :kvh :pdh]]]
+           [:block {:name [:cache_update i]}
+            [:dynamic-update-slice [[:k_cache_out i] :b :kvs :kvh :dh] [:k_cache_in :b :kvs :kvh :dh] [:k_ro :b :p :kvh :dh]
+             (merge {:start-indices [0 :pos 0 0]}
+                    (when ring-buffer? {:window window}))]
+            [:dynamic-update-slice [[:v_cache_out i] :b :kvs :kvh :dh] [:v_cache_in :b :kvs :kvh :dh] [:v_heads :b :p :kvh :dh]
+             (merge {:start-indices [0 :pos 0 0]}
+                    (when ring-buffer? {:window window}))]])])
+
+      (when turboquant?
+        [:block {:name [:tq_unpack_layer i]}
+         [:turboquant-unpack [[:k_unpacked i] :b :kvs :kvh :dh] [actual-k-cache :b :kvs :kvh :pdh]]
+         [:turboquant-unpack [[:v_unpacked i] :b :kvs :kvh :dh] [actual-v-cache :b :kvs :kvh :pdh]]])
 
       ;; 4 & 5. Chunked Scaled Dot-Product Attention (Online Streaming Softmax)
       [:chunked-attention [:ctx :b :p :h :dh]
        [:q_ro :b :p :h :dh]
-       [actual-k-cache :b :kvs :kvh :dh]
-       [actual-v-cache :b :kvs :kvh :dh]
+       [(if turboquant? [:k_unpacked i] actual-k-cache) :b :kvs :kvh :dh]
+       [(if turboquant? [:v_unpacked i] actual-v-cache) :b :kvs :kvh :dh]
        (merge {:pos :pos
                :chunk-size (min 64 layer-seq-len)
                :head-dim head-dim

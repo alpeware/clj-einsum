@@ -1604,20 +1604,25 @@
         c-6-eqn  {:op :stablehlo/constant :value (int 6) :type [:tensor [] :i8] :outvars [c-6]}
 
         cb-table (gen-id "c_tq_cb" counter)
-        cb-table-eqn {:op :stablehlo/constant :value (float-array [-1.5104 -0.4528 0.4528 1.5104])
+        cb-table-eqn {:op :stablehlo/constant :value [-1.5104 -0.4528 0.4528 1.5104]
                       :type [:tensor [4] norm-dtype] :outvars [cb-table]}
+
+        lookup-shape (conj leading-dims last-dim)
 
         ;; Slice 0: (codes & 0x03)
         s0-code (gen-id "t_tq_s0_code" counter)
         s0-eqn {:op :stablehlo/and :invars [codes-name c-03] :outvars [s0-code]}
         s0-i32 (gen-id "t_tq_s0_i32" counter)
-        s0-i32-eqn {:op :stablehlo/convert :invars [s0-code] :outvars [s0-i32] :attrs {:target-dtype :i32}}
+        s0-i32-eqn {:op :stablehlo/convert :invars [s0-code] :outvars [s0-i32] :attrs {:target-dtype :i32 :target_dtype :i32}}
         s0-3d (gen-id "t_tq_s0_3d" counter)
         s0-3d-eqn {:op :stablehlo/reshape :invars [s0-i32] :outvars [s0-3d] :attrs {:shape slice-shape}}
         s0-val (gen-id "t_tq_s0_val" counter)
         s0-gather-eqn {:op :stablehlo/gather :invars [cb-table s0-3d] :outvars [s0-val]
                        :attrs {:offset_dims [] :collapsed_slice_dims [0] :start_index_map [0]
-                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]}}
+                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]
+                               :type [:tensor lookup-shape norm-dtype]}}
+        s0-sl (gen-id "t_tq_s0_sl" counter)
+        s0-sl-eqn {:op :stablehlo/reshape :invars [s0-val] :outvars [s0-sl] :attrs {:shape slice-shape}}
 
         ;; Slice 1: ((codes >> 2) & 0x03)
         s1-sh (gen-id "t_tq_s1_sh" counter)
@@ -1625,13 +1630,16 @@
         s1-code (gen-id "t_tq_s1_code" counter)
         s1-eqn {:op :stablehlo/and :invars [s1-sh c-03] :outvars [s1-code]}
         s1-i32 (gen-id "t_tq_s1_i32" counter)
-        s1-i32-eqn {:op :stablehlo/convert :invars [s1-code] :outvars [s1-i32] :attrs {:target-dtype :i32}}
+        s1-i32-eqn {:op :stablehlo/convert :invars [s1-code] :outvars [s1-i32] :attrs {:target-dtype :i32 :target_dtype :i32}}
         s1-3d (gen-id "t_tq_s1_3d" counter)
         s1-3d-eqn {:op :stablehlo/reshape :invars [s1-i32] :outvars [s1-3d] :attrs {:shape slice-shape}}
         s1-val (gen-id "t_tq_s1_val" counter)
         s1-gather-eqn {:op :stablehlo/gather :invars [cb-table s1-3d] :outvars [s1-val]
                        :attrs {:offset_dims [] :collapsed_slice_dims [0] :start_index_map [0]
-                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]}}
+                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]
+                               :type [:tensor lookup-shape norm-dtype]}}
+        s1-sl (gen-id "t_tq_s1_sl" counter)
+        s1-sl-eqn {:op :stablehlo/reshape :invars [s1-val] :outvars [s1-sl] :attrs {:shape slice-shape}}
 
         ;; Slice 2: ((codes >> 4) & 0x03)
         s2-sh (gen-id "t_tq_s2_sh" counter)
@@ -1639,13 +1647,16 @@
         s2-code (gen-id "t_tq_s2_code" counter)
         s2-eqn {:op :stablehlo/and :invars [s2-sh c-03] :outvars [s2-code]}
         s2-i32 (gen-id "t_tq_s2_i32" counter)
-        s2-i32-eqn {:op :stablehlo/convert :invars [s2-code] :outvars [s2-i32] :attrs {:target-dtype :i32}}
+        s2-i32-eqn {:op :stablehlo/convert :invars [s2-code] :outvars [s2-i32] :attrs {:target-dtype :i32 :target_dtype :i32}}
         s2-3d (gen-id "t_tq_s2_3d" counter)
         s2-3d-eqn {:op :stablehlo/reshape :invars [s2-i32] :outvars [s2-3d] :attrs {:shape slice-shape}}
         s2-val (gen-id "t_tq_s2_val" counter)
         s2-gather-eqn {:op :stablehlo/gather :invars [cb-table s2-3d] :outvars [s2-val]
                        :attrs {:offset_dims [] :collapsed_slice_dims [0] :start_index_map [0]
-                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]}}
+                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]
+                               :type [:tensor lookup-shape norm-dtype]}}
+        s2-sl (gen-id "t_tq_s2_sl" counter)
+        s2-sl-eqn {:op :stablehlo/reshape :invars [s2-val] :outvars [s2-sl] :attrs {:shape slice-shape}}
 
         ;; Slice 3: ((codes >> 6) & 0x03)
         s3-sh (gen-id "t_tq_s3_sh" counter)
@@ -1653,26 +1664,29 @@
         s3-code (gen-id "t_tq_s3_code" counter)
         s3-eqn {:op :stablehlo/and :invars [s3-sh c-03] :outvars [s3-code]}
         s3-i32 (gen-id "t_tq_s3_i32" counter)
-        s3-i32-eqn {:op :stablehlo/convert :invars [s3-code] :outvars [s3-i32] :attrs {:target-dtype :i32}}
+        s3-i32-eqn {:op :stablehlo/convert :invars [s3-code] :outvars [s3-i32] :attrs {:target-dtype :i32 :target_dtype :i32}}
         s3-3d (gen-id "t_tq_s3_3d" counter)
         s3-3d-eqn {:op :stablehlo/reshape :invars [s3-i32] :outvars [s3-3d] :attrs {:shape slice-shape}}
         s3-val (gen-id "t_tq_s3_val" counter)
         s3-gather-eqn {:op :stablehlo/gather :invars [cb-table s3-3d] :outvars [s3-val]
                        :attrs {:offset_dims [] :collapsed_slice_dims [0] :start_index_map [0]
-                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]}}
+                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]
+                               :type [:tensor lookup-shape norm-dtype]}}
+        s3-sl (gen-id "t_tq_s3_sl" counter)
+        s3-sl-eqn {:op :stablehlo/reshape :invars [s3-val] :outvars [s3-sl] :attrs {:shape slice-shape}}
 
         concat-dim (dec (count slice-shape))
         cat-var (gen-id "t_tq_cat" counter)
-        cat-eqn {:op :stablehlo/concatenate :invars [s0-val s1-val s2-val s3-val] :outvars [cat-var]
+        cat-eqn {:op :stablehlo/concatenate :invars [s0-sl s1-sl s2-sl s3-sl] :outvars [cat-var]
                  :attrs {:dimension concat-dim}}
         reshaped-z (gen-id "t_tq_z_hat" counter)
         reshaped-eqn {:op :stablehlo/reshape :invars [cat-var] :outvars [reshaped-z] :attrs {:shape out-shape}}
 
         unpack-eqns [c-03-eqn c-2-eqn c-4-eqn c-6-eqn cb-table-eqn
-                     s0-eqn s0-i32-eqn s0-3d-eqn s0-gather-eqn
-                     s1-sh-eqn s1-eqn s1-i32-eqn s1-3d-eqn s1-gather-eqn
-                     s2-sh-eqn s2-eqn s2-i32-eqn s2-3d-eqn s2-gather-eqn
-                     s3-sh-eqn s3-eqn s3-i32-eqn s3-3d-eqn s3-gather-eqn
+                     s0-eqn s0-i32-eqn s0-3d-eqn s0-gather-eqn s0-sl-eqn
+                     s1-sh-eqn s1-eqn s1-i32-eqn s1-3d-eqn s1-gather-eqn s1-sl-eqn
+                     s2-sh-eqn s2-eqn s2-i32-eqn s2-3d-eqn s2-gather-eqn s2-sl-eqn
+                     s3-sh-eqn s3-eqn s3-i32-eqn s3-3d-eqn s3-gather-eqn s3-sl-eqn
                      cat-eqn reshaped-eqn]
         _ (swap! eqns-atom into unpack-eqns)
 

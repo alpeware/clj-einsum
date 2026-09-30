@@ -106,7 +106,7 @@
                     (assoc acc (first outvars) out-t))
 
                   (= op :stablehlo/convert)
-                  (let [target-dtype (name (get attrs :target_dtype :f32))
+                  (let [target-dtype (name (or (get attrs :target-dtype) (get attrs :target_dtype) :f32))
                         [in-dims _] (or (parse-tensor-dims in-type) [[1] "i32"])
                         out-t (if (seq in-dims)
                                 (str "tensor<" (str/join "x" in-dims) "x" target-dtype ">")
@@ -316,8 +316,8 @@
             [_ dtype-extracted] (parse-tensor-dims out-type)
             dtype-str (or dtype-extracted "f32")
             is-int? (boolean (re-find #"^(?:i32|i64|i8|i1|ui8|ui32|si32)$" dtype-str))]
-        (if (vector? value)
-          (let [flat-vals (flatten value)
+        (if (or (vector? value) (sequential? value) (and value (.isArray (.getClass ^Object value))))
+          (let [flat-vals (flatten (if (and value (.isArray (.getClass ^Object value))) (seq value) value))
                 val-strs (if is-int?
                            (map #(if (number? %) (str (long %)) "0") flat-vals)
                            (map #(if (number? %) (format "%.6e" (double %)) "0.000000e+00") flat-vals))
@@ -335,7 +335,7 @@
       (= op :stablehlo/convert)
       (let [in-var (first invars)
             in-type (get var-types in-var "tensor<1x128x768xf32>")
-            target-dtype (name (get attrs :target_dtype :f32))
+            target-dtype (name (or (get attrs :target-dtype) (get attrs :target_dtype) :f32))
             [in-dims _] (or (parse-tensor-dims in-type) [[1] "i32"])
             out-type (if (seq in-dims)
                        (str "tensor<" (str/join "x" in-dims) "x" target-dtype ">")

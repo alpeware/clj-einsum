@@ -128,7 +128,9 @@
          (assoc known-shapes head-name (vec out-shape)))
 
        (or (= (first eqn) :ternary-unpack)
-           (= (first eqn) :ternary-dequant))
+           (= (first eqn) :ternary-dequant)
+           (= (first eqn) :turboquant-unpack)
+           (= (first eqn) :turboquant-dequant))
        (let [head (ast/head eqn)
              head-name (if (vector? head) (first head) head)
              attrs (ast/attrs eqn)
@@ -136,10 +138,10 @@
              packed-name (first (first body))
              packed-shape (get known-shapes packed-name [1 1])
              rank (count packed-shape)
+             leading-dims (subvec (vec packed-shape) 0 (dec rank))
+             last-dim (last packed-shape)
              out-shape (or (:shape attrs)
-                           (if (= rank 1)
-                             [(* (long (first packed-shape)) 4)]
-                             [(first packed-shape) (* (long (second packed-shape)) 4)]))]
+                           (conj leading-dims (* (long last-dim) 4)))]
          (assoc known-shapes head-name (vec out-shape)))
 
        (= (first eqn) :argmax)

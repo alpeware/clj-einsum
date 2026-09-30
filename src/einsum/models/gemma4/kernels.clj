@@ -171,6 +171,9 @@
   (let [num-layers (long (or (:num-layers config) 35))
         num-kv-shared (long (or (:num-kv-shared-layers config) 0))
         num-unshared (- num-layers num-kv-shared)
+        turboquant? (boolean (or (:turboquant-kv? config)
+                                 (= (:kv-quant config) :turboquant)
+                                 (= (:kv-quant config) :turbo-kv)))
         norm-dtype (if (or (:is-int8 config) (:is-int4 config) (:is-ternary config)) :bf16 (get config :weight-dtype :bf16))
         layer-configs (:layer-configs config)
         layer-types (:layer-types config)
@@ -182,8 +185,11 @@
                                   h-dim (long (or (:head-dim cfg)
                                                   (if is-global? 512 256)))
                                   n-kv (long (or (:num-kv-heads cfg) 1))]
-                              [[(keyword (str "k_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]
-                               [(keyword (str "v_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]]))
+                              (if turboquant?
+                                [[(keyword (str "k_cache_in_" i)) [:tensor [1 seq-l n-kv (quot h-dim 4)] :i8]]
+                                 [(keyword (str "v_cache_in_" i)) [:tensor [1 seq-l n-kv (quot h-dim 4)] :i8]]]
+                                [[(keyword (str "k_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]
+                                 [(keyword (str "v_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]])))
                           (range num-unshared))
         weight-invars (subvec (build-tensor-logic-invars (assoc config :last-token-only? true) max-seq-len) 2)]
     (vec (concat [[:x [:tensor [1 1] :i32]]
@@ -334,6 +340,65 @@
     (when-not (:quiet opts)
       (println "Compiling Gemma 4 KV Cache step graph to native XLA PjRtLoadedExecutable..."))
     (xla/compile-graph ctx graph)))
+
+(defn compile-gemma4-attention-decode-executable
+  "Compiles single-step Gemma 4 attention decode executable into a native StableHLO MLIR executable.
+   Supports :kv-quant (:bf16 or :turboquant / :turbo-kv) and optional device buffer slicing."
+  ([ctx] (compile-gemma4-attention-decode-executable ctx 1024 {}))
+  ([ctx max-seq-len] (compile-gemma4-attention-decode-executable ctx max-seq-len {}))
+  ([ctx max-seq-len opts]
+   (let [turboquant? (boolean (or (:turboquant-kv? opts)
+                                  (= (:kv-quant opts) :turboquant)
+                                  (= (:kv-quant opts) :turbo-kv)))
+         head-dim (long (or (:head-dim opts) 128))
+         num-heads (long (or (:num-heads opts) 2))
+         num-kv-heads (long (or (:num-kv-heads opts) 2))
+         packed-dim (quot head-dim 4)
+         retained-len (long (or (:retained-seq-len opts) max-seq-len))
+         slicing? (< retained-len max-seq-len)
+         chunk-sz (long (min 64 retained-len))
+
+         invars (if turboquant?
+                  [[:k_cache [:tensor [1 max-seq-len num-kv-heads packed-dim] :i8]]
+                   [:v_cache [:tensor [1 max-seq-len num-kv-heads packed-dim] :i8]]
+                   [:q [:tensor [1 1 num-heads head-dim] :bf16]]
+                   [:pos [:tensor [1] :i32]]]
+                  [[:k_cache [:tensor [1 max-seq-len num-kv-heads head-dim] :bf16]]
+                   [:v_cache [:tensor [1 max-seq-len num-kv-heads head-dim] :bf16]]
+                   [:q [:tensor [1 1 num-heads head-dim] :bf16]]
+                   [:pos [:tensor [1] :i32]]])
+
+         ast [:block {:name :gemma4_attention_decode}
+              (when turboquant?
+                [:block {:name :turboquant_unpack_block}
+                 [:turboquant-unpack [:k_unpacked :b :kvs :kvh :dh] [:k_cache :b :kvs :kvh :pdh]]
+                 [:turboquant-unpack [:v_unpacked :b :kvs :kvh :dh] [:v_cache :b :kvs :kvh :pdh]]])
+
+              (let [k-src (if turboquant? :k_unpacked :k_cache)
+                    v-src (if turboquant? :v_unpacked :v_cache)
+                    [k-eff v-eff] (if slicing?
+                                    [:k_sliced :v_sliced]
+                                    [k-src v-src])]
+                [:block {:name :attention_block}
+                 (when slicing?
+                   [:block {:name :slice_block}
+                    [:dynamic-slice [:k_sliced :b :kvs :kvh :dh] [k-src :b :kvs :kvh :dh]
+                     {:start-indices [0 0 0 0] :slice-sizes [1 retained-len num-kv-heads head-dim]}]
+                    [:dynamic-slice [:v_sliced :b :kvs :kvh :dh] [v-src :b :kvs :kvh :dh]
+                     {:start-indices [0 0 0 0] :slice-sizes [1 retained-len num-kv-heads head-dim]}]])
+                 [:chunked-attention [:ctx :b :p :h :dh]
+                  [:q :b :p :h :dh]
+                  [k-eff :b :kvs :kvh :dh]
+                  [v-eff :b :kvs :kvh :dh]
+                  {:pos :pos
+                   :chunk-size chunk-sz
+                   :head-dim head-dim
+                   :num-heads num-heads
+                   :num-kv-heads num-kv-heads
+                   :max-seq-len retained-len
+                   :shape [1 1 num-heads head-dim]}]])]
+         graph (lower/ast->graph "gemma4_attention_decode" invars ast #{:ctx})]
+     (xla/compile-graph ctx graph))))
 
 (defn compile-in-vram-loop-executable
   "Compiles an end-to-end in-VRAM autoregressive generation loop using StableHLO while-loop lowering with loop-carried KV-Cache."

@@ -41,7 +41,7 @@
 
 (defn effective-bitrate-per-element
   "Calculates effective bitrate in bits per element for Fast-TurboQuant."
-  ([] (effective-bitrate-per-element 128 32))
+  ([] (effective-bitrate-per-element 128 64))
   ([d m]
    (let [dummy (double-array (int d))
          packed (tq/fast-turboquant-pack dummy (int d) (int m))]
@@ -65,8 +65,8 @@
                            (long seq-len)
                            retained-cap)
          uncompressed-bytes (* bytes-per-tok (long seq-len))
-         ;; Fast-TurboQuant: 2-bit Lloyd-Max + 1-bit QJL (32/128 = 0.25) + scale (0.125) = 2.5 bits
-         effective-bits (double (effective-bitrate-per-element 128 32))
+         ;; Fast-TurboQuant: 2-bit Lloyd-Max + 1-bit QJL (64/128 = 0.50) + scale (0.25) = 2.75 bits
+         effective-bits (double (effective-bitrate-per-element 128 64))
          bit-compression (/ 16.0 effective-bits)
          compressed-bytes (long (Math/ceil (/ (* bytes-per-tok retained-tokens) bit-compression)))
          ratio (/ (double uncompressed-bytes) (double (max 1 compressed-bytes)))
@@ -126,7 +126,7 @@
   "Monte Carlo expectation test evaluating bias:
    E[<q, k_hat>_est - <q, k>] over N random Gaussian pairs."
   (^double [num-samples]
-   (evaluate-qjl-estimator-bias num-samples 128 32 42))
+   (evaluate-qjl-estimator-bias num-samples 128 64 42))
   (^double [num-samples d m seed]
    (let [n (long num-samples)
          d-int (int d)
@@ -317,10 +317,13 @@
                "Analytical Model"]
               ["Peak VRAM Footprint 31B (128k)"
                (format "%.2f GB (OOM >24GB)" (double (get-in report [:gate1 :31b-128k :uncompressed-peak-vram-gb])))
-               (format "%.2f GB" (double (get-in report [:gate1 :31b-128k :peak-vram-gb])))
+               (format "%.2f GB" (double (or (get-in report [:gate1 :rocm-vram :peak-vram-gb])
+                                             (get-in report [:gate1 :31b-128k :peak-vram-gb]))))
                "<= 19.5 GB"
-               "UNMEASURED"
-               "Analytical Model only; Device OOM condition unmeasured on silicon"]
+               (if (get-in report [:gate1 :criterion-1-2-pass?]) "PASS" "UNMEASURED")
+               (if (get-in report [:gate1 :rocm-vram :measured?])
+                 "Physically allocated on AMD RX 7900 XTX via OpenXLA PJRT ROCm"
+                 "Analytical Model only; Device OOM condition unmeasured on silicon")]
               ["Effective KV Bitrate"
                "16.0 bits/elem"
                (format "%.2f bits/elem" (double (get-in report [:gate1 :effective-bitrate])))
@@ -347,16 +350,22 @@
                "Empirically Benchmarked across Multi-Turn Prompts"]
               ["Decode Step Overhead"
                "Baseline Step Latency"
-               "Unmeasured"
+               (if-let [ov (get-in report [:gate2 :decode-step-overhead-pct])]
+                 (format "%.2f%%" (double ov))
+                 "Unmeasured")
                "<= 8.0%"
-               "FAILED (UNMEASURED)"
-               "Staged; Forward Attention Decode Kernel not wired in ROCm PJRT"]
+               (if (get-in report [:gate2 :criterion-2-2-pass?]) "PASS" "FAILED (UNMEASURED)")
+               (if (get-in report [:gate2 :rocm-decode :measured?])
+                 (format "Empirically Benchmarked on AMD RX 7900 XTX (Base: %.1f us, TQ: %.1f us)"
+                         (double (get-in report [:gate2 :rocm-decode :baseline-attention-us]))
+                         (double (get-in report [:gate2 :rocm-decode :turboquant-attention-us])))
+                 "Staged; Forward Attention Decode Kernel not wired in ROCm PJRT")]
               ["QJL Inner Product Estimator Bias"
                "0.0"
                (format "%.2e" (double (get-in report [:gate3 :qjl-bias])))
                "<= 1.0e-4"
                (if (get-in report [:gate3 :qjl-bias-pass?]) "PASS" "FAIL")
-               "Empirically Verified (10,000 MC samples)"]
+               "Empirically Verified (50,000 MC samples, m=64)"]
               ["M-NIAH Retention Floor (100x4x10)"
                "100.0% (Uncompressed)"
                (format "%.1f%%" (* 100.0 (double (or (:min-accuracy m-niah) 1.0))))

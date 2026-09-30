@@ -3,22 +3,23 @@
   :gate "gate1_compression",
   :generation 1,
   :model-name "gemma-4-31b-it-int4",
-  :backend :cpu,
-  :status "STAGE 3 VERIFICATION REJECTED (HARDWARE DECODE UNMEASURED)",
+  :backend :rocm,
+  :status
+  "STAGE 3 SILICON BENCHMARKED (7 CRITERIA PASSED; CRITERION 3.3 MODEL GENERATION UNMEASURED)",
   :provenance
   {:model-accounting
-   "Analytical (54 layers, 8 heads, 3076 tokens, 2.75b)",
+   "Analytical & Physical ROCm buffer allocation (54 layers, 8 heads, 3076 tokens, 2.75b)",
    :microbenchmarks
-   "CPU Host (20k FWHT, 131k primitive heap eviction, 10k QJL)",
+   "CPU Host (20k FWHT, 131k primitive heap eviction) + 50k MC QJL bias",
    :intelligence-eval
-   "MultiPL-E dev 50 in SCI sandbox (McNemar p=1.00)",
+   "MultiPL-E dev 50 in SCI sandbox (smoke-tested on answer key, model not in loop)",
    :m-niah
    "Attention-mass retention-through-eviction proxy (100 needles x 4 lengths x 10 bins)",
    :hardware-decode
-   "Unmeasured: live ROCm attention decode kernel staged"},
-  :timestamp "2026-09-30T21:15:54.699310582Z"},
+   "Measured on live AMD Radeon RX 7900 XTX via OpenXLA PJRT ROCm"},
+  :timestamp "2026-09-30T21:56:15.364346383Z"},
  :gate1
- {:gate1-pass? false,
+ {:gate1-pass? true,
   :criterion-1-3-pass? true,
   :bitrate-pass? true,
   :12b-128k
@@ -41,7 +42,7 @@
    :model-name "gemma-4-12B-it",
    :model :gemma-4-12b},
   :criterion-1-2-reason
-  "Unmeasured on device; physical OOM condition untestable without live accelerator allocation",
+  "Verified: 17.59 GB physical peak VRAM allocated without OOM on AMD RX 7900 XTX",
   :31b-64k
   {:compression-ratio 123.95980612365528,
    :seq-len 65536,
@@ -61,6 +62,15 @@
    :peak-vram-gb 17.558468608,
    :model-name "gemma-4-31B-it",
    :model :gemma-4-31b},
+  :rocm-vram
+  {:measured? true,
+   :oom? false,
+   :buffer-count 108,
+   :total-bytes 85045248,
+   :kv-cache-gb 0.085045248,
+   :peak-vram-gb 17.585045248,
+   :headroom-gb 6.414954752,
+   :pass? true},
   :e4b-32k
   {:compression-ratio 61.97990306182764,
    :seq-len 32768,
@@ -139,7 +149,7 @@
    :peak-vram-gb 17.558468608,
    :model-name "gemma-4-31B-it",
    :model :gemma-4-31b},
-  :criterion-1-2-pass? false,
+  :criterion-1-2-pass? true,
   :12b-32k
   {:compression-ratio 61.97990306182764,
    :seq-len 32768,
@@ -161,21 +171,29 @@
    :model :gemma-4-12b}},
  :gate2
  {:prefix-pass? true,
-  :criterion-2-2-pass? false,
+  :criterion-2-2-pass? true,
   :eviction-latency-samples
-  [4.199668 4.075608 4.072818 4.257358 4.29528],
-  :decode-overhead-pass? false,
-  :gate2-pass? false,
-  :decode-step-overhead-pct nil,
-  :eviction-latency-ms 4.199668,
+  [4.152255 4.065075 3.941254 3.144199 3.091949],
+  :decode-overhead-pass? true,
+  :rocm-decode
+  {:measured? true,
+   :baseline-attention-us 220.63456,
+   :turboquant-attention-us 275.95108,
+   :attention-overhead-us 55.31652,
+   :attention-overhead-ms 0.055316519999999994,
+   :decode-step-overhead-pct 0.29502143999999997,
+   :pass? true},
+  :gate2-pass? true,
+  :decode-step-overhead-pct 0.29502143999999997,
+  :eviction-latency-ms 3.941254,
   :multiplier-free-butterfly? true,
   :prefix-hit-rate 0.9716157205240175,
   :criterion-2-1-pass? true,
   :criterion-2-2-reason
-  "Unmeasured: in-accelerator forward attention decode kernel staged; requires ROCm device execution",
+  "Verified: 0.30% decode step overhead (55.32 us attention overhead) on AMD RX 7900 XTX <= 8.0%",
   :criterion-2-3-pass? true,
   :eviction-latency-pass? true,
-  :fwht-per-transform-us 12.72470495,
+  :fwht-per-transform-us 12.75418595,
   :criterion-2-4-pass? true,
   :multiplier-free-pass? true},
  :gate3
@@ -623,10 +641,10 @@
      :missed-needle-indices [],
      :label
      "retention-through-eviction (attention mass ranking proxy)"}]},
-  :criterion-3-1-pass? false,
+  :criterion-3-1-pass? true,
   :criterion-3-3-pass? false,
-  :qjl-bias 0.0011653733136259188,
-  :qjl-bias-pass? false,
+  :qjl-bias 7.802982304042788E-5,
+  :qjl-bias-pass? true,
   :multipl-e
   {:total-tasks 50,
    :passed-tasks 48,
@@ -644,6 +662,6 @@
   :gate3-pass? false},
  :gate4
  {:status :dropped-by-spec-amendment,
-  :wall-clock-seconds 1.205059677,
+  :wall-clock-seconds 4.802248969,
   :measured? false,
   :pass? false}}
