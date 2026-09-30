@@ -1,4 +1,0 @@
-variant,name,prompt_sha,passed_count,total_count,pass_rate,delta_vs_p0,tokens_in,tokens_out,wall_seconds,mean_sec_per_task,canary_leaks
-p0,fenced-zero-shot,f1cd6fc2aa4f13a584940554fb0dd080ee3596f29489e764ef534c98e0c75c28,23,50,0.4600,0,80288,95355,2634.02,52.68,0
-p1,fenced-worked-single,19a47bd2ec471fdb7e5ded87e5e14088d87c1990e41441f803de981ef2865d31,23,50,0.4600,0,130911,103342,3621.70,72.43,0
-p2,fenced-worked-dual,f40ca1f3e91357bae5007c74bf241d5c0a5e740391947715eb1a2d685985a33a,19,50,0.3800,-4,145012,90584,3658.78,73.18,0
