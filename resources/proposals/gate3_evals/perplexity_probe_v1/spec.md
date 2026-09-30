@@ -6,7 +6,7 @@
 **Literature**: `[]`
 **Hardware-Target**: `{:reference "AMD Radeon RX 7900 XTX (24GB)" :claim-shape "inference-only; no training"}`
 **Extends**: `"prompt_tuning_v1"`
-**Refutes**: `nil`
+**Refutes**: "H1 (SFT Headroom): E4B-QAT student exhibits elevated perplexity on 31B teacher trajectories (PPL_gap / PPL_ref >= 1.50)"
 **Supersedes**: `nil`
 **Reopens**: `nil`
 
@@ -216,4 +216,5 @@ For each trajectory:
 |---|---|---|
 | 2026-09-30 | `proposed` | Stage 1 RFC drafted. Motivated by the `prompt_tuning_v1` REJECT dissociation (behavior change without conversion → capacity gap, not elicitation gap). Scoping found two blockers: no successful teacher trajectories on disk (ledger keeps transcripts on failure only) and no scoring path in the generation-only runtime. Pre-registered GO/NO-GO rule: `PPL_gap / PPL_ref >= 1.5`. |
 | 2026-09-30 | `hardened` | Hardened Stage 1 spec following review: formalized micro-average (token-weighted cross-entropy) primary decision rule, disaggregated per-task SFT filtering criterion (`r_k >= 1.30`), pre-registered greedy capture with bounded retry for any failure, pinned role-based `:model` content masking with framing-tag mask 0 policy, and scheduled Tensor Logic gather generalization in Step 2. |
+| 2026-09-30 | `decided` | Stage 2 silicon evaluation completed on AMD Radeon RX 7900 XTX. Micro-average gap PPL = 1.8264 (N=6451), ref PPL = 2.0225 (N=1839), primary ratio PPL_gap / PPL_ref = 0.9030 < 1.50 pre-registered threshold. Macro ratio = 0.8738. All per-task ratios r_k in [0.65, 1.01] < 1.30 SFT candidate cutoff. Verdict: NO-GO. E4B student assigns high likelihood to teacher code (code PPL 1.28-1.56); failure is search/sampling dynamics rather than distribution ignorance. SFT compute canceled; proceed directly to Kat-Q ternary / architecture scaling. |
 
