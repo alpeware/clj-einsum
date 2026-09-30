@@ -87,6 +87,8 @@
 
                   (= op :stablehlo/gather)
                   (let [[operand start-indices] in-vars
+                        attrs (:attrs eqn)
+                        explicit-type (or (:type eqn) (:type attrs))
                         operand-t (get acc operand "tensor<50257x768xf32>")
                         indices-t (get acc start-indices "tensor<1x128xi32>")
                         [op-dims op-dtype] (or (parse-tensor-dims operand-t) [[50257 768] "f32"])
@@ -98,7 +100,9 @@
                                         (and (> (count idx-dims) 1) (= (last idx-dims) 1)) (pop idx-dims)
                                         :else idx-dims)
                         out-dims (if (empty? base-idx-dims) [hidden-dim] (conj base-idx-dims hidden-dim))
-                        out-t (str "tensor<" (str/join "x" out-dims) "x" op-dtype ">")]
+                        out-t (if explicit-type
+                                (type->mlir-string explicit-type)
+                                (str "tensor<" (str/join "x" out-dims) "x" op-dtype ">"))]
                     (assoc acc (first outvars) out-t))
 
                   (= op :stablehlo/convert)

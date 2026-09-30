@@ -294,6 +294,7 @@
 (defn op-tanh [t] (unary-float #(Math/tanh %) t))
 (defn op-sine [t] (unary-float #(Math/sin %) t))
 (defn op-cosine [t] (unary-float #(Math/cos %) t))
+(defn op-log [t] (unary-float #(Math/log %) t))
 
 ;; ---------------------------------------------------------------------------
 ;; Coordinate iteration helpers
@@ -987,6 +988,35 @@
                        (aset out idx (float (* (aget out idx) inv-sum))))))))
     {:dtype (:dtype x) :shape x-shape :data (pack-floats (:dtype x) out)}))
 
+(defn op-fused-log-softmax
+  "Fused log-softmax over the last dimension.
+   y = (x - max(x)) - log(sum(exp(x - max(x))))
+   Single pass, numerically stable."
+  [x _attrs]
+  (let [x-shape (vec (:shape x))
+        d (long (last x-shape))
+        n (long (reduce * 1 (butlast x-shape)))
+        ^floats xf (as-floats x)
+        ^floats out (float-array (* n d))]
+    (p-dotimes n 2
+               (fn [i]
+                 (let [off (long (* i d))
+                       max-v (loop [j (long 1) m (aget xf (int off))]
+                               (if (< j d)
+                                 (recur (inc j) (max m (aget xf (int (+ off j)))))
+                                 m))
+                       sum (loop [j (long 0) s (float 0)]
+                             (if (< j d)
+                               (let [idx (int (+ off j))
+                                     e (float (Math/exp (- (aget xf idx) max-v)))]
+                                 (recur (inc j) (+ s e)))
+                               s))
+                       log-sum (float (Math/log (double sum)))]
+                   (dotimes [j d]
+                     (let [idx (int (+ off j))]
+                       (aset out idx (float (- (- (aget xf idx) max-v) log-sum))))))))
+    {:dtype (:dtype x) :shape x-shape :data (pack-floats (:dtype x) out)}))
+
 ;; ---------------------------------------------------------------------------
 ;; Constants
 ;; ---------------------------------------------------------------------------
@@ -1052,6 +1082,7 @@
       :stablehlo/sqrt (one (apply op-sqrt in-tensors))
       :stablehlo/rsqrt (one (apply op-rsqrt in-tensors))
       :stablehlo/exp (one (apply op-exp in-tensors))
+      :stablehlo/log (one (apply op-log in-tensors))
       :stablehlo/tanh (one (apply op-tanh in-tensors))
       :stablehlo/sine (one (apply op-sine in-tensors))
       :stablehlo/cosine (one (apply op-cosine in-tensors))
@@ -1078,6 +1109,7 @@
       :fused/matmul-bias (one (op-fused-matmul-bias (first in-tensors) (second in-tensors) (nth in-tensors 2) attrs))
       :fused/layer-norm (one (op-fused-layer-norm (first in-tensors) (second in-tensors) (nth in-tensors 2) attrs))
       :fused/softmax (one (op-fused-softmax (first in-tensors) attrs))
+      :fused/log-softmax (one (op-fused-log-softmax (first in-tensors) attrs))
       :stablehlo/reduce_sum (one (op-reduce-sum (first in-tensors) (:axes attrs) (:keep_dims attrs)))
       :stablehlo/reduce_max (one (op-reduce-max (first in-tensors) (:axes attrs) (:keep_dims attrs)))
       :stablehlo/reduce_mean (one (op-reduce-mean (first in-tensors) (:axes attrs) (:keep_dims attrs)))

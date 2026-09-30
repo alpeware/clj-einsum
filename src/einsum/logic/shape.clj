@@ -55,6 +55,7 @@
            (= (first eqn) :maximum)
            (= (first eqn) :convert)
            (= (first eqn) :softmax)
+           (= (first eqn) :log-softmax)
            (= (first eqn) :fwht)
            (= (first eqn) :rht)
            (= (first eqn) :hadamard-block-128))

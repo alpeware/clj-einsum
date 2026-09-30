@@ -528,7 +528,7 @@ Only provide your final response once your definition passes all public tests.")
         raw-failures (when-not all-passed?
                        (mapv (fn [{:keys [code expected actual error]}]
                                (let [m {:code code
-                                         :expected (str expected)}]
+                                        :expected (str expected)}]
                                  (cond-> m
                                    actual (assoc :actual (str actual))
                                    error (assoc :error (str error)))))

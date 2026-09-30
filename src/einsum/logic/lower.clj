@@ -323,28 +323,77 @@
         (when has-post-act?
           (emit-post-activation! eqns-atom counter bcast-out final-out-var attrs (get var-dtypes term-name :f32)))))))
 
-(defn- lower-gather! [eqns-atom counter _head table-term idx-term final-out-var known-shapes]
-  (let [table-name (first table-term)
-        idx-name (first idx-term)
-        table-shape (get known-shapes table-name)
-        hidden-dim (last table-shape)
-        idx-shape (get known-shapes idx-name)
-        expanded-idx-shape (conj (vec idx-shape) 1)
-        reshaped-idx-var (gen-id "t_idx_reshape" counter)
-        reshape-eqn {:op :stablehlo/reshape
-                     :invars [idx-name]
-                     :outvars [reshaped-idx-var]
-                     :attrs {:shape expanded-idx-shape}}
-        final-rank (count expanded-idx-shape)
-        gather-eqn {:op :stablehlo/gather
-                    :invars [table-name reshaped-idx-var]
-                    :outvars [final-out-var]
-                    :attrs {:offset_dims [(dec final-rank)]
-                            :collapsed_slice_dims [0]
-                            :start_index_map [0]
-                            :index_vector_dim (dec final-rank)
-                            :slice_sizes [1 hidden-dim]}}]
-    (swap! eqns-atom conj reshape-eqn gather-eqn)))
+(defn- lower-gather!
+  ([eqns-atom counter head table-term idx-term final-out-var known-shapes]
+   (lower-gather! eqns-atom counter head table-term idx-term {} final-out-var known-shapes :f32))
+  ([eqns-atom counter head table-term idx-term attrs final-out-var known-shapes default-dtype]
+   (let [table-name (first table-term)
+         idx-name (first idx-term)
+         table-shape (get known-shapes table-name)
+         idx-shape (get known-shapes idx-name)
+         head-shape (get known-shapes (first head))
+         axis (:axis attrs)]
+     (if (or (= axis 2)
+             (and (= (count table-shape) 3)
+                  (= (count idx-shape) 2)
+                  (= (count head-shape) 2)))
+       ;; Case B: Axis-2 target gathering from [B, P, V] with indices [B, P] -> [B, P]
+       (let [b (long (or (first table-shape) 1))
+             p (long (or (second table-shape) (second idx-shape) 1))
+             dtype (or default-dtype :f32)
+             ;; 1. b_coord: iota along dimension 0 broadcasted to [b p 1]
+             b-iota (gen-id "t_b_iota" counter)
+             b-iota-eqn {:op :stablehlo/iota :outvars [b-iota]
+                         :attrs {:len b :dtype :i32 :iota_dimension 0}}
+             b-bcast (gen-id "t_b_bcast" counter)
+             b-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [b-iota] :outvars [b-bcast]
+                          :attrs {:broadcast_dimensions [0] :target_shape [b p 1]}}
+             ;; 2. p_coord: iota along dimension 1 broadcasted to [b p 1]
+             p-iota (gen-id "t_p_iota" counter)
+             p-iota-eqn {:op :stablehlo/iota :outvars [p-iota]
+                         :attrs {:len p :dtype :i32 :iota_dimension 0}}
+             p-bcast (gen-id "t_p_bcast" counter)
+             p-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [p-iota] :outvars [p-bcast]
+                          :attrs {:broadcast_dimensions [1] :target_shape [b p 1]}}
+             ;; 3. v_coord: reshape idx from [b p] to [b p 1]
+             v-3d (gen-id "t_v_3d" counter)
+             v-reshape-eqn {:op :stablehlo/reshape :invars [idx-name] :outvars [v-3d]
+                            :attrs {:shape [b p 1]}}
+             ;; 4. coords: concatenate along dim 2 -> [b p 3]
+             coords (gen-id "t_coords_3d" counter)
+             cat-eqn {:op :stablehlo/concatenate :invars [b-bcast p-bcast v-3d] :outvars [coords]
+                      :attrs {:dimension 2}}
+             ;; 5. gather
+             gather-eqn {:op :stablehlo/gather
+                         :invars [table-name coords]
+                         :outvars [final-out-var]
+                         :type [:tensor [b p] dtype]
+                         :attrs {:offset_dims []
+                                 :collapsed_slice_dims [0 1 2]
+                                 :start_index_map [0 1 2]
+                                 :index_vector_dim 2
+                                 :slice_sizes [1 1 1]
+                                 :type [:tensor [b p] dtype]}}]
+         (swap! eqns-atom conj b-iota-eqn b-bcast-eqn p-iota-eqn p-bcast-eqn v-reshape-eqn cat-eqn gather-eqn))
+
+       ;; Case A: Standard rank-2 table embedding lookup [V, D] with indices [B, P] -> [B, P, D]
+       (let [hidden-dim (last table-shape)
+             expanded-idx-shape (conj (vec idx-shape) 1)
+             reshaped-idx-var (gen-id "t_idx_reshape" counter)
+             reshape-eqn {:op :stablehlo/reshape
+                          :invars [idx-name]
+                          :outvars [reshaped-idx-var]
+                          :attrs {:shape expanded-idx-shape}}
+             final-rank (count expanded-idx-shape)
+             gather-eqn {:op :stablehlo/gather
+                         :invars [table-name reshaped-idx-var]
+                         :outvars [final-out-var]
+                         :attrs {:offset_dims [(dec final-rank)]
+                                 :collapsed_slice_dims [0]
+                                 :start_index_map [0]
+                                 :index_vector_dim (dec final-rank)
+                                 :slice_sizes [1 hidden-dim]}}]
+         (swap! eqns-atom conj reshape-eqn gather-eqn))))))
 
 (defn- lower-slice! [eqns-atom _head in-term attrs final-out-var]
   (let [in-name (first in-term)
@@ -592,6 +641,55 @@
      (when needs-f32? (swap! eqns-atom conj conv-in-eqn))
      (when scale-eqn (swap! eqns-atom conj scale-eqn))
      (swap! eqns-atom conj max-eqn max-bcast-eqn diff-eqn exp-eqn sum-eqn sum-bcast-eqn div-eqn)
+     (when needs-f32? (swap! eqns-atom conj conv-out-eqn)))))
+
+(defn- lower-log-softmax!
+  ([eqns-atom counter head in-term attrs final-out-var known-shapes]
+   (lower-log-softmax! eqns-atom counter head in-term attrs final-out-var known-shapes :f32))
+  ([eqns-atom counter head in-term attrs final-out-var known-shapes dtype]
+   (let [in-name (first in-term)
+         orig-dtype (or dtype :f32)
+         in-shape (or (get known-shapes in-name)
+                      (get known-shapes (first head)))
+         rank (count in-shape)
+         axes (or (:axes attrs)
+                  (when-let [ax (:axis attrs)] [ax])
+                  [(dec rank)])
+         norm-axes (mapv #(if (neg? %) (+ rank %) %) axes)
+         needs-f32? (not= orig-dtype :f32)
+         f32-in-var (if needs-f32? (gen-id "ls_f32" counter) in-name)
+         conv-in-eqn (when needs-f32?
+                       {:op :stablehlo/convert :invars [in-name] :outvars [f32-in-var] :attrs {:target_dtype :f32}})
+         scale (:scale attrs)
+         actual-in-var (if scale (gen-id "ls_scaled" counter) f32-in-var)
+         scale-eqn (when scale
+                     (let [c-scale (gen-id "c_scale" counter)
+                           c-scale-eqn {:op :stablehlo/constant :value (double scale) :outvars [c-scale]}]
+                       (swap! eqns-atom conj c-scale-eqn)
+                       {:op :stablehlo/multiply :invars [f32-in-var c-scale] :outvars [actual-in-var]}))
+         max-var (gen-id "t_lsmax" counter)
+         max-eqn {:op :stablehlo/reduce_max :invars [actual-in-var] :outvars [max-var] :attrs {:axes norm-axes :keep_dims true}}
+         max-bcast-var (gen-id "t_lsmax_bcast" counter)
+         max-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [max-var] :outvars [max-bcast-var]
+                        :attrs {:broadcast_dimensions (vec (range rank)) :target_shape in-shape}}
+         diff-var (gen-id "t_lsdiff" counter)
+         diff-eqn {:op :stablehlo/subtract :invars [actual-in-var max-bcast-var] :outvars [diff-var]}
+         exp-var (gen-id "t_lsexp" counter)
+         exp-eqn {:op :stablehlo/exp :invars [diff-var] :outvars [exp-var]}
+         sum-var (gen-id "t_lssum" counter)
+         sum-eqn {:op :stablehlo/reduce_sum :invars [exp-var] :outvars [sum-var] :attrs {:axes norm-axes :keep_dims true}}
+         log-sum-var (gen-id "t_lslogsum" counter)
+         log-sum-eqn {:op :stablehlo/log :invars [sum-var] :outvars [log-sum-var]}
+         log-sum-bcast-var (gen-id "t_lslogsum_bcast" counter)
+         log-sum-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [log-sum-var] :outvars [log-sum-bcast-var]
+                            :attrs {:broadcast_dimensions (vec (range rank)) :target_shape in-shape}}
+         f32-sub-var (if needs-f32? (gen-id "t_lsout" counter) final-out-var)
+         sub-eqn {:op :stablehlo/subtract :invars [diff-var log-sum-bcast-var] :outvars [f32-sub-var]}
+         conv-out-eqn (when needs-f32?
+                        {:op :stablehlo/convert :invars [f32-sub-var] :outvars [final-out-var] :attrs {:target_dtype orig-dtype}})]
+     (when needs-f32? (swap! eqns-atom conj conv-in-eqn))
+     (when scale-eqn (swap! eqns-atom conj scale-eqn))
+     (swap! eqns-atom conj max-eqn max-bcast-eqn diff-eqn exp-eqn sum-eqn log-sum-eqn log-sum-bcast-eqn sub-eqn)
      (when needs-f32? (swap! eqns-atom conj conv-out-eqn)))))
 
 (defn- lower-chunked-attention!
@@ -1549,7 +1647,7 @@
              (throw (ex-info "Unsupported contraction body arity after expansion" {:equation eqn})))
 
            (= op :gather)
-           (lower-gather! eqns-atom counter head (first body) (second body) final-var known-shapes)
+           (lower-gather! eqns-atom counter head (first body) (second body) attrs final-var known-shapes default-dtype)
 
            (= op :slice)
            (lower-slice! eqns-atom head (first body) attrs final-var)
@@ -1571,6 +1669,9 @@
 
            (= op :softmax)
            (lower-softmax! eqns-atom counter head (first body) attrs final-var known-shapes default-dtype)
+
+           (= op :log-softmax)
+           (lower-log-softmax! eqns-atom counter head (first body) attrs final-var known-shapes default-dtype)
 
            (= op :chunked-attention)
            (lower-chunked-attention! eqns-atom counter head (first body) (second body) (nth body 2) attrs final-var known-shapes default-dtype)

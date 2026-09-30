@@ -26,6 +26,7 @@
             [einsum.logic.dce-test]
             [einsum.logic.exl3-test]
             [einsum.logic.expand-test]
+            [einsum.logic.gather-test]
             [einsum.logic.index-test]
             [einsum.logic.interpret-test]
             [einsum.logic.interpret-diff-test]
@@ -123,7 +124,8 @@
    'einsum.core-test
    'experiments.gate3-evals.clojure-bench-test
    'experiments.gate3-evals.multipl-e-test
-   'experiments.gate3-evals.prompt-tuning-v1-test])
+   'experiments.gate3-evals.prompt-tuning-v1-test
+   'einsum.logic.gather-test])
 
 (def logic-namespaces
   "Pedro Domingos' Declarative Tensor Logic, semirings, Horn-clause symbolic reasoning, memory relations, KB."
@@ -133,6 +135,7 @@
    'einsum.logic.data.family-trees-test
    'einsum.logic.dce-test
    'einsum.logic.expand-test
+   'einsum.logic.gather-test
    'einsum.logic.index-test
    'einsum.logic.interpret-test
    'einsum.logic.lower-test
