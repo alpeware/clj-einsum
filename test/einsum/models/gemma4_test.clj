@@ -139,10 +139,10 @@
 (defspec prop-score-sequence-log-probs-validation 50
   (prop/for-all [tokens (gen/vector (gen/choose 1 1000) 0 1)]
     ;; Should throw exception for tokens count < 2
-    (try
-      (rt/score-sequence-log-probs {} nil tokens)
-      false
-      (catch clojure.lang.ExceptionInfo e
-        (= "Sequence must contain at least 2 tokens to score target log-probabilities"
-           (.getMessage e))))))
+                (try
+                  (rt/score-sequence-log-probs {} nil tokens)
+                  false
+                  (catch clojure.lang.ExceptionInfo e
+                    (= "Sequence must contain at least 2 tokens to score target log-probabilities"
+                       (.getMessage e))))))
 

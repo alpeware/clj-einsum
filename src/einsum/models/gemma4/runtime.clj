@@ -839,16 +839,21 @@
 
 (defn score-sequence-log-probs
   "Evaluates exact log-probabilities of a token sequence in OpenXLA device memory.
-   Compiles or uses `exec` (from `compile-gemma4-scoring-executable`), computes
-   StableHLO log-softmax, and gathers target log-probs entirely on-accelerator.
-   Transfers only [1, max-seq-len] float values back to host memory (zero PCIe logit bloat).
+   When `session` contains `:step-executable` (from `init-agent-vram-session`), executes
+   sequential in-accelerator KV-cache evaluation with fused target log-prob extraction,
+   streaming log-probabilities with zero PCIe logit bloat.
+   Alternatively accepts precompiled parallel scoring `exec` (from `compile-gemma4-scoring-executable`).
    Returns a map:
    {:token-ids token-ids
     :target-log-probs [log P(w_1|w_0), log P(w_2|w_<2), ..., log P(w_{n-1}|w_{<n-1})]
     :log-probs [0.0, log P(w_1|w_0), ..., log P(w_{n-1}|w_{<n-1})]}"
-  ([session exec token-ids]
-   (score-sequence-log-probs session exec token-ids nil))
-  ([{:keys [ctx session-arena] :as session} exec token-ids max-seq-len]
+  ([session token-ids]
+   (score-sequence-log-probs session nil token-ids nil))
+  ([session token-ids-or-exec max-seq-len-or-tokens]
+   (if (or (vector? token-ids-or-exec) (seq? token-ids-or-exec))
+     (score-sequence-log-probs session nil token-ids-or-exec max-seq-len-or-tokens)
+     (score-sequence-log-probs session token-ids-or-exec max-seq-len-or-tokens nil)))
+  ([session exec token-ids max-seq-len]
    (let [tokens (vec token-ids)
          n (count tokens)
          _ (when (< n 2)
@@ -861,23 +866,80 @@
          _ (when (< seq-len n)
              (throw (ex-info "max-seq-len cannot be smaller than sequence token count"
                              {:max-seq-len seq-len :num-tokens n})))
-         in-arr (int-array seq-len)
-         targets-arr (int-array seq-len)]
-     (dotimes [i n]
-       (aset in-arr i (int (nth tokens i))))
-     (dotimes [i (dec n)]
-       (aset targets-arr i (int (nth tokens (inc i)))))
-     (let [target-log-probs
-           (xla/with-device-arena [step-arena (or session-arena ctx)]
-             (let [in-b (xla/device-buffer step-arena in-arr [1 seq-len] :i32)
-                   targets-b (xla/device-buffer step-arena targets-arr [1 seq-len] :i32)
-                   device-weights (or (:device-weights session)
-                                      (weights/allocate-device-weights session))
-                   args (into [in-b targets-b] device-weights)
-                   out (xla/track! step-arena (xla/execute exec args))
-                   out-buf (if (sequential? out) (first out) out)
-                   raw-floats (xla/to-host-slice out-buf 0 seq-len seq-len :f32)]
-               (mapv #(double (aget ^floats raw-floats %)) (range (dec n)))))]
-       {:token-ids tokens
-        :target-log-probs target-log-probs
-        :log-probs (into [0.0] target-log-probs)}))))
+         step-exec (or (:step-executable session)
+                       (when-not exec (kernels/compile-gemma4-kv-executable session seq-len)))]
+     (if step-exec
+       ;; Path A: Sequential in-accelerator KV-cache step scoring
+       (let [{:keys [ctx config session-arena]} session
+             num-layers (long (or (:num-layers config) 42))
+             num-kv-shared (long (or (:num-kv-shared-layers config) 18))
+             num-unshared (- num-layers num-kv-shared)
+             num-step-outs (inc (* 2 num-unshared))
+             norm-dtype (if (or (:is-int8 config) (:is-int4 config) (:is-ternary config) (= (:weight-dtype config) :ternary)) :bf16 (or (:weight-dtype config) :f32))
+             device-weights (or (:device-weights session)
+                                (weights/allocate-device-weights session))
+             target-exec (or (:target-scoring-executable session)
+                             (kernels/compile-target-log-prob-executable ctx (long (or (:vocab-size config) 262144)) norm-dtype))
+             initial-kv (kernels/allocate-kv-cache-buffers session seq-len session-arena)
+             x-arr (int-array 1)
+             pos-arr (int-array 1)
+             target-arr (int-array 1)
+             n-score (dec n)
+             collected
+             (loop [p 0
+                    cur-kv initial-kv
+                    acc (transient [])]
+               (if (< p n-score)
+                 (let [tok (int (nth tokens p))
+                       target (int (nth tokens (inc p)))
+                       _ (aset x-arr 0 tok)
+                       _ (aset pos-arr 0 p)
+                       _ (aset target-arr 0 target)
+                       [next-kv target-lp]
+                       (xla/with-device-arena [step-arena session-arena]
+                         (let [x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
+                               pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
+                               target-b (xla/device-buffer step-arena target-arr [1 1] :i32)
+                               step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
+                               outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                               outs-vec (if (vector? outs) outs [outs])
+                               logits-buf (first outs-vec)
+                               nk (vec (subvec outs-vec 1))
+                               lp-out (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle target-exec) target-exec) [logits-buf target-b] 1))
+                               lp-buf (if (vector? lp-out) (first lp-out) lp-out)
+                               floats (pjrt/buffer-to-host-buffer ctx lp-buf 1 :f32)
+                               lp (aget floats 0)]
+                           (xla/promote! step-arena session-arena nk)
+                           [nk lp]))]
+                   (arena/destroy! session-arena cur-kv)
+                   (recur (inc p) next-kv (conj! acc (double target-lp))))
+                 (do
+                   (arena/destroy! session-arena cur-kv)
+                   (persistent! acc))))]
+         {:token-ids tokens
+          :target-log-probs collected
+          :log-probs (into [0.0] collected)})
+
+       ;; Path B: Parallel prefill scoring with explicit exec
+       (let [{:keys [ctx session-arena]} session
+             in-arr (int-array seq-len)
+             targets-arr (int-array seq-len)]
+         (dotimes [i n]
+           (aset in-arr i (int (nth tokens i))))
+         (dotimes [i (dec n)]
+           (aset targets-arr i (int (nth tokens (inc i)))))
+         (let [target-log-probs
+               (xla/with-device-arena [step-arena (or session-arena ctx)]
+                 (let [in-b (xla/device-buffer step-arena in-arr [1 seq-len] :i32)
+                       targets-b (xla/device-buffer step-arena targets-arr [1 seq-len] :i32)
+                       device-weights (or (:device-weights session)
+                                          (weights/allocate-device-weights session))
+                       args (into [in-b targets-b] device-weights)
+                       out (xla/track! step-arena (xla/execute exec args))
+                       out-buf (if (sequential? out) (first out) out)
+                       raw-floats (xla/to-host-slice out-buf 0 seq-len seq-len :f32)]
+                   (mapv #(double (aget ^floats raw-floats %)) (range (dec n)))))]
+           {:token-ids tokens
+            :target-log-probs target-log-probs
+            :log-probs (into [0.0] target-log-probs)}))))))
+

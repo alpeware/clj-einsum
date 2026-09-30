@@ -276,6 +276,25 @@
       (println "Compiling Gemma 4 Scoring graph to native XLA PjRtLoadedExecutable..."))
     (xla/compile-graph ctx graph)))
 
+(defn compile-target-log-prob-executable
+  "Compiles an in-accelerator target log-prob extraction kernel.
+   Takes logits of shape [1, 1, vocab-size] and target token ID of shape [1, 1],
+   converts logits to f32 (if needed), computes fused log-softmax, and gathers
+   the scalar target log-prob entirely on device. Returns [1, 1] f32."
+  ([ctx]
+   (compile-target-log-prob-executable ctx 262144 :bf16))
+  ([ctx vocab-size dtype]
+   (let [invars [[:logits [:tensor [1 1 vocab-size] (or dtype :bf16)]]
+                 [:target [:tensor [1 1] :i32]]]
+         ast [:block {:name :target_log_prob_kernel}
+              (when (not= (or dtype :bf16) :f32)
+                [:convert [:logits_f32 :b :p :v] [:logits :b :p :v] {:target-dtype :f32}])
+              [:log-softmax [:log_probs :b :p :v] (if (not= (or dtype :bf16) :f32) [:logits_f32 :b :p :v] [:logits :b :p :v]) {:axis 2}]
+              [:gather [:target_log_prob :b :p] [:log_probs :b :p :v] [:target :b :p] {:axis 2}]]
+         targets #{:target_log_prob}
+         graph (lower/ast->graph "target_log_prob" invars ast targets)]
+     (xla/compile-graph ctx graph))))
+
 (defn compile-gemma4-prefill-executable
   "Compiles Gemma 4 model AST into a native StableHLO MLIR prefill executable that produces
    the next-token logits and initial populated KV cache tensors in a single parallel step."

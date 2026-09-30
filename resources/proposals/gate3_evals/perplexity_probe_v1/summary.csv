@@ -1,0 +1,14 @@
+task_id,group,num_total,num_scored,num_think,num_code,cross_entropy,perplexity,think_perplexity,code_perplexity,r_k,sft_candidate
+first-n,gap,1055,483,69,414,0.279270,1.322165,1.638426,1.275739,0.6537,false
+my-range,gap,3004,2358,1358,1000,0.716944,2.048165,2.744291,1.376608,1.0127,false
+deep-update-vals,gap,2389,1791,480,1311,0.584110,1.793394,2.638173,1.557047,0.8867,false
+lazy-interleave,gap,2489,1819,645,1174,0.557585,1.746449,2.469086,1.443898,0.8635,false
+freqs,ref,1243,715,143,572,0.511572,1.667911,1.971046,1.599712,0.8247,false
+partition-by-parity,ref,1701,1124,548,576,0.826972,2.286385,3.495158,1.526835,1.1305,false
+# AGGREGATE SUMMARY
+# Gap Micro PPL: 1.826426 (tokens: 6451, cross-entropy: 0.602361)
+# Ref Micro PPL: 2.022522 (tokens: 1839, cross-entropy: 0.704345)
+# Primary Ratio (Gap / Ref): 0.903044 (Threshold: >= 1.50)
+# Macro Ratio: 0.873755
+# SFT Candidates: 
+# Pre-Registered Verdict: NO-GO
