@@ -118,13 +118,21 @@ PPL(S) = exp( - (1/|S|) * Σ_{i ∈ S} log p(x[i] | x[<i]) )
 ```
 
 **Masking & Segment Delineation**:
-Each trajectory is structured via Gemma 4 turn tags:
-- Scored span `S`: tokens in `<start_of_turn>model\n...<end_of_turn>` turns. System prompts, user
-  instructions, and tool results (`<start_of_turn>tool\n...`) provide context to the causal attention
-  mask but have scoring mask 0.
-- Thinking segment `S_think ⊆ S`: tokens enclosed by `<|channel>thought\n` (token ID 108)
-  and `<channel|>` (token ID 109).
-- Code/syntax segment `S_code ⊆ S`: model turn tokens outside the thinking channel.
+Evaluation masks are constructed directly from the transcript's structured turn sequence
+(`:role` annotations `:model`, `:user`, `:tool`) rather than string pattern matching in tokenized text,
+because under fenced agentic syntax tool results are formatted as `<|turn>user` turns (`agent/core.clj:579-584`):
+
+- **Framing-tag mask policy (mask 0)**: Delimiter framing tokens—including `<bos>`, `<|turn>`,
+  `<turn|>`, and turn prefixes (`<|turn>model\n`, `<|turn>user\n`)—receive mask 0. They are harness
+  artifacts, not teacher-generated tokens.
+- **Scored span `S` (mask 1)**: Only the actual text *content* generated within `:model` turns.
+  System prompts, user prompt turns, and tool-result turns (`:role :tool` or fenced `:user`) are conditioned
+  on in causal attention but strictly receive mask 0.
+- **Thinking segment `S_think ⊆ S`**: Tokens of `:model` turn content within thinking blocks
+  (`<|channel>thought...\n<channel|>`, matching `agent/core.clj:207`). Thinking channel boundary tokens
+  receive mask 0. Delimiter token IDs are resolved from the tokenizer before scoring.
+- **Code & action segment `S_code ⊆ S`**: Scored model content tokens outside the thinking channel
+  (i.e., solution code, tool invocations, and agent response text).
 
 **Implementation constraint & Tensor Logic Lowering**:
 The existing prefill executable is compiled with `:last-token-only?` to emit only final-position logits.
@@ -158,7 +166,7 @@ Protocol:
 1. Run 31B-QAT agentic (fenced, rep-pen 1.0, current defaults) with deterministic greedy decoding
    (`T=0.0`, seed 0) on the four gap tasks (`first-n`, `my-range`, `deep-update-vals`, `lazy-interleave`)
    plus the two contrast tasks (`freqs`, `partition-by-parity`).
-2. If any task fails under greedy decoding due to environment non-determinism, retry up to 2 times
+2. If any task fails under greedy decoding for any reason, retry up to 2 times
    with fixed seeds (`T=0.2`, seeds 1 and 2). If any task fails all 3 attempts, abort with verdict `killed`.
 3. Keep only successful trajectories (hidden tests all-pass). Save full transcripts: every `:model`
    turn's response text in order, with turn boundaries and tool-result interleaving preserved.
@@ -189,11 +197,11 @@ Strict TDD per repo rules (generative tests first on the pure-JVM StableHLO inte
 
 For each trajectory:
 1. Tokenize the teacher's transcript with the pinned BPE tokenizer.
-2. Construct the boolean evaluation mask vector:
-   - Mark position 0 as un-scored.
-   - For positions $1 \dots n-1$, mark as 1 iff target token belongs to a `:model` turn.
-   - Mark thinking segment tokens (`<|channel>thought\n` to `<channel|>`).
-   - Mark code/syntax segment tokens (model tokens outside thinking).
+2. Construct the boolean evaluation mask vector directly from structured transcript turns:
+   - Mark position 0 as un-scored (mask 0).
+   - For positions $1 \dots n-1$, assign mask 1 iff the target token is within `:model` turn content.
+     All harness framing tokens (`<bos>`, `<|turn>`, `<turn|>`, and role headers) receive mask 0.
+   - Partition scored model tokens into `S_think` (thinking channel content) and `S_code` (outside thinking).
 3. Teacher-force through E4B-QAT-INT4 using `score-sequence-log-probs`.
 4. Report per task: overall PPL, thinking-segment PPL, code/syntax-segment PPL, scored token counts,
    and individual ratio `r_k = PPL_k / PPL_ref`.
@@ -207,5 +215,5 @@ For each trajectory:
 | Date | Event | Rationale |
 |---|---|---|
 | 2026-09-30 | `proposed` | Stage 1 RFC drafted. Motivated by the `prompt_tuning_v1` REJECT dissociation (behavior change without conversion → capacity gap, not elicitation gap). Scoping found two blockers: no successful teacher trajectories on disk (ledger keeps transcripts on failure only) and no scoring path in the generation-only runtime. Pre-registered GO/NO-GO rule: `PPL_gap / PPL_ref >= 1.5`. |
-| 2026-09-30 | `hardened` | Hardened Stage 1 spec following review: formalized micro-average (token-weighted cross-entropy) primary decision rule, disaggregated per-task SFT filtering criterion (`r_k >= 1.30`), pre-registered greedy capture with bounded retry, defined turn/channel boundary token masks, and scheduled Tensor Logic gather generalization in Step 2. |
+| 2026-09-30 | `hardened` | Hardened Stage 1 spec following review: formalized micro-average (token-weighted cross-entropy) primary decision rule, disaggregated per-task SFT filtering criterion (`r_k >= 1.30`), pre-registered greedy capture with bounded retry for any failure, pinned role-based `:model` content masking with framing-tag mask 0 policy, and scheduled Tensor Logic gather generalization in Step 2. |
 
