@@ -112,19 +112,5 @@
                          :summary-path "resources/catalog/gate3_evals/perplexity_probe_v1/summary.csv"
                          :trajectories-path "resources/catalog/gate3_evals/perplexity_probe_v1/teacher_trajectories.edn"
                          :teacher-summary-path "resources/catalog/gate3_evals/perplexity_probe_v1/teacher_summary.csv"
-                         :verified-by nil}
-   :tiered-turbo-kv    {:gate :gate1-compression
-                        :slug "tiered_turbo_kv"
-                        :title "Tiered Turbo KV (Hierarchical Long-Context Cache Compression)"
-                        :track :compression
-                        :status :promoted
-                        :verdict :done
-                        :frozen "2026-09-30"
-                        :generation 1
-                        :target-hardware "AMD Radeon RX 7900 XTX (24GB)"
-                        :spec-path "resources/catalog/gate1_compression/tiered_turbo_kv/spec.md"
-                        :report-path "resources/catalog/gate1_compression/tiered_turbo_kv/report.md"
-                        :results-path "resources/catalog/gate1_compression/tiered_turbo_kv/results.edn"
-                        :summary-path "resources/catalog/gate1_compression/tiered_turbo_kv/summary.csv"
-                        :pod-path "resources/catalog/gate1_compression/tiered_turbo_kv/pod.edn"
-                        :verified-by nil}}}
+                          :verified-by nil}}}
+

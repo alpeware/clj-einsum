@@ -141,21 +141,36 @@
    (bit-and (bit-shift-right b 6) 3)])
 
 (defn pack-turboquant-codes
-  "Packs a sequence of 2-bit codes into a byte-array."
+  "Packs a sequence or int-array of 2-bit codes into a byte-array."
   ^bytes [codes]
-  (let [n (count codes)
-        _ (assert (zero? (mod n 4)) (str "Code count must be multiple of 4, got: " n))
-        num-bytes (quot n 4)
-        out (byte-array num-bytes)]
-    (dotimes [i num-bytes]
-      (let [base (* i 4)
-            c0 (long (nth codes (+ base 0)))
-            c1 (long (nth codes (+ base 1)))
-            c2 (long (nth codes (+ base 2)))
-            c3 (long (nth codes (+ base 3)))
-            b (pack-2bit-byte c0 c1 c2 c3)]
-        (aset-byte out i (unchecked-byte b))))
-    out))
+  (if (instance? (Class/forName "[I") codes)
+    (let [arr ^ints codes
+          n (alength arr)
+          _ (assert (zero? (mod n 4)) (str "Code count must be multiple of 4, got: " n))
+          num-bytes (quot n 4)
+          out (byte-array num-bytes)]
+      (dotimes [i num-bytes]
+        (let [base (* i 4)
+              c0 (aget arr (+ base 0))
+              c1 (aget arr (+ base 1))
+              c2 (aget arr (+ base 2))
+              c3 (aget arr (+ base 3))
+              b (pack-2bit-byte c0 c1 c2 c3)]
+          (aset-byte out i (unchecked-byte b))))
+      out)
+    (let [n (count codes)
+          _ (assert (zero? (mod n 4)) (str "Code count must be multiple of 4, got: " n))
+          num-bytes (quot n 4)
+          out (byte-array num-bytes)]
+      (dotimes [i num-bytes]
+        (let [base (* i 4)
+              c0 (long (nth codes (+ base 0)))
+              c1 (long (nth codes (+ base 1)))
+              c2 (long (nth codes (+ base 2)))
+              c3 (long (nth codes (+ base 3)))
+              b (pack-2bit-byte c0 c1 c2 c3)]
+          (aset-byte out i (unchecked-byte b))))
+      out)))
 
 (defn unpack-turboquant-codes
   "Unpacks a byte-array into a vector of 2-bit codes."
@@ -193,7 +208,7 @@
   ([x ^long d ^long m]
    (let [signs ^doubles (rademacher-signs d)
          inv-sqrt-d (/ 1.0 (Math/sqrt (double d)))
-         x-arr (to-double-array x d)
+         ^doubles x-arr (to-double-array x d)
          ;; 1. Rademacher phase inversion: x_tilde = D * x
          x-tilde (double-array d)
          norm-x (loop [i 0 acc 0.0]
@@ -227,10 +242,10 @@
                           (recur (inc i) (+ acc (* diff diff))))
                         (Math/sqrt acc)))
              ;; 6. 1-bit QJL residual sketch: sign(S * r)
-             s-proj ^"[[D" (qjl-projection-matrix d m)
+             s-proj ^objects (qjl-projection-matrix d m)
              qjl-words (long-array (max 1 (quot (+ m 63) 64)))]
          (dotimes [j m]
-           (let [row ^doubles (aget s-proj j)
+           (let [^doubles row (aget s-proj (int j))
                  dot (loop [k 0 acc 0.0]
                        (if (< k d)
                          (recur (inc k) (+ acc (* (aget row k) (aget r k))))
@@ -243,26 +258,31 @@
                                     (bit-shift-left 1 bit-idx)))))))
          {:dim d
           :m m
-          :packed-codes (pack-turboquant-codes (vec codes))
+          :packed-codes (pack-turboquant-codes codes)
           :sigma (float sigma)
           :qjl-bits qjl-words
           :residual-norm (float norm-r)})))))
 
-(defn fast-turboquant-unpack
-  "Reconstructs primary vector x_hat from Fast-TurboQuant packed format."
-  [{:keys [dim packed-codes sigma]}]
+(defn fast-turboquant-unpack-doubles
+  "Reconstructs primary vector x_hat from Fast-TurboQuant packed format as a primitive double-array."
+  ^doubles [{:keys [dim packed-codes sigma]}]
   (let [d (long dim)
         signs ^doubles (rademacher-signs d)
         inv-sqrt-d (/ 1.0 (Math/sqrt (double d)))
         codes (unpack-turboquant-codes packed-codes)
         z-hat (double-array d)]
     (dotimes [i d]
-      (aset-double z-hat i (decode-lloyd-max-coord (nth codes i) (double sigma))))
+      (aset-double z-hat i (decode-lloyd-max-coord (int (nth codes i)) (double sigma))))
     (fwht-doubles! z-hat false)
     (let [x-hat (double-array d)]
       (dotimes [i d]
         (aset-double x-hat i (* (aget z-hat i) (aget signs i) inv-sqrt-d)))
-      (vec x-hat))))
+      x-hat)))
+
+(defn fast-turboquant-unpack
+  "Reconstructs primary vector x_hat from Fast-TurboQuant packed format."
+  [packed-k]
+  (vec (fast-turboquant-unpack-doubles packed-k)))
 
 (defn turboquant-inner-product
   "Computes mathematically unbiased attention inner product between query vector q
@@ -270,27 +290,28 @@
   ^double [q {:keys [dim m qjl-bits residual-norm] :as packed-k}]
   (let [d (long dim)
         m (long m)
-        q-arr (to-double-array q d)
-        k-hat (fast-turboquant-unpack packed-k)
+        ^doubles q-arr (to-double-array q d)
+        k-hat ^doubles (fast-turboquant-unpack-doubles packed-k)
         primary-dot (loop [i 0 acc 0.0]
                       (if (< i d)
-                        (recur (inc i) (+ acc (* (aget q-arr i) (double (nth k-hat i)))))
+                        (recur (inc i) (+ acc (* (aget q-arr i) (aget k-hat i))))
                         acc))
         r-norm (double residual-norm)]
     (if (or (<= r-norm 1e-12) (zero? m))
       primary-dot
       ;; Unbiased QJL residual correction
-      (let [s-proj ^"[[D" (qjl-projection-matrix d m)
+      (let [s-proj ^objects (qjl-projection-matrix d m)
+            ^longs qjl-arr qjl-bits
             qjl-sum (loop [j 0 acc 0.0]
                       (if (< j m)
-                        (let [row ^doubles (aget s-proj j)
+                        (let [^doubles row (aget s-proj (int j))
                               sq-dot (loop [k 0 dot 0.0]
                                        (if (< k d)
                                          (recur (inc k) (+ dot (* (aget row k) (aget q-arr k))))
                                          dot))
                               word-idx (quot j 64)
                               bit-idx (rem j 64)
-                              bit-val (bit-and (bit-shift-right (aget ^longs qjl-bits word-idx) bit-idx) 1)
+                              bit-val (bit-and (bit-shift-right (aget qjl-arr word-idx) bit-idx) 1)
                               sign-val (if (pos? bit-val) 1.0 -1.0)]
                           (recur (inc j) (+ acc (* sq-dot sign-val))))
                         acc))

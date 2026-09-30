@@ -4,10 +4,21 @@
   :generation 1,
   :model-name "gemma-4-31b-it-int4",
   :backend :cpu,
-  :status "STAGE 3 VERIFIED (PROMOTED)",
-  :timestamp "2026-09-30T19:40:48.469353593Z"},
+  :status "STAGE 3 VERIFICATION REJECTED (HARDWARE DECODE UNMEASURED)",
+  :provenance
+  {:model-accounting
+   "Analytical (54 layers, 8 heads, 3076 tokens, 2.75b)",
+   :microbenchmarks
+   "CPU Host (20k FWHT, 131k primitive heap eviction, 10k QJL)",
+   :intelligence-eval
+   "MultiPL-E dev 50 in SCI sandbox (McNemar p=1.00)",
+   :m-niah
+   "Attention-mass retention-through-eviction proxy (100 needles x 4 lengths x 10 bins)",
+   :hardware-decode
+   "Unmeasured: live ROCm attention decode kernel staged"},
+  :timestamp "2026-09-30T20:53:45.896450598Z"},
  :gate1
- {:gate1-pass? true,
+ {:gate1-pass? false,
   :criterion-1-3-pass? true,
   :bitrate-pass? true,
   :12b-128k
@@ -29,6 +40,8 @@
    :peak-vram-gb 7.424903296,
    :model-name "gemma-4-12B-it",
    :model :gemma-4-12b},
+  :criterion-1-2-reason
+  "Unmeasured on device; physical OOM condition untestable without live accelerator allocation",
   :31b-64k
   {:compression-ratio 123.95980612365528,
    :seq-len 65536,
@@ -126,7 +139,7 @@
    :peak-vram-gb 17.558468608,
    :model-name "gemma-4-31B-it",
    :model :gemma-4-31b},
-  :criterion-1-2-pass? true,
+  :criterion-1-2-pass? false,
   :12b-32k
   {:compression-ratio 61.97990306182764,
    :seq-len 32768,
@@ -148,44 +161,488 @@
    :model :gemma-4-12b}},
  :gate2
  {:prefix-pass? true,
-  :criterion-2-2-pass? true,
-  :decode-overhead-pass? true,
-  :gate2-pass? true,
-  :decode-step-overhead-pct 2.1,
-  :eviction-latency-ms 4.4620788,
+  :criterion-2-2-pass? false,
+  :eviction-latency-samples
+  [6.36997 6.494211 8.489953 5.567485 5.551105],
+  :decode-overhead-pass? false,
+  :gate2-pass? false,
+  :decode-step-overhead-pct nil,
+  :eviction-latency-ms 6.36997,
   :multiplier-free-butterfly? true,
   :prefix-hit-rate 0.9716157205240175,
   :criterion-2-1-pass? true,
+  :criterion-2-2-reason
+  "Unmeasured: in-accelerator forward attention decode kernel staged; requires ROCm device execution",
   :criterion-2-3-pass? true,
   :eviction-latency-pass? true,
-  :fwht-per-transform-us 12.8335737,
-  :criterion-2-4-pass? true},
+  :fwht-per-transform-us 12.769502850000002,
+  :criterion-2-4-pass? true,
+  :multiplier-free-pass? true},
  :gate3
  {:criterion-3-2-pass? true,
-  :criterion-3-1-pass? true,
-  :m-niah-64k
-  {:seq-len 65536,
-   :needle-count 5,
-   :retained-count 5,
-   :retrieval-accuracy 1.0,
-   :retained-needle-indices [6553 16383 32767 49151 58981],
-   :missed-needle-indices []},
+  :m-niah
+  {:label
+   "retention-through-eviction (attention mass ranking proxy; model not in loop)",
+   :total-needles-per-length 100,
+   :depth-bins 10,
+   :lengths [16384 32768 65536 131072],
+   :min-accuracy 1.0,
+   :all-pass? true,
+   :results
+   [{:seq-len 16384,
+     :needle-count 100,
+     :retained-count 100,
+     :retrieval-accuracy 1.0,
+     :retained-needle-indices
+     [81
+      245
+      409
+      573
+      737
+      901
+      1064
+      1228
+      1392
+      1556
+      1720
+      1884
+      2047
+      2211
+      2375
+      2539
+      2703
+      2867
+      3030
+      3194
+      3358
+      3522
+      3686
+      3850
+      4013
+      4177
+      4341
+      4505
+      4669
+      4832
+      4996
+      5160
+      5324
+      5488
+      5652
+      5815
+      5979
+      6143
+      6307
+      6471
+      6635
+      6798
+      6962
+      7126
+      7290
+      7454
+      7618
+      7781
+      7945
+      8109
+      8273
+      8437
+      8601
+      8764
+      8928
+      9092
+      9256
+      9420
+      9584
+      9747
+      9911
+      10075
+      10239
+      10403
+      10567
+      10730
+      10894
+      11058
+      11222
+      11386
+      11550
+      11713
+      11877
+      12041
+      12205
+      12369
+      12532
+      12696
+      12860
+      13024
+      13188
+      13352
+      13515
+      13679
+      13843
+      14007
+      14171
+      14335
+      14498
+      14662
+      14826
+      14990
+      15154
+      15318
+      15481
+      15645
+      15809
+      15973
+      16137
+      16301],
+     :missed-needle-indices [],
+     :label
+     "retention-through-eviction (attention mass ranking proxy)"}
+    {:seq-len 32768,
+     :needle-count 100,
+     :retained-count 100,
+     :retrieval-accuracy 1.0,
+     :retained-needle-indices
+     [163
+      491
+      819
+      1146
+      1474
+      1802
+      2129
+      2457
+      2785
+      3112
+      3440
+      3768
+      4095
+      4423
+      4751
+      5078
+      5406
+      5734
+      6061
+      6389
+      6717
+      7044
+      7372
+      7700
+      8027
+      8355
+      8683
+      9010
+      9338
+      9666
+      9993
+      10321
+      10649
+      10976
+      11304
+      11632
+      11959
+      12287
+      12615
+      12942
+      13270
+      13598
+      13925
+      14253
+      14581
+      14908
+      15236
+      15564
+      15891
+      16219
+      16547
+      16875
+      17202
+      17530
+      17858
+      18185
+      18513
+      18841
+      19168
+      19496
+      19824
+      20151
+      20479
+      20807
+      21134
+      21462
+      21790
+      22117
+      22445
+      22773
+      23100
+      23428
+      23756
+      24083
+      24411
+      24739
+      25066
+      25394
+      25722
+      26049
+      26377
+      26705
+      27032
+      27360
+      27688
+      28015
+      28343
+      28671
+      28998
+      29326
+      29654
+      29981
+      30309
+      30637
+      30964
+      31292
+      31620
+      31947
+      32275
+      32603],
+     :missed-needle-indices [],
+     :label
+     "retention-through-eviction (attention mass ranking proxy)"}
+    {:seq-len 65536,
+     :needle-count 100,
+     :retained-count 100,
+     :retrieval-accuracy 1.0,
+     :retained-needle-indices
+     [327
+      983
+      1638
+      2293
+      2949
+      3604
+      4259
+      4915
+      5570
+      6225
+      6881
+      7536
+      8191
+      8847
+      9502
+      10157
+      10813
+      11468
+      12123
+      12779
+      13434
+      14090
+      14745
+      15400
+      16056
+      16711
+      17366
+      18022
+      18677
+      19332
+      19988
+      20643
+      21298
+      21954
+      22609
+      23264
+      23920
+      24575
+      25230
+      25886
+      26541
+      27197
+      27852
+      28507
+      29163
+      29818
+      30473
+      31129
+      31784
+      32439
+      33095
+      33750
+      34405
+      35061
+      35716
+      36371
+      37027
+      37682
+      38337
+      38993
+      39648
+      40304
+      40959
+      41614
+      42270
+      42925
+      43580
+      44236
+      44891
+      45546
+      46202
+      46857
+      47512
+      48168
+      48823
+      49478
+      50134
+      50789
+      51444
+      52100
+      52755
+      53411
+      54066
+      54721
+      55377
+      56032
+      56687
+      57343
+      57998
+      58653
+      59309
+      59964
+      60619
+      61275
+      61930
+      62585
+      63241
+      63896
+      64551
+      65207],
+     :missed-needle-indices [],
+     :label
+     "retention-through-eviction (attention mass ranking proxy)"}
+    {:seq-len 131072,
+     :needle-count 100,
+     :retained-count 100,
+     :retrieval-accuracy 1.0,
+     :retained-needle-indices
+     [655
+      1966
+      3276
+      4587
+      5898
+      7208
+      8519
+      9830
+      11141
+      12451
+      13762
+      15073
+      16383
+      17694
+      19005
+      20316
+      21626
+      22937
+      24248
+      25558
+      26869
+      28180
+      29490
+      30801
+      32112
+      33423
+      34733
+      36044
+      37355
+      38665
+      39976
+      41287
+      42598
+      43908
+      45219
+      46530
+      47840
+      49151
+      50462
+      51773
+      53083
+      54394
+      55705
+      57015
+      58326
+      59637
+      60948
+      62258
+      63569
+      64880
+      66190
+      67501
+      68812
+      70122
+      71433
+      72744
+      74055
+      75365
+      76676
+      77987
+      79297
+      80608
+      81919
+      83230
+      84540
+      85851
+      87162
+      88472
+      89783
+      91094
+      92405
+      93715
+      95026
+      96337
+      97647
+      98958
+      100269
+      101580
+      102890
+      104201
+      105512
+      106822
+      108133
+      109444
+      110754
+      112065
+      113376
+      114687
+      115997
+      117308
+      118619
+      119929
+      121240
+      122551
+      123862
+      125172
+      126483
+      127794
+      129104
+      130415],
+     :missed-needle-indices [],
+     :label
+     "retention-through-eviction (attention mass ranking proxy)"}]},
+  :criterion-3-1-pass? false,
   :criterion-3-3-pass? true,
-  :qjl-bias 3.3039295869210005E-5,
-  :qjl-bias-pass? true,
+  :qjl-bias 0.0011653733136259188,
+  :qjl-bias-pass? false,
+  :multipl-e
+  {:total-tasks 50,
+   :passed-tasks 48,
+   :pass-rate 0.96,
+   :mcnemar
+   {:b 0,
+    :c 0,
+    :delta 0.0,
+    :chi2 0.0,
+    :p-value 1.0,
+    :significant? false},
+   :pass? true},
   :multipl-e-pass? true,
-  :m-niah-128k
-  {:seq-len 131072,
-   :needle-count 5,
-   :retained-count 5,
-   :retrieval-accuracy 1.0,
-   :retained-needle-indices [13107 32767 65535 98303 117963],
-   :missed-needle-indices []},
+  :multipl-e-pass-rate 0.96,
   :m-niah-pass? true,
-  :multipl-e-pass-at-1-retention 0.992,
-  :gate3-pass? true},
+  :gate3-pass? false},
  :gate4
- {:wall-clock-seconds 1151.637850375,
-  :human-intervention-hours 0.0,
-  :autonomous-ratio-pct 100.0,
-  :cycle-time-reduction-pct 34.2}}
+ {:status :dropped-by-spec-amendment,
+  :wall-clock-seconds 1.22176435,
+  :measured? false,
+  :pass? false}}
