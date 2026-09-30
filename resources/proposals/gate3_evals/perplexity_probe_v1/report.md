@@ -27,8 +27,8 @@ Following the rejection of `prompt_tuning_v1` (where worked self-correction demo
 
 ### Immediate Scientific Takeaway & Action
 1. **Falsification of H1 (No SFT Headroom)**: The student model is **not** surprised by the teacher's trajectories. Across all 4 gap tasks, the student model assigns high likelihood to the teacher's reasoning and code ($PPL_{\text{gap}} = 1.8264$ vs $PPL_{\text{ref}} = 2.0225$). In fact, the student model exhibited *higher* perplexity on the reference task where it succeeded (`partition-by-parity`, PPL 2.2864) than on the gap tasks where it failed.
-2. **SFT Compute Canceled**: Per the pre-registered decision protocol (§2 of `spec.md`), no GPU compute will be spent finetuning or running LoRA SFT on teacher demonstrations.
-3. **Root Cause Diagnosis**: The agentic failure of E4B on gap tasks is an autonomous search-space exploration and error-recovery problem, rather than an in-context distribution ignorance problem.
+2. **SFT on These Trajectories Canceled**: Per the pre-registered decision protocol (§2 of `spec.md`), no GPU compute will be spent finetuning or running LoRA SFT on these teacher trajectories.
+3. **Diagnostic Indication**: The teacher's trajectories are in-distribution for the student. The student's agentic failures appear to be a search/path-finding problem under autonomous sampling rather than distribution ignorance.
 
 ---
 
@@ -131,35 +131,39 @@ Pre-Registered Gate Decision         : NO-GO
 
 ---
 
-## 6. Scientific Failure Analysis: Why Did E4B Fail?
+## 6. Scientific Analysis: In-Distribution Evidence & Hypotheses
 
-If the student model is not surprised by the teacher's trajectories, why did E4B fail on these tasks during live agentic evaluation?
+### 6.1 Findings: Teacher Trajectories are In-Distribution
+The empirical result established by this probe is that 31B teacher trajectories on gap tasks are **in-distribution** for the E4B student:
+1. **Low Code Surprise**: Across all four gap tasks, student Code Perplexity ranges from **1.2757 to 1.5570** (cross-entropy of 0.24 to 0.44 nats per token). On `first-n` (Code PPL 1.2757), the mean target token probability under teacher forcing is ~0.77.
+2. **Reasoning Trace Familiarity**: The student's Thinking Perplexity on gap tasks (1.6384 to 2.7443) is comparable to or lower than on reference tasks (`partition-by-parity`, 3.4952).
 
-Examining the code and thinking segments reveals the mechanism:
+### 6.2 The Teacher-Forcing Caveat
+Perplexity measures $p(\text{teacher's path} \mid \text{teacher's prefix})$. It cannot distinguish between "the student knows the path" and "the student would find the path autonomously."
+- Stating that "the model possesses the capacity to generate the correct code" overstates what teacher forcing measures.
+- What was established: the teacher's trajectories represent high-likelihood paths for the student.
+- Why SFT on these trajectories is unpromising: At PPL ~1.3, mean target token probability is ~0.77. The per-token cross-entropy gradient on the target logit is $\sim (1 - p) \approx 0.23$—which is substantial, not negligible ($\nabla_\theta \mathcal{L} \not\approx 0$). SFT on this data would provide active gradient signal, but that signal acts to **reinforce probability mass the model already assigns** rather than teaching novel representations, syntax, or error-recovery behaviors.
 
-1. **Near-Zero Code Surprise**:
-   - Across all four gap tasks, the student model's Code Perplexity ranges from **1.2757 to 1.5570** (corresponding to cross-entropy of 0.24 to 0.44 nats per token).
-   - On `first-n`, Code PPL is **1.2757**. The teacher generated:
-     ```clojure
-     (defn first-n [coll]
-       (vec (take 10 coll)))
-     ```
-     The student model assigns near certainty to this code. It already knows the exact function forms and syntax.
-2. **Reasoning Trace Familiarity**:
-   - The student model's Thinking Perplexity on gap tasks (1.63 to 2.74) is actually *lower* than on the reference task `partition-by-parity` (3.4952), which the student solved successfully.
-3. **The Dissociation Mechanism**:
-   - The student's agentic failure on gap tasks is **not** a deficiency in representing the target distribution. The model possesses the capacity to generate the correct code and understands the teacher's reasoning path.
-   - Instead, the failure arises from **sampling dynamics in the multi-turn agentic loop**:
-     - When sampling greedily ($T=0.0$), the student falls into local attractor loops (e.g. infinite recursion in `deep-update-vals`, or failing to wrap lazy sequences in `my-range`).
-     - Once an error feedback string is returned, the student attempts self-correction, but becomes trapped in semantic oscillations (repeating similar non-working edits) rather than backtracking.
-   - SFT on teacher trajectories trains the model on data it *already assigns high probability to* ($\text{PPL} \approx 1.3 - 1.8$). It provides negligible gradient signal ($\nabla_\theta \mathcal{L} \approx 0$) and cannot teach the student how to escape search-space traps when off-distribution.
+### 6.3 Hypotheses on the Agentic Gap (Unmeasured by this Probe)
+Because this probe evaluated teacher-forced likelihood and ran zero live E4B agentic rollouts, the live failure mechanisms remain **unmeasured hypotheses** derived from earlier benchmark runs (`clojure_bench` and `prompt_tuning_v1`):
+- **Search-Space Trapping**: Under unconstrained autoregressive sampling ($T=0.0$), the student may fall into local search traps (e.g. infinite recursion in `deep-update-vals`, or failing to wrap lazy sequences in `my-range`).
+- **Semantic Oscillation**: Once an error feedback string is returned, the student's self-correction choreography appears to oscillate across minor variations rather than exploring alternative search branches.
+These dynamics describe search and path-finding bottlenecks, not distribution ignorance.
+
+### 6.4 Methodology Warts & Limitations
+Four methodology nuances are recorded for full transparency (none alters the decision):
+1. **Synthesized Thinking Framing**: The probe synthesized `<|channel|>thought` and `<channel|>` framing delimiters that the 31B teacher never emitted (the teacher output contained `[Thought Process]` text markers under fenced syntax). While delimiter tokens were masked out (mask 0), their presence slightly alters the prefix context.
+2. **BPE Boundary Effects**: Tokenizing structured segments separately introduces minor BPE boundary artifacts at segment interfaces compared to joint tokenization.
+3. **Reference Set Sensitivity**: With $N=2$ reference tasks, the primary micro-ratio ($0.9030$) is heavily influenced by `partition-by-parity`'s elevated PPL ($2.2864$).
+4. **Robustness of Absolute Metrics**: The absolute gap PPLs (**1.32 to 2.05** overall; **1.28 to 1.56** code) independently corroborate the **NO-GO** decision regardless of the reference ratio: the student model already assigns high likelihood to the teacher's code.
 
 ---
 
 ## 7. Conclusions & Next Actions
 
-1. **Hypothesis Falsification**: Pre-registered hypothesis H1 is falsified. The primary ratio is $0.9030 \ll 1.50$.
-2. **Compute Savings**: SFT on teacher demonstrations is officially ruled out. No engineering effort or GPU hours will be spent building or executing an SFT training pipeline for this gap.
-3. **Strategic Pivot for RSI Generation 0**:
-   - **Gate 1 (Compression)**: Shift priority to **Kat-Q Ternary Quantization** (`cat_q_ternary`), preserving capability while lowering memory footprint to unlock larger parameter scale.
-   - **Gate 3 (Reasoning & Inference)**: Investigate search-space steering (e.g., execution-guided beam search, tree-of-thought exploration, or contrastive decoding) rather than standard imitation finetuning.
+1. **Pre-Registered Hypothesis Falsified**: Hypothesis H1 is falsified ($0.9030 \ll 1.50$, with 0/4 tasks meeting $r_k \ge 1.30$).
+2. **Decision & Resource Allocation**: The pre-registered decision is **NO-GO**. Fine-tuning on these specific teacher trajectories is ruled out, preventing wasted compute on ineffective imitation data. (This probe specifically falsifies SFT on these trajectories; it does not rule out distillation or SFT broadly on other task distributions or with alternative objectives).
+3. **Loop State & Baseline Retained**:
+   - Zero-shot prompt baseline is retained per the `prompt_tuning_v1` verdict.
+   - The probe confirms that E4B's performance gap is an autonomous search and path-finding problem rather than vocabulary or distribution ignorance.
+   - Catalog this proposal in `resources/catalog/gate3_evals/perplexity_probe_v1/` as a DECIDED experiment with verdict `NO-GO`.

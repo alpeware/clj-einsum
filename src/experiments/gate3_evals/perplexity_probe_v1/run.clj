@@ -171,12 +171,15 @@
             aggregates (probe-core/compute-corpus-aggregates rows)
             verdict (:verdict aggregates)
             student-sha (if (:dry-run opts) STUDENT-CHECKPOINT-SHA (compute-model-sha (:model opts)))
+            harness-info (bench-core/harness-version-info)
             report-map {:probe "perplexity_probe_v1"
                         :timestamp (str (java.time.Instant/now))
                         :student-model (:model opts)
                         :student-sha student-sha
                         :teacher-model (:teacher-model opts)
                         :teacher-sha TEACHER-CHECKPOINT-SHA
+                        :harness-sha (:harness-sha harness-info)
+                        :harness-dirty? (:harness-dirty? harness-info)
                         :backend (:backend opts)
                         :max-seq-len (:max-seq-len opts)
                         :dry-run? (:dry-run opts)

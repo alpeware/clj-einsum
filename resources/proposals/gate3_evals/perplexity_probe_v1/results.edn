@@ -174,6 +174,8 @@
  :max-seq-len 3072,
  :teacher-sha
  "f20a02315954b540db819393224e07c3d60c1f07c9052b10a530db1556d2603c",
+ :harness-sha "45c7b1495488ddfd5bcfcd37964cf3a8601ac3e6",
+ :harness-dirty? true,
  :student-model ".models/gemma-4-e4b-it-qat-int4",
  :timestamp "2026-09-30T15:14:31.415456844Z",
  :backend :rocm}
