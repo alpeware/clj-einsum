@@ -3,12 +3,13 @@
    Gate 1-4 metrics accounting, Monte Carlo QJL verification,
    needle-in-a-haystack (M-NIAH) retention, and CliffCompaction prefix telemetry."
   (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
+            [clojure.walk :as walk]
             [einsum.agent.core :as agent]
             [einsum.quant.eviction :as eviction]
             [einsum.quant.turboquant :as tq]
-            [experiments.gate3-evals.clojure-bench.core :as bench-core]
-            [experiments.gate3-evals.prompt-tuning-v1.core :as pt-core])
+            [experiments.gate3-evals.clojure-bench.core :as bench-core])
   (:import [java.util Random]))
 
 ;; =============================================================================
@@ -220,24 +221,51 @@
       :results results})))
 
 (defn verify-multiplier-free-butterfly
-  "Verifies that the FWHT butterfly implementation uses exclusively addition and subtraction operations."
-  []
-  (let [code (str '(let [idx1 (+ i j)
-                         idx2 (+ idx1 stride)
-                         u (aget arr idx1)
-                         w (aget arr idx2)]
-                     (aset-double arr idx1 (+ u w))
-                     (aset-double arr idx2 (- u w))))]
-    {:verified? (and (str/includes? code "(+ u w)")
-                     (str/includes? code "(- u w)")
-                     (not (str/includes? code "(* u w)")))
-     :operations [:addition :subtraction]
-     :multipliers 0}))
+  "Verifies that the FWHT butterfly implementation in `src/einsum/quant/turboquant.clj`
+   uses exclusively addition and subtraction operations in its butterfly inner loop,
+   directly inspecting the source file AST rather than a quoted literal."
+  ([] (verify-multiplier-free-butterfly "src/einsum/quant/turboquant.clj"))
+  ([source-path]
+   (let [file (io/file source-path)]
+     (if-not (.exists file)
+       {:verified? false :reason (str "Source file not found: " source-path)}
+       (with-open [r (java.io.PushbackReader. (io/reader file))]
+         (let [eof (Object.)
+               forms (loop [acc []]
+                       (let [f (read {:eof eof} r)]
+                         (if (identical? f eof) acc (recur (conj acc f)))))
+               fwht-def (some #(when (and (seq? %) (= (first %) 'defn) (= (second %) 'fwht-doubles!)) %) forms)
+               butterfly-body (atom nil)
+               _ (walk/prewalk (fn [node]
+                                 (when (and (seq? node)
+                                            (= (first node) 'dotimes)
+                                            (vector? (second node))
+                                            (= (first (second node)) 'j))
+                                   (reset! butterfly-body (drop 2 node)))
+                                 node)
+                               fwht-def)
+               ops (atom [])
+               arith-ops #{"+" "-" "*" "/" "Math/multiplyExact"}
+               _ (walk/prewalk (fn [node]
+                                 (when (seq? node)
+                                   (let [op (str (first node))]
+                                     (when (arith-ops op)
+                                       (swap! ops conj op))))
+                                 node)
+                               @butterfly-body)
+               multipliers (filter #(or (= % "*") (= % "Math/multiplyExact")) @ops)]
+           {:verified? (and (seq @butterfly-body)
+                            (empty? multipliers)
+                            (some #(= % "+") @ops)
+                            (some #(= % "-") @ops))
+            :operations (vec (distinct @ops))
+            :multipliers (count multipliers)
+            :source-file source-path}))))))
 
 (defn evaluate-multipl-e-dev50
-  "Empirically evaluates MultiPL-E Clojure dev 50 subset (public & sealed tests)
-   against reference solutions in a tightened SCI sandbox, calculating McNemar non-regression.
-   Returns map with :total-tasks, :passed-tasks, :pass-rate, and :mcnemar statistics."
+  "Evaluates MultiPL-E Clojure dev 50 subset grading pipeline in SCI sandbox against catalog reference solutions.
+   Validates instrument harness grading functionality (smoke test on reference answer key).
+   Note: Model generation is not connected in the loop, so paired McNemar non-regression is unmeasured."
   ([]
    (evaluate-multipl-e-dev50 "resources/catalog/gate3_evals/multipl_e/dev_50_public.edn"
                              "resources/catalog/gate3_evals/multipl_e/dev_50_sealed.edn"
@@ -256,13 +284,15 @@
                        pub)
          n (count results)
          passed (count (filter :passed? results))
-         pass-rate (if (pos? n) (double (/ passed n)) 0.0)
-         mcnemar (pt-core/mcnemar-test 0 0 n)]
+         pass-rate (if (pos? n) (double (/ passed n)) 0.0)]
      {:total-tasks n
       :passed-tasks passed
       :pass-rate pass-rate
-      :mcnemar mcnemar
-      :pass? (and (>= pass-rate 0.95) (false? (:significant? mcnemar)))})))
+      :harness-smoke-test-pass? (>= pass-rate 0.95)
+      :model-evaluated? false
+      :measured? false
+      :status :unmeasured
+      :reason "Harness smoke-tested on reference solutions; model forward generation not connected in loop"})))
 
 ;; =============================================================================
 ;; Summary Reporting & Serialization
@@ -271,8 +301,7 @@
 (defn generate-summary-csv
   "Generates RFC-compliant summary CSV content with explicit provenance metadata."
   [report]
-  (let [multipl-e (get-in report [:gate3 :multipl-e])
-        m-niah (get-in report [:gate3 :m-niah])
+  (let [m-niah (get-in report [:gate3 :m-niah])
         rows [["Metric" "Baseline (BF16)" "Tiered Turbo KV" "Target Criterion" "Status" "Provenance"]
               ["KV Cache 31B (128k)"
                (format "%.2f GB" (double (get-in report [:gate1 :31b-128k :uncompressed-kv-gb])))
@@ -335,11 +364,11 @@
                (if (get-in report [:gate3 :m-niah-pass?]) "PASS" "FAIL")
                "Empirically Evaluated (100 needles x 4 context lengths x 10 depth bins, attention mass ranking proxy)"]
               ["MultiPL-E Dev 50 Pass Rate"
-               "48/50 (96.0%)"
-               (format "%d/%d (%.1f%%)" (long (or (:passed-tasks multipl-e) 48)) (long (or (:total-tasks multipl-e) 50)) (* 100.0 (double (or (:pass-rate multipl-e) 0.96))))
+               "48/50 (Reference Answer Key)"
+               "Unmeasured (Model not in loop)"
                "Non-regression (p >= 0.05)"
-               (if (get-in report [:gate3 :multipl-e-pass?]) "PASS" "FAIL")
-               "Empirically Evaluated (dev_50_public in SCI sandbox, McNemar p=1.00)"]
+               "UNMEASURED"
+               "Staged; SCI harness smoke-tested on reference solutions, but compressed model forward generation not wired"]
               ["Autonomous Recursion Cycle Delta"
                "Baseline Hours"
                "Dropped by Spec Amendment"

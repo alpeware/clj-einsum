@@ -113,24 +113,29 @@
 
 (defn evaluate-gate3-intelligence-floor
   "Evaluates QJL residual sketch Monte Carlo bias, synthetic M-NIAH needle retention,
-   and empirical MultiPL-E Clojure dev 50 verification in the tightened SCI sandbox."
+   and smoke-tests the MultiPL-E Clojure dev 50 grading harness in the tightened SCI sandbox."
   []
   (let [bias (core/evaluate-qjl-estimator-bias 10000 128 32 42)
         m-niah (core/evaluate-m-niah-retention-suite [16384 32768 65536 131072])
         multipl-e (core/evaluate-multipl-e-dev50)
         c3-1-pass? (<= bias 1.0e-4)
         c3-2-pass? (boolean (:all-pass? m-niah))
-        c3-3-pass? (boolean (:pass? multipl-e))]
+        ;; Criterion 3.3 requires live model generation for paired McNemar testing.
+        ;; While the SCI sandbox smoke-test verifies the reference answer key (48/50),
+        ;; compressed model generation is not connected in the loop.
+        c3-3-pass? false]
     {:qjl-bias bias
      :qjl-bias-pass? c3-1-pass?
      :m-niah m-niah
      :m-niah-pass? c3-2-pass?
      :multipl-e multipl-e
+     :multipl-e-harness-pass? (:harness-smoke-test-pass? multipl-e)
      :multipl-e-pass-rate (:pass-rate multipl-e)
      :multipl-e-pass? c3-3-pass?
      :criterion-3-1-pass? c3-1-pass?
      :criterion-3-2-pass? c3-2-pass?
      :criterion-3-3-pass? c3-3-pass?
+     :criterion-3-3-reason "Staged: MultiPL-E SCI harness smoke-tested on reference solutions (48/50), but model forward generation not connected in loop"
      :gate3-pass? (and c3-1-pass? c3-2-pass? c3-3-pass?)}))
 
 ;; =============================================================================
@@ -160,6 +165,7 @@
      "**Result: REJECTED.** While Stage 2 pure algorithmic mechanisms passed their respective invariant checks on the host JVM, Stage 3 accelerator verification failed due to unmeasured device criteria:\n"
      "- **Criterion 1.2 (Peak VRAM OOM)**: Evaluated only as an analytical model (17.56 GB); physical OOM avoidance on device was untestable without live GPU memory allocation.\n"
      "- **Criterion 2.2 (Decode Step Latency Overhead)**: UNMEASURED. The forward attention decode kernel wiring into OpenXLA PJRT ROCm execution remains staged.\n"
+     "- **Criterion 3.3 (MultiPL-E Non-Regression)**: UNMEASURED. The SCI grading harness was smoke-tested on catalog reference solutions (48/50), but paired McNemar non-regression requires live model forward generation in the loop.\n"
      "- **Gate 4 (Continuous Recursion)**: DROPPED by specification amendment; longitudinal autonomous cycle delta cannot be measured from a single proposal run.\n\n"
      "---\n\n"
      "## 2. Empirical Verification Scorecard\n\n"
@@ -191,18 +197,16 @@
      (format "| Gate 3 | 3.2 | M-NIAH Retention Floor (100x4x10) | >= 95.0%% | %.1f%% min | %s | Empirically Evaluated (attention mass ranking proxy; model not in loop) |\n"
              (* 100.0 (double (:min-accuracy mn)))
              (if (:criterion-3-2-pass? g3) "PASS" "FAIL"))
-     (format "| Gate 3 | 3.3 | MultiPL-E Dev 50 Pass Rate | Non-regression (p >= 0.05) | %d/%d (%.1f%%, p=%.2f) | %s | Empirically Evaluated (dev_50 in tightened SCI sandbox, McNemar) |\n"
+     (format "| Gate 3 | 3.3 | MultiPL-E Dev 50 Pass Rate | Non-regression (p >= 0.05) | Unmeasured (Harness: %d/%d on answer key) | %s | Staged; live model inference required for paired McNemar test |\n"
              (long (:passed-tasks mp))
              (long (:total-tasks mp))
-             (* 100.0 (double (:pass-rate mp)))
-             (double (get-in mp [:mcnemar :p-value]))
-             (if (:criterion-3-3-pass? g3) "PASS" "FAIL"))
+             (if (:criterion-3-3-pass? g3) "PASS" "FAIL [UNMEASURED]"))
      "| Gate 4 | 4.1 | Autonomous Cycle Time Delta | >= 30.0% reduction | Dropped | DROPPED | Dropped by spec amendment; requires multi-proposal history |\n\n"
      "---\n\n"
      "## 3. Detailed Findings & Remediation Record\n\n"
      "1. **Rejection & Catalog De-Registration**: The premature promotion (`a07202b`) was revoked per PROCESS.md §3.1. The catalog entry in `registry.edn` and pod directory `resources/catalog/gate1_compression/tiered_turbo_kv/` were completely removed.\n"
      "2. **Elimination of Literal Bypasses**: All hardcoded literal booleans and numbers in pass/fail positions (`:multipl-e-pass-at-1-retention 0.992`, `:decode-step-overhead-pct 2.1`, `:cycle-time-reduction-pct 34.2`) were replaced with real measurement functions.\n"
-     "3. **Real MultiPL-E Execution**: MultiPL-E dev 50 evaluated genuinely against reference solutions in the tightened SCI sandbox: 48/50 passed (96.0%) with paired McNemar p=1.00 (b=0, c=0), confirming zero regression.\n"
+     "3. **MultiPL-E Grading Harness Smoke-Test**: MultiPL-E dev 50 evaluated genuinely against catalog reference solutions in the tightened SCI sandbox: 48/50 passed (96.0%), confirming grading harness integrity. Because compressed model forward generation is not yet connected in the loop, paired McNemar non-regression is marked UNMEASURED.\n"
      "4. **M-NIAH Suite Realignment**: Synthetic attention-mass retention evaluated across 100 needles (10 depth bins × 10 needles) across 4 context lengths (16k, 32k, 64k, 128k), achieving 100% retention on saliency ranking, explicitly labeled as an eviction ranking proxy.\n"
      "5. **Eviction Primitive Optimization**: Refactored `select-retained-indices` to a zero-boxing primitive min-heap, reducing latency from 24.7 ms to ~4.5 ms and eliminating test flakiness.\n\n"
      "## 4. Next Milestone Prior to Re-Promotion\n\n"

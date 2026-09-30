@@ -22,29 +22,26 @@
 ;; 2. Retained Index Selection (Sinks + Pyramidal Heavy Hitters + Local Window)
 ;; ==============================================================================
 
+(def ^:private ^Class float-arr-cls (Class/forName "[F"))
+(def ^:private ^Class double-arr-cls (Class/forName "[D"))
+
+(defn- float-array? [x]
+  (and (some? x) (identical? (.getClass ^Object x) float-arr-cls)))
+
+(defn- double-array? [x]
+  (and (some? x) (identical? (.getClass ^Object x) double-arr-cls)))
+
 (defn- to-double-array ^doubles [v ^long n]
-  (cond
-    (instance? (Class/forName "[D") v)
-    ^doubles v
+  (let [arr (double-array n)]
+    (dotimes [i n]
+      (aset-double arr i (double (nth v i 0.0))))
+    arr))
 
-    (instance? (Class/forName "[F") v)
-    (let [arr (double-array n)
-          ^floats fv v]
-      (dotimes [i n]
-        (aset-double arr i (double (aget fv i))))
-      arr)
-
-    :else
-    (let [arr (double-array n)]
-      (dotimes [i n]
-        (aset-double arr i (double (nth v i 0.0))))
-      arr)))
-
-(defn- heap-sift-up!
-  [^ints heap ^doubles mass ^long start-idx]
+(defn- heap-sift-up-float!
+  [^ints heap ^floats mass ^long start-idx]
   (loop [i (int start-idx)]
     (when (pos? i)
-      (let [parent (int (bit-shift-right (dec i) 1))
+      (let [parent (unchecked-int (bit-shift-right (unchecked-dec-int i) 1))
             val-i (aget mass (aget heap i))
             val-p (aget mass (aget heap parent))]
         (when (< val-i val-p)
@@ -53,13 +50,13 @@
             (aset-int heap parent tmp)
             (recur parent)))))))
 
-(defn- heap-sift-down!
-  [^ints heap ^doubles mass ^long start-idx ^long n]
+(defn- heap-sift-down-float!
+  [^ints heap ^floats mass ^long start-idx ^long n]
   (let [half (int (bit-shift-right (int n) 1))]
     (loop [i (int start-idx)]
       (when (< i half)
-        (let [left (int (inc (bit-shift-left i 1)))
-              right (int (inc left))
+        (let [left (unchecked-int (unchecked-inc-int (bit-shift-left i 1)))
+              right (unchecked-int (unchecked-inc-int left))
               child (if (and (< right (int n))
                              (< (aget mass (aget heap right))
                                 (aget mass (aget heap left))))
@@ -71,6 +68,114 @@
               (aset-int heap i (aget heap child))
               (aset-int heap child tmp)
               (recur child))))))))
+
+(defn- heap-sift-up-double!
+  [^ints heap ^doubles mass ^long start-idx]
+  (loop [i (int start-idx)]
+    (when (pos? i)
+      (let [parent (unchecked-int (bit-shift-right (unchecked-dec-int i) 1))
+            val-i (aget mass (aget heap i))
+            val-p (aget mass (aget heap parent))]
+        (when (< val-i val-p)
+          (let [tmp (aget heap i)]
+            (aset-int heap i (aget heap parent))
+            (aset-int heap parent tmp)
+            (recur parent)))))))
+
+(defn- heap-sift-down-double!
+  [^ints heap ^doubles mass ^long start-idx ^long n]
+  (let [half (int (bit-shift-right (int n) 1))]
+    (loop [i (int start-idx)]
+      (when (< i half)
+        (let [left (unchecked-int (unchecked-inc-int (bit-shift-left i 1)))
+              right (unchecked-int (unchecked-inc-int left))
+              child (if (and (< right (int n))
+                             (< (aget mass (aget heap right))
+                                (aget mass (aget heap left))))
+                      right
+                      left)]
+          (when (< (aget mass (aget heap child))
+                   (aget mass (aget heap i)))
+            (let [tmp (aget heap i)]
+              (aset-int heap i (aget heap child))
+              (aset-int heap child tmp)
+              (recur child))))))))
+
+(defn- select-retained-float
+  [mass-arr total-len k-sink window k-heavy]
+  (let [^floats mass-arr mass-arr
+        total-len (long total-len)
+        k-sink (long k-sink)
+        window (long window)
+        k-heavy (long k-heavy)
+        window-start (- total-len window)
+        heap (int-array k-heavy)]
+    (loop [i (int k-sink)
+           sz (int 0)]
+      (when (< i (int window-start))
+        (if (< sz (int k-heavy))
+          (do
+            (aset-int heap sz i)
+            (heap-sift-up-float! heap mass-arr sz)
+            (recur (unchecked-inc-int i) (unchecked-inc-int sz)))
+          (do
+            (let [min-idx (aget heap 0)
+                  val-min (aget mass-arr min-idx)
+                  val-i (aget mass-arr i)]
+              (when (> val-i val-min)
+                (aset-int heap 0 i)
+                (heap-sift-down-float! heap mass-arr 0 k-heavy)))
+            (recur (unchecked-inc-int i) sz)))))
+    (java.util.Arrays/sort heap)
+    (let [k-sink-int (int k-sink)
+          k-heavy-int (int k-heavy)
+          window-int (int window)
+          total-retained (+ k-sink-int k-heavy-int window-int)
+          out (int-array total-retained)]
+      (dotimes [i k-sink-int] (aset-int out i (int i)))
+      (System/arraycopy heap 0 out k-sink-int k-heavy-int)
+      (let [w-off (+ k-sink-int k-heavy-int)
+            w-start-int (int window-start)]
+        (dotimes [i window-int] (aset-int out (+ w-off i) (int (+ w-start-int i)))))
+      (vec out))))
+
+(defn- select-retained-double
+  [mass-arr total-len k-sink window k-heavy]
+  (let [^doubles mass-arr mass-arr
+        total-len (long total-len)
+        k-sink (long k-sink)
+        window (long window)
+        k-heavy (long k-heavy)
+        window-start (- total-len window)
+        heap (int-array k-heavy)]
+    (loop [i (int k-sink)
+           sz (int 0)]
+      (when (< i (int window-start))
+        (if (< sz (int k-heavy))
+          (do
+            (aset-int heap sz i)
+            (heap-sift-up-double! heap mass-arr sz)
+            (recur (unchecked-inc-int i) (unchecked-inc-int sz)))
+          (do
+            (let [min-idx (aget heap 0)
+                  val-min (aget mass-arr min-idx)
+                  val-i (aget mass-arr i)]
+              (when (> val-i val-min)
+                (aset-int heap 0 i)
+                (heap-sift-down-double! heap mass-arr 0 k-heavy)))
+            (recur (unchecked-inc-int i) sz)))))
+    (java.util.Arrays/sort heap)
+    (let [k-sink-int (int k-sink)
+          k-heavy-int (int k-heavy)
+          window-int (int window)
+          total-retained (+ k-sink-int k-heavy-int window-int)
+          out (int-array total-retained)]
+      (dotimes [i k-sink-int] (aset-int out i (int i)))
+      (System/arraycopy heap 0 out k-sink-int k-heavy-int)
+      (let [w-off (+ k-sink-int k-heavy-int)
+            w-start-int (int window-start)]
+        (dotimes [i window-int] (aset-int out (+ w-off i) (int (+ w-start-int i)))))
+      (vec out))))
 
 (defn select-retained-indices
   "Selects the monotonically sorted set of token indices to retain in the KV cache:
@@ -89,35 +194,21 @@
          layer-idx (long (or layer-idx 0))]
      (if (<= total-len (+ k-sink window))
        (vec (range total-len))
-       (let [sink-indices (range k-sink)
-             window-start (- total-len window)
-             window-indices (range window-start total-len)
-             intermediate-count (- window-start k-sink)
+       (let [intermediate-count (- total-len window k-sink)
              k-heavy (min intermediate-count
                           (pyramidal-heavy-budget layer-idx num-layers k-base))]
          (if (<= intermediate-count k-heavy)
            (vec (range total-len))
-           (let [^doubles mass-arr (to-double-array attn-mass total-len)
-                 heap (int-array k-heavy)]
-             ;; Find top k-heavy candidates in [k-sink, window-start - 1] using primitive min-heap
-             (loop [i (int k-sink)
-                    sz (int 0)]
-               (when (< i (int window-start))
-                 (if (< sz (int k-heavy))
-                   (do
-                     (aset-int heap sz i)
-                     (heap-sift-up! heap mass-arr sz)
-                     (recur (unchecked-inc-int i) (unchecked-inc-int sz)))
-                   (do
-                     (let [min-idx (aget heap 0)
-                           val-min (aget mass-arr min-idx)
-                           val-i (aget mass-arr i)]
-                       (when (> val-i val-min)
-                         (aset-int heap 0 i)
-                         (heap-sift-down! heap mass-arr 0 k-heavy)))
-                     (recur (unchecked-inc-int i) sz)))))
-             (let [heavy-indices (vec (java.util.Arrays/copyOf heap (int k-heavy)))]
-               (vec (sort (concat sink-indices heavy-indices window-indices)))))))))))
+           (cond
+             (float-array? attn-mass)
+             (select-retained-float attn-mass total-len k-sink window k-heavy)
+
+             (double-array? attn-mass)
+             (select-retained-double attn-mass total-len k-sink window k-heavy)
+
+             :else
+             (let [^doubles mass-arr (to-double-array attn-mass total-len)]
+               (select-retained-double mass-arr total-len k-sink window k-heavy)))))))))
 
 ;; ==============================================================================
 ;; 3. KV Buffer Slicing & Eviction
