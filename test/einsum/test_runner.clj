@@ -60,6 +60,7 @@
             [einsum.models.tl-nano-test]
             [einsum.models.transformer-test]
             [einsum.quant.catq-test]
+            [einsum.quant.eviction-test]
             [einsum.quant.ternary-pjrt-test]
             [einsum.quant.ternary-test]
             [einsum.quant.turboquant-test]
@@ -121,6 +122,7 @@
    'einsum.agent-test
    'einsum.quantize-test
    'einsum.quant.catq-test
+   'einsum.quant.eviction-test
    'einsum.quant.ternary-test
    'einsum.quant.turboquant-test
    'einsum.models.gemma4-test
