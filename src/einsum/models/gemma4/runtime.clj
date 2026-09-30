@@ -836,3 +836,48 @@
   "Generates text response using Gemma 4 model session and returns ONLY newly generated text string without prompt prefix."
   [session prompt]
   (:text (generate-new-tokens-and-text session prompt)))
+
+(defn score-sequence-log-probs
+  "Evaluates exact log-probabilities of a token sequence in OpenXLA device memory.
+   Compiles or uses `exec` (from `compile-gemma4-scoring-executable`), computes
+   StableHLO log-softmax, and gathers target log-probs entirely on-accelerator.
+   Transfers only [1, max-seq-len] float values back to host memory (zero PCIe logit bloat).
+   Returns a map:
+   {:token-ids token-ids
+    :target-log-probs [log P(w_1|w_0), log P(w_2|w_<2), ..., log P(w_{n-1}|w_{<n-1})]
+    :log-probs [0.0, log P(w_1|w_0), ..., log P(w_{n-1}|w_{<n-1})]}"
+  ([session exec token-ids]
+   (score-sequence-log-probs session exec token-ids nil))
+  ([{:keys [ctx session-arena] :as session} exec token-ids max-seq-len]
+   (let [tokens (vec token-ids)
+         n (count tokens)
+         _ (when (< n 2)
+             (throw (ex-info "Sequence must contain at least 2 tokens to score target log-probabilities"
+                             {:num-tokens n})))
+         seq-len (long (or max-seq-len
+                           (:max-seq-len session)
+                           (get-in session [:config :max-seq-len])
+                           n))
+         _ (when (< seq-len n)
+             (throw (ex-info "max-seq-len cannot be smaller than sequence token count"
+                             {:max-seq-len seq-len :num-tokens n})))
+         in-arr (int-array seq-len)
+         targets-arr (int-array seq-len)]
+     (dotimes [i n]
+       (aset in-arr i (int (nth tokens i))))
+     (dotimes [i (dec n)]
+       (aset targets-arr i (int (nth tokens (inc i)))))
+     (let [target-log-probs
+           (xla/with-device-arena [step-arena (or session-arena ctx)]
+             (let [in-b (xla/device-buffer step-arena in-arr [1 seq-len] :i32)
+                   targets-b (xla/device-buffer step-arena targets-arr [1 seq-len] :i32)
+                   device-weights (or (:device-weights session)
+                                      (weights/allocate-device-weights session))
+                   args (into [in-b targets-b] device-weights)
+                   out (xla/track! step-arena (xla/execute exec args))
+                   out-buf (if (sequential? out) (first out) out)
+                   raw-floats (xla/to-host-slice out-buf 0 seq-len seq-len :f32)]
+               (mapv #(double (aget ^floats raw-floats %)) (range (dec n)))))]
+       {:token-ids tokens
+        :target-log-probs target-log-probs
+        :log-probs (into [0.0] target-log-probs)}))))

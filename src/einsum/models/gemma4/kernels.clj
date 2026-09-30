@@ -19,7 +19,7 @@
   (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size backend target]} config
         int4? (boolean (or is-int4 (= weight-dtype :int4)))
         is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
-        norm-dtype (if (or is-int8 int4? is-ternary) :bf16 weight-dtype)
+        norm-dtype (if (or is-int8 int4? is-ternary) :bf16 (or weight-dtype :f32))
         has-ple? (pos? total-pl-dim)
         use-w4a16? (and int4?
                         (if (some? (:use-w4a16-gemv config))
@@ -250,6 +250,30 @@
         graph (lower/ast->graph "gemma4_model" invars ast target-heads)]
     (when-not (:quiet opts)
       (println "Compiling native XLA PjRtLoadedExecutable..."))
+    (xla/compile-graph ctx graph)))
+
+(defn compile-gemma4-scoring-executable
+  "Compiles Gemma 4 model AST into a native StableHLO MLIR scoring executable.
+   Takes prompt tokens [:x] and target tokens [:targets] of shape [1, max-seq-len],
+   computes log-softmax logits and gathers target log-probs in-accelerator,
+   returning only [:target_log_probs] of shape [1, max-seq-len] (f32)."
+  [{:keys [ctx config opts]} max-seq-len]
+  (let [cfg (assoc config :max-seq-len max-seq-len :last-token-only? false)
+        model-invars (build-tensor-logic-invars cfg max-seq-len)
+        invars (vec (concat [[:x [:tensor [1 max-seq-len] :i32]]
+                             [:targets [:tensor [1 max-seq-len] :i32]]]
+                            (rest model-invars)))
+        ast [:block {:name :gemma4_scoring}
+             (gemma-logic/gemma4-model-ast cfg)
+             [:log-softmax [:log_probs :b :p :v] [:logits :b :p :v] {:axis 2}]
+             [:gather [:target_log_probs :b :p] [:log_probs :b :p :v] [:targets :b :p] {:axis 2}]]
+        targets #{:target_log_probs}
+        _ (when-not (:quiet opts)
+            (println (format "Lowering declarative Tensor Logic Gemma 4 Scoring (%d layers, max-seq-len=%d) to StableHLO..."
+                             (:num-layers config) max-seq-len)))
+        graph (lower/ast->graph "gemma4_scoring" invars ast targets)]
+    (when-not (:quiet opts)
+      (println "Compiling Gemma 4 Scoring graph to native XLA PjRtLoadedExecutable..."))
     (xla/compile-graph ctx graph)))
 
 (defn compile-gemma4-prefill-executable

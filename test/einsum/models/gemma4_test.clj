@@ -1,12 +1,17 @@
 (ns einsum.models.gemma4-test
   "Generative specification tests for modularized Gemma 4 domain namespaces:
    config, weights, kernels, and runtime."
-  (:require [clojure.test.check.clojure-test :refer [defspec]]
+  (:require [clojure.test :refer [deftest is]]
+            [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
+            [einsum.compiler.stablehlo :as shlo]
+            [einsum.logic.lower :as lower]
+            [einsum.models.gemma :as gemma-logic]
             [einsum.models.gemma4.config :as cfg]
-            [einsum.models.gemma4.weights :as weights]
-            [einsum.models.gemma4.runtime :as rt]))
+            [einsum.models.gemma4.kernels :as kernels]
+            [einsum.models.gemma4.runtime :as rt]
+            [einsum.models.gemma4.weights :as weights]))
 
 ;; -----------------------------------------------------------------------------
 ;; 1. Config Invariants
@@ -94,3 +99,50 @@
                       arr (float-array mod-floats)
                       result (rt/argmax-host arr)]
                   (= result valid-idx))))
+
+;; -----------------------------------------------------------------------------
+;; 4. Scoring Invariants
+;; -----------------------------------------------------------------------------
+
+(deftest test-gemma4-scoring-graph-generation
+  ;; A small 1-layer gemma4 model scoring graph lowers to a valid StableHLO SSA graph
+  ;; with target_log_probs as its single output.
+  (let [cfg {:num-layers 1
+             :hidden-dim 64
+             :head-dim 32
+             :num-heads 2
+             :num-kv-heads 1
+             :vocab-size 256
+             :intermediate-dim 128
+             :max-seq-len 8
+             :weight-dtype :f32
+             :last-token-only? false
+             :total-pl-dim 0
+             :pl-dim 0}
+        max-seq-len 8
+        model-invars (kernels/build-tensor-logic-invars cfg max-seq-len)
+        invars (vec (concat [[:x [:tensor [1 max-seq-len] :i32]]
+                             [:targets [:tensor [1 max-seq-len] :i32]]]
+                            (rest model-invars)))
+        ast [:block {:name :gemma4_scoring}
+             (gemma-logic/gemma4-model-ast cfg)
+             [:log-softmax [:log_probs :b :p :v] [:logits :b :p :v] {:axis 2}]
+             [:gather [:target_log_probs :b :p] [:log_probs :b :p :v] [:targets :b :p] {:axis 2}]]
+        targets #{:target_log_probs}
+        graph (lower/ast->graph "gemma4_scoring" invars ast targets)]
+    (is (shlo/validate-graph graph))
+    (is (= [:target_log_probs] (:outvars graph)))
+    (let [ops (mapv :op (:eqns graph))]
+      (is (some #(= :stablehlo/gather %) ops))
+      (is (some #(= :stablehlo/log %) ops)))))
+
+(defspec prop-score-sequence-log-probs-validation 50
+  (prop/for-all [tokens (gen/vector (gen/choose 1 1000) 0 1)]
+    ;; Should throw exception for tokens count < 2
+    (try
+      (rt/score-sequence-log-probs {} nil tokens)
+      false
+      (catch clojure.lang.ExceptionInfo e
+        (= "Sequence must contain at least 2 tokens to score target log-probabilities"
+           (.getMessage e))))))
+
