@@ -3,7 +3,9 @@
    prompt synthesis, thinking trace extraction, and semantic early stopping."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [sci.core :as sci]))
+            [sci.core :as sci])
+  (:import [java.nio.charset StandardCharsets]
+           [java.security MessageDigest]))
 
 ;; =============================================================================
 ;; 1. Default Prompts & Options
@@ -465,8 +467,73 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
            :else false))))))
 
 ;; =============================================================================
-;; 5. Prompt Formatting (Chat Turns & Thinking Injection)
+;; 5. Prompt Formatting & CliffCompaction History Compaction
 ;; =============================================================================
+
+(defn sha256-str
+  "Computes lowercase hexadecimal SHA-256 hash string of s."
+  ^String [^String s]
+  (let [md (MessageDigest/getInstance "SHA-256")
+        bytes (.digest md (.getBytes (or s "") StandardCharsets/UTF_8))
+        hex (.toString (BigInteger. 1 bytes) 16)
+        pad (- 64 (count hex))]
+    (if (pos? pad)
+      (str (apply str (repeat pad "0")) hex)
+      hex)))
+
+(defn conversation-hash-chain
+  "Computes a cumulative SHA-256 hash vector across conversation turns.
+   Each entry is SHA256(prev_hash || role || content)."
+  [history]
+  (reduce
+   (fn [acc {:keys [role content]}]
+     (let [prev-hash (or (last acc) "0000000000000000000000000000000000000000000000000000000000000000")
+           payload (str prev-hash ":" (name (or role :unknown)) ":" (or content ""))
+           h (sha256-str payload)]
+       (conj acc h)))
+   []
+   history))
+
+(defn compact-agent-history
+  "Applies CliffCompaction to conversation history to stabilize prefix and prune bulky intermediate tool outputs.
+   Options:
+     :head-turns (default 2) - Number of initial prompt turns to preserve verbatim.
+     :recent-turns (default 3) - Number of recent dialogue turns to preserve verbatim.
+     :tool-result-max-chars (default 500) - Maximum character length of intermediate tool result turns.
+   When intermediate tool results exceed :tool-result-max-chars, they are replaced with a deterministic summary:
+   `[output truncated: <sha256-prefix:8> | <original-char-count> chars]`"
+  ([history]
+   (compact-agent-history history nil))
+  ([history opts]
+   (let [head-count (long (get opts :head-turns 2))
+         recent-count (long (get opts :recent-turns 3))
+         max-chars (long (get opts :tool-result-max-chars 500))
+         n (count history)]
+     (if (<= n (+ head-count recent-count))
+       (vec history)
+       (let [tail-start (- n recent-count)]
+         (mapv
+          (fn [idx turn]
+            (if (or (< idx head-count) (>= idx tail-start))
+              turn
+              (if (and (= (:role turn) :tool)
+                       (> (count (or (:content turn) "")) max-chars))
+                (let [orig-str (or (:content turn) "")
+                      h-prefix (subs (sha256-str orig-str) 0 8)
+                      truncated-content (str "[output truncated: " h-prefix " | " (count orig-str) " chars]")]
+                  (assoc turn :content truncated-content))
+                turn)))
+          (range n)
+          history))))))
+
+(defn common-prefix-len
+  "Returns the number of leading items shared by sequences xs and ys."
+  [xs ys]
+  (let [n (min (count xs) (count ys))]
+    (loop [i 0]
+      (if (and (< i n) (= (nth xs i) (nth ys i)))
+        (recur (inc i))
+        i))))
 
 (defn format-agent-chat-prompt
   "Formats conversation history into Gemma 4 Turn syntax, placing tool declarations and system instructions in native Gemma 4 turns.
@@ -761,7 +828,8 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
    (run-agent-loop session initial-prompt custom-sci-ctx nil))
   ([session initial-prompt custom-sci-ctx custom-tool-eval-fn]
    (let [{:keys [opts]} session
-         {:keys [system max-turns out quiet profile-out thinking tool-declaration max-consecutive-errors sandbox tool-eval-fn candidate-check-fn tool-syntax]} opts
+         {:keys [system max-turns out quiet profile-out thinking tool-declaration max-consecutive-errors sandbox tool-eval-fn candidate-check-fn tool-syntax compact-history? compact-opts]} opts
+         should-compact? (if (contains? opts :compact-history?) (boolean compact-history?) true)
          syntax (keyword (or tool-syntax :native))
          tool-eval (or custom-tool-eval-fn tool-eval-fn eval-tool-code)
          candidate-fn (or candidate-check-fn (constantly false))
@@ -815,7 +883,10 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
            (when-not quiet (println "\n=================================================="))
            (when-not quiet (println (format "=== Agent Turn %d/%d ===" turn max-turns)))
            (when-not quiet (println "=================================================="))
-           (let [formatted-prompt (format-agent-chat-prompt sys-prompt @history 8 thinking? tool-decl syntax)
+           (let [history-snapshot (if should-compact?
+                                    (compact-agent-history @history compact-opts)
+                                    @history)
+                 formatted-prompt (format-agent-chat-prompt sys-prompt history-snapshot 8 thinking? tool-decl syntax)
                  _ (when-not quiet (println "Executing Gemma 4 Agent Forward Pass..."))
                  t-gen-0 (System/nanoTime)
                  gen-res (gen-fn session formatted-prompt)

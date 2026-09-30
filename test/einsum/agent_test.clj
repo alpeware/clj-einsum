@@ -810,3 +810,72 @@
       (is (>= (count transcript) 2))
       (is (some #(and (= (:role %) :user) (str/includes? (or (:content %) "") "Please test your Clojure implementation")) transcript)))))
 
+;; =============================================================================
+;; CliffCompaction Semantic Agent Harness Invariants (Tier 1, Criterion 2.4)
+;; =============================================================================
+
+(defspec prop-compact-history-head-verbatim
+  50
+  (prop/for-all [inter-count (gen/choose 1 10)]
+                (let [head [{:role :user :content "Initial task specification"}
+                            {:role :model :content "I will start by inspecting the files."}]
+                      inter (vec (repeatedly inter-count
+                                             (fn []
+                                               (if (< (rand) 0.5)
+                                                 {:role :tool :content (apply str (repeat 600 "x"))}
+                                                 {:role :model :content "Analyzing output."}))))
+                      tail [{:role :user :content "Continue"}
+                            {:role :model :content "Proceeding"}
+                            {:role :user :content "Final query"}]
+                      full-history (vec (concat head inter tail))
+                      compacted (agent/compact-agent-history full-history {:tool-result-max-chars 500})]
+                  (= (vec (take 2 compacted)) head))))
+
+(defspec prop-compact-history-tail-verbatim
+  50
+  (prop/for-all [inter-count (gen/choose 1 10)]
+                (let [head [{:role :user :content "Task start"}
+                            {:role :model :content "Starting"}]
+                      inter (vec (repeatedly inter-count
+                                             (fn [] {:role :tool :content (apply str (repeat 800 "y"))})))
+                      tail [{:role :user :content "Review tail 1"}
+                            {:role :model :content "Review tail 2"}
+                            {:role :user :content "Review tail 3"}]
+                      full-history (vec (concat head inter tail))
+                      compacted (agent/compact-agent-history full-history {:tool-result-max-chars 500})]
+                  (= (vec (take-last 3 compacted)) tail))))
+
+(defspec prop-compact-history-tool-truncation
+  50
+  (prop/for-all [excess-len (gen/choose 550 2000)]
+                (let [long-content (apply str (repeat excess-len "z\n"))
+                      history [{:role :user :content "Start"}
+                               {:role :model :content "Run"}
+                               {:role :tool :content long-content}
+                               {:role :user :content "T1"}
+                               {:role :model :content "T2"}
+                               {:role :user :content "T3"}]
+                      compacted (agent/compact-agent-history history {:tool-result-max-chars 500})
+                      inter-tool (nth compacted 2)]
+                  (and (str/includes? (:content inter-tool) "[output truncated:")
+                       (< (count (:content inter-tool)) 150)))))
+
+(deftest test-prefix-hash-stability-across-turns
+  (testing "Formatted prompt common prefix across turns retains >= 85% of total prompt length (Criterion 2.4)"
+    (let [sys "You are an autonomous Clojure agent."
+          h1 [{:role :user :content "System spec"}
+              {:role :model :content "Step 1"}
+              {:role :tool :content (apply str (repeat 1000 "data\n"))}
+              {:role :user :content "Next"}
+              {:role :model :content "Step 2"}
+              {:role :user :content "Next 2"}]
+          h2 (conj h1 {:role :model :content "Step 3"})
+          c1 (agent/compact-agent-history h1 {:tool-result-max-chars 500})
+          c2 (agent/compact-agent-history h2 {:tool-result-max-chars 500})
+          p1 (agent/format-agent-chat-prompt sys c1 8 false nil :native)
+          p2 (agent/format-agent-chat-prompt sys c2 8 false nil :native)
+          prefix-len (long (agent/common-prefix-len (vec p1) (vec p2)))
+          ratio (/ (double prefix-len) (double (count p1)))]
+      (is (>= ratio 0.85) (str "Observed prefix ratio: " ratio " was < 0.85")))))
+
+
