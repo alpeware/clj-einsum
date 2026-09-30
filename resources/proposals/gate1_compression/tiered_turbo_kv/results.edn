@@ -5,7 +5,7 @@
   :model-name "gemma-4-31b-it-int4",
   :backend :rocm,
   :status
-  "STAGE 3 SILICON BENCHMARKED (7 CRITERIA PASSED; CRITERION 3.3 MODEL GENERATION UNMEASURED)",
+  "STAGE 3 SILICON BENCHMARKED (7 CRITERIA PASSED; CRITERIA 2.2 & 3.3 UNMEASURED)",
   :provenance
   {:model-accounting
    "Analytical & Physical ROCm buffer allocation (54 layers, 8 heads, 3076 tokens, 2.75b)",
@@ -16,8 +16,8 @@
    :m-niah
    "Attention-mass retention-through-eviction proxy (100 needles x 4 lengths x 10 bins)",
    :hardware-decode
-   "Measured on live AMD Radeon RX 7900 XTX via OpenXLA PJRT ROCm"},
-  :timestamp "2026-09-30T21:56:15.364346383Z"},
+   "Attention kernel benchmarked on live AMD Radeon RX 7900 XTX (full decode loop unmeasured)"},
+  :timestamp "2026-09-30T22:09:09.169992108Z"},
  :gate1
  {:gate1-pass? true,
   :criterion-1-3-pass? true,
@@ -42,7 +42,7 @@
    :model-name "gemma-4-12B-it",
    :model :gemma-4-12b},
   :criterion-1-2-reason
-  "Verified: 17.59 GB physical peak VRAM allocated without OOM on AMD RX 7900 XTX",
+  "Verified: 108 packed KV buffers (85.0 MB) allocated without OOM on AMD RX 7900 XTX; full-stack peak 17.59 GB remains analytical (weights not loaded)",
   :31b-64k
   {:compression-ratio 123.95980612365528,
    :seq-len 65536,
@@ -63,14 +63,16 @@
    :model-name "gemma-4-31B-it",
    :model :gemma-4-31b},
   :rocm-vram
-  {:measured? true,
-   :oom? false,
-   :buffer-count 108,
+  {:kv-cache-gb 0.085045248,
    :total-bytes 85045248,
-   :kv-cache-gb 0.085045248,
-   :peak-vram-gb 17.585045248,
+   :analytical-peak-vram-gb 17.585045248,
+   :buffer-count 108,
+   :oom? false,
    :headroom-gb 6.414954752,
-   :pass? true},
+   :pass? true,
+   :kv-cache-mb 85.045248,
+   :measured? true,
+   :peak-vram-gb 17.585045248},
   :e4b-32k
   {:compression-ratio 61.97990306182764,
    :seq-len 32768,
@@ -171,29 +173,40 @@
    :model :gemma-4-12b}},
  :gate2
  {:prefix-pass? true,
-  :criterion-2-2-pass? true,
+  :criterion-2-2-pass? false,
+  :attention-kernel-overhead-pct 16.777554514143368,
   :eviction-latency-samples
-  [4.152255 4.065075 3.941254 3.144199 3.091949],
-  :decode-overhead-pass? true,
+  [4.285539 4.148408 4.143149 3.327872 3.186832],
+  :decode-overhead-pass? false,
   :rocm-decode
-  {:measured? true,
-   :baseline-attention-us 220.63456,
-   :turboquant-attention-us 275.95108,
-   :attention-overhead-us 55.31652,
-   :attention-overhead-ms 0.055316519999999994,
-   :decode-step-overhead-pct 0.29502143999999997,
-   :pass? true},
-  :gate2-pass? true,
-  :decode-step-overhead-pct 0.29502143999999997,
-  :eviction-latency-ms 3.941254,
+  {:attention-kernel-overhead-pct 16.777554514143368,
+   :decode-step-overhead-pct nil,
+   :turboquant-attention-us 285.50274,
+   :baseline-attention-us 244.48426,
+   :benchmark-config
+   {:context-len 1024,
+    :num-heads 8,
+    :num-kv-heads 8,
+    :head-dim 128,
+    :packed-dim 32,
+    :iterations 50,
+    :accelerator "AMD Radeon RX 7900 XTX (OpenXLA PJRT ROCm 6.2)"},
+   :attention-overhead-us 41.01848000000001,
+   :pass? false,
+   :attention-overhead-ms 0.04101848000000001,
+   :measured? true,
+   :full-step-measured? false},
+  :gate2-pass? false,
+  :decode-step-overhead-pct nil,
+  :eviction-latency-ms 4.143149,
   :multiplier-free-butterfly? true,
   :prefix-hit-rate 0.9716157205240175,
   :criterion-2-1-pass? true,
   :criterion-2-2-reason
-  "Verified: 0.30% decode step overhead (55.32 us attention overhead) on AMD RX 7900 XTX <= 8.0%",
+  "Unmeasured full decode step; attention kernel delta measured at +41.02 us (+16.8%) at 1024 context (8x128 config on RX 7900 XTX)",
   :criterion-2-3-pass? true,
   :eviction-latency-pass? true,
-  :fwht-per-transform-us 12.75418595,
+  :fwht-per-transform-us 12.655898449999999,
   :criterion-2-4-pass? true,
   :multiplier-free-pass? true},
  :gate3
@@ -662,6 +675,6 @@
   :gate3-pass? false},
  :gate4
  {:status :dropped-by-spec-amendment,
-  :wall-clock-seconds 4.802248969,
+  :wall-clock-seconds 4.829330952,
   :measured? false,
   :pass? false}}

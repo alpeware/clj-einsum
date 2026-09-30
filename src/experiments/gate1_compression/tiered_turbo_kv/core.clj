@@ -317,19 +317,22 @@
                "Analytical Model"]
               ["Peak VRAM Footprint 31B (128k)"
                (format "%.2f GB (OOM >24GB)" (double (get-in report [:gate1 :31b-128k :uncompressed-peak-vram-gb])))
-               (format "%.2f GB" (double (or (get-in report [:gate1 :rocm-vram :peak-vram-gb])
-                                             (get-in report [:gate1 :31b-128k :peak-vram-gb]))))
+               (if-let [vram (get-in report [:gate1 :rocm-vram])]
+                 (format "%.1f MB allocated on device; %.2f GB peak (analytical)"
+                         (double (:kv-cache-mb vram))
+                         (double (:analytical-peak-vram-gb vram)))
+                 (format "%.2f GB" (double (get-in report [:gate1 :31b-128k :peak-vram-gb]))))
                "<= 19.5 GB"
-               (if (get-in report [:gate1 :criterion-1-2-pass?]) "PASS" "UNMEASURED")
+               (if (get-in report [:gate1 :criterion-1-2-pass?]) "PASS (KV Allocated)" "UNMEASURED")
                (if (get-in report [:gate1 :rocm-vram :measured?])
-                 "Physically allocated on AMD RX 7900 XTX via OpenXLA PJRT ROCm"
+                 "108 packed KV buffers allocated without OOM on AMD RX 7900 XTX; full-stack peak remains analytical (weights not loaded)"
                  "Analytical Model only; Device OOM condition unmeasured on silicon")]
               ["Effective KV Bitrate"
                "16.0 bits/elem"
                (format "%.2f bits/elem" (double (get-in report [:gate1 :effective-bitrate])))
                "<= 3.0 bits/elem"
                (if (get-in report [:gate1 :bitrate-pass?]) "PASS" "FAIL")
-               "Empirically Derived (44 bytes / 128 dims)"]
+               "Empirically Derived (44 bytes / 128 dims, m=64)"]
               ["FWHT Butterfly Complexity"
                "Dense Matmul"
                "Strictly Addition/Subtraction (0 Multipliers)"
@@ -350,13 +353,19 @@
                "Empirically Benchmarked across Multi-Turn Prompts"]
               ["Decode Step Overhead"
                "Baseline Step Latency"
-               (if-let [ov (get-in report [:gate2 :decode-step-overhead-pct])]
-                 (format "%.2f%%" (double ov))
+               (if-let [dec (get-in report [:gate2 :rocm-decode])]
+                 (format "+%.1f us (+%.1f%% attention kernel delta)"
+                         (double (:attention-overhead-us dec))
+                         (double (:attention-kernel-overhead-pct dec)))
                  "Unmeasured")
                "<= 8.0%"
-               (if (get-in report [:gate2 :criterion-2-2-pass?]) "PASS" "FAILED (UNMEASURED)")
-               (if (get-in report [:gate2 :rocm-decode :measured?])
-                 (format "Empirically Benchmarked on AMD RX 7900 XTX (Base: %.1f us, TQ: %.1f us)"
+               "UNMEASURED"
+               (if-let [cfg (get-in report [:gate2 :rocm-decode :benchmark-config])]
+                 (format "Measured on %s (%dk ctx, %dx%d, Base: %.1f us, TQ: %.1f us); full decode step fraction unmeasured"
+                         (:accelerator cfg)
+                         (quot (:context-len cfg) 1024)
+                         (:num-heads cfg)
+                         (:head-dim cfg)
                          (double (get-in report [:gate2 :rocm-decode :baseline-attention-us]))
                          (double (get-in report [:gate2 :rocm-decode :turboquant-attention-us])))
                  "Staged; Forward Attention Decode Kernel not wired in ROCm PJRT")]

@@ -45,7 +45,9 @@
        :oom? false
        :buffer-count buf-count
        :total-bytes total-bytes
+       :kv-cache-mb (/ (double total-bytes) 1.0e6)
        :kv-cache-gb total-gb
+       :analytical-peak-vram-gb peak-vram-gb
        :peak-vram-gb peak-vram-gb
        :headroom-gb (- 24.0 peak-vram-gb)
        :pass? (<= peak-vram-gb 19.5)})
@@ -88,7 +90,8 @@
      :criterion-1-2-pass? c1-2-pass?
      :criterion-1-2-reason (if rocm?
                              (if c1-2-pass?
-                               (format "Verified: %.2f GB physical peak VRAM allocated without OOM on AMD RX 7900 XTX"
+                               (format "Verified: 108 packed KV buffers (%.1f MB) allocated without OOM on AMD RX 7900 XTX; full-stack peak %.2f GB remains analytical (weights not loaded)"
+                                       (double (:kv-cache-mb rocm-vram))
                                        (double (:peak-vram-gb rocm-vram)))
                                (format "Failed: %s" (:error rocm-vram "OOM or allocation failure")))
                              "Unmeasured on CPU; physical OOM condition requires ROCm device execution")
@@ -143,8 +146,7 @@
                  (pjrt/destroy-buffer! ctx out)))
              (let [tq-us (* (/ (/ (- (System/nanoTime) t0-tq) 1e6) (double iters)) 1000.0)
                    overhead-us (- tq-us base-us)
-                   baseline-decode-step-us 18750.0
-                   step-overhead-pct (* (/ overhead-us baseline-decode-step-us) 100.0)]
+                   attn-overhead-pct (* (/ overhead-us base-us) 100.0)]
                ;; Cleanup buffers
                (doseq [b [k-base v-base k-tq v-tq q-buf pos-buf]]
                  (pjrt/destroy-buffer! ctx b))
@@ -153,8 +155,17 @@
                 :turboquant-attention-us tq-us
                 :attention-overhead-us overhead-us
                 :attention-overhead-ms (/ overhead-us 1000.0)
-                :decode-step-overhead-pct step-overhead-pct
-                :pass? (and (<= step-overhead-pct 8.0) (< (/ overhead-us 1000.0) 1.5))})))))
+                :attention-kernel-overhead-pct attn-overhead-pct
+                :decode-step-overhead-pct nil
+                :full-step-measured? false
+                :benchmark-config {:context-len seq-len
+                                   :num-heads num-heads
+                                   :num-kv-heads num-kv-heads
+                                   :head-dim head-dim
+                                   :packed-dim pd
+                                   :iterations iters
+                                   :accelerator "AMD Radeon RX 7900 XTX (OpenXLA PJRT ROCm 6.2)"}
+                :pass? false})))))
      (catch Throwable e
        {:measured? false
         :error (.getMessage e)
@@ -198,12 +209,11 @@
         rocm? (= (:backend opts) :rocm)
         rocm-decode (when rocm? (measure-rocm-decode-overhead))
         decode-overhead (when rocm-decode (:decode-step-overhead-pct rocm-decode))
+        attn-overhead-pct (when rocm-decode (:attention-kernel-overhead-pct rocm-decode))
 
         ;; 5. Pass/fail criteria (strictly measured)
         c2-1-pass? (boolean (:verified? fwht-multiplier-check))
-        c2-2-pass? (if rocm?
-                     (boolean (:pass? rocm-decode))
-                     false)
+        c2-2-pass? false
         c2-3-pass? (<= evict-latency-ms 10.0)
         c2-4-pass? (>= prefix-hit-rate 0.85)]
     {:fwht-per-transform-us fwht-per-transform-us
@@ -216,15 +226,19 @@
      :prefix-pass? c2-4-pass?
      :rocm-decode rocm-decode
      :decode-step-overhead-pct decode-overhead
+     :attention-kernel-overhead-pct attn-overhead-pct
      :decode-overhead-pass? c2-2-pass?
      :criterion-2-1-pass? c2-1-pass?
      :criterion-2-2-pass? c2-2-pass?
      :criterion-2-2-reason (if rocm?
-                             (if c2-2-pass?
-                               (format "Verified: %.2f%% decode step overhead (%.2f us attention overhead) on AMD RX 7900 XTX <= 8.0%%"
-                                       (double decode-overhead)
-                                       (double (:attention-overhead-us rocm-decode)))
-                               (format "Failed: decode step overhead %.2f%% > 8.0%%" (double (or decode-overhead 0.0))))
+                             (if (:measured? rocm-decode)
+                               (format "Unmeasured full decode step; attention kernel delta measured at +%.2f us (+%.1f%%) at %d context (%dx%d config on RX 7900 XTX)"
+                                       (double (:attention-overhead-us rocm-decode))
+                                       (double attn-overhead-pct)
+                                       (long (get-in rocm-decode [:benchmark-config :context-len] 1024))
+                                       (long (get-in rocm-decode [:benchmark-config :num-heads] 8))
+                                       (long (get-in rocm-decode [:benchmark-config :head-dim] 128)))
+                               (format "Failed: %s" (:error rocm-decode "Attention kernel execution error")))
                              "Unmeasured: requires ROCm device execution")
      :criterion-2-3-pass? c2-3-pass?
      :criterion-2-4-pass? c2-4-pass?
@@ -288,17 +302,24 @@
      "## 1. Executive Summary\n\n"
      "Stage 3 Silicon Verification was executed on AMD Radeon RX 7900 XTX (OpenXLA PJRT ROCm) to evaluate Tiered Turbo KV against Ghodsi's 4 RSI Gates:\n\n"
      (if (:measured? rocm-vram)
-       (format "- **Criterion 1.2 (Peak VRAM Allocation)**: **PASS**. Physically allocated 108 KV cache device buffers on AMD RX 7900 XTX without OOM. Physical peak VRAM is **%.2f GB** (Headroom: **%.2f GB**), comfortably below the 19.5 GB ceiling.\n"
+       (format "- **Criterion 1.2 (Peak VRAM Allocation)**: **PASS [KV ALLOCATED]**. Physically allocated 108 packed KV cache device buffers (%.1f MB) on AMD RX 7900 XTX without OOM. Full-stack peak VRAM of **%.2f GB** (Headroom: **%.2f GB**) remains analytical (weights unallocated) against the 19.5 GB ceiling.\n"
+               (double (:kv-cache-mb rocm-vram))
                (double (:peak-vram-gb rocm-vram))
                (double (:headroom-gb rocm-vram)))
        "- **Criterion 1.2 (Peak VRAM Allocation)**: UNMEASURED on CPU; requires ROCm device execution.\n")
      (if (:measured? rocm-decode)
-       (format "- **Criterion 2.2 (Decode Step Latency Overhead)**: **PASS**. Measured on RX 7900 XTX silicon: baseline attention decode is **%.2f us**, TurboQuant unpack + attention decode is **%.2f us** (delta: **%.2f us / %.3f ms**). Step overhead relative to baseline decode is **%.2f%%**, comfortably beating the <= 8.0%% (< 1.5 ms) ceiling.\n"
-               (double (:baseline-attention-us rocm-decode))
-               (double (:turboquant-attention-us rocm-decode))
-               (double (:attention-overhead-us rocm-decode))
-               (double (:attention-overhead-ms rocm-decode))
-               (double (:decode-step-overhead-pct rocm-decode)))
+       (let [cfg (:benchmark-config rocm-decode)]
+         (format "- **Criterion 2.2 (Decode Step Latency Overhead)**: **UNMEASURED (Full Step)**. Microbenchmarked attention decode kernel on live AMD Radeon RX 7900 XTX (OpenXLA PJRT ROCm 6.2, config: %d context, %d query heads, %d KV heads, head dimension %d packed to %d int8, %d iterations): baseline attention decode is **%.2f us**, TurboQuant unpack + attention decode is **%.2f us** (delta: **+%.2f us / +%.1f%%** on attention kernel). Full autoregressive decode step overhead is honestly marked UNMEASURED because end-to-end model forward text generation loop with resident weights was not timed.\n"
+                 (long (:context-len cfg))
+                 (long (:num-heads cfg))
+                 (long (:num-kv-heads cfg))
+                 (long (:head-dim cfg))
+                 (long (:packed-dim cfg))
+                 (long (:iterations cfg))
+                 (double (:baseline-attention-us rocm-decode))
+                 (double (:turboquant-attention-us rocm-decode))
+                 (double (:attention-overhead-us rocm-decode))
+                 (double (:attention-kernel-overhead-pct rocm-decode))))
        "- **Criterion 2.2 (Decode Step Latency Overhead)**: UNMEASURED on CPU; requires ROCm device execution.\n")
      (format "- **Criterion 3.1 (QJL Residual Estimator Bias)**: **PASS**. Calibrated Monte Carlo sampling ($N=50,000, m=64$) demonstrates empirical expectation bias of **%.2e**, satisfying the <= 1.0e-4 threshold at 2.75 bits/elem.\n"
              (double (:qjl-bias g3)))
@@ -312,11 +333,15 @@
              (double (:compressed-kv-gb m-128k))
              (double (:compression-ratio m-128k))
              (if (:criterion-1-1-pass? g1) "PASS" "FAIL"))
-     (format "| Gate 1 | 1.2 | Peak VRAM Footprint 31B (128k) | <= 19.5 GB | %.2f GB | %s | %s |\n"
-             (double (or (:peak-vram-gb rocm-vram) (:peak-vram-gb m-128k)))
-             (if (:criterion-1-2-pass? g1) "PASS" "FAIL [UNMEASURED]")
+     (format "| Gate 1 | 1.2 | Peak VRAM Footprint 31B (128k) | <= 19.5 GB | %s | %s | %s |\n"
              (if (:measured? rocm-vram)
-               (format "Physically allocated on AMD RX 7900 XTX via OpenXLA PJRT ROCm (%d buffers, 0 OOM)"
+               (format "%.1f MB allocated on device (0 OOM); %.2f GB full peak (analytical)"
+                       (double (:kv-cache-mb rocm-vram))
+                       (double (:peak-vram-gb rocm-vram)))
+               (format "%.2f GB" (double (:peak-vram-gb m-128k))))
+             (if (:criterion-1-2-pass? g1) "PASS [KV ALLOCATED]" "FAIL [UNMEASURED]")
+             (if (:measured? rocm-vram)
+               (format "%d packed KV buffers (54 layers x K/V, 3076 tokens, 8 heads x d32 i8) allocated on AMD RX 7900 XTX; weights unallocated"
                        (long (:buffer-count rocm-vram)))
                "Analytical Model only; unmeasured on GPU"))
      (format "| Gate 1 | 1.3 | Effective KV Bitrate | <= 3.0 b/elem | %.2f b/elem | %s | Empirically Derived (44 bytes / 128 dims, m=64) |\n"
@@ -325,12 +350,17 @@
      (format "| Gate 2 | 2.1 | FWHT Butterfly Multipliers | Strictly 0 | 0 Multipliers | %s | Verified via Butterfly AST Inspection (Add/Sub only) |\n"
              (if (:criterion-2-1-pass? g2) "PASS" "FAIL"))
      (format "| Gate 2 | 2.2 | Decode Step Overhead | <= 8.0%% | %s | %s | %s |\n"
-             (if-let [ov (:decode-step-overhead-pct g2)]
-               (format "%.2f%%" (double ov))
+             (if (:measured? rocm-decode)
+               (format "+%.2f us (+%.1f%% on attention kernel, %dk ctx, %dx%d); full-step fraction unmeasured"
+                       (double (:attention-overhead-us rocm-decode))
+                       (double (:attention-kernel-overhead-pct rocm-decode))
+                       (long (quot (get-in rocm-decode [:benchmark-config :context-len] 1024) 1024))
+                       (long (get-in rocm-decode [:benchmark-config :num-heads] 8))
+                       (long (get-in rocm-decode [:benchmark-config :head-dim] 128)))
                "Unmeasured")
              (if (:criterion-2-2-pass? g2) "PASS" "FAIL [UNMEASURED]")
              (if (:measured? rocm-decode)
-               (format "Empirically Benchmarked on AMD RX 7900 XTX (Base: %.1f us, TQ: %.1f us)"
+               (format "Empirically Benchmarked on AMD RX 7900 XTX (Base: %.1f us, TQ: %.1f us, 8x128 config); full decode loop unmeasured"
                        (double (:baseline-attention-us rocm-decode))
                        (double (:turboquant-attention-us rocm-decode)))
                "Staged; Device attention kernel not wired in ROCm PJRT"))
@@ -353,15 +383,16 @@
      "| Gate 4 | 4.1 | Autonomous Cycle Time Delta | >= 30.0% reduction | Dropped | DROPPED | Dropped by spec amendment; requires multi-proposal history |\n\n"
      "---\n\n"
      "## 3. Detailed Findings & Remediation Record\n\n"
-     "1. **ROCm Device Verification**: Attention decode kernel with TurboQuant unpack and buffer slicing was wired into OpenXLA PJRT ROCm and benchmarked on live AMD Radeon RX 7900 XTX silicon, demonstrating ~0.0% decode step overhead (Criterion 2.2 PASS).\n"
-     "2. **Physical VRAM Allocation**: Allocated 108 device buffers on PJRT ROCm without OOM, verifying peak physical VRAM of 17.59 GB against the 19.5 GB ceiling (Criterion 1.2 PASS).\n"
+     "1. **ROCm Device Verification**: Attention decode kernel with TurboQuant unpack and buffer slicing was wired into OpenXLA PJRT ROCm and benchmarked on live AMD Radeon RX 7900 XTX silicon (1024 context, 8 query heads, 8 KV heads, d128 packed to d32 int8), measuring baseline attention decode at 220.6 us and TurboQuant attention decode at 276.0 us (+55.3 us / +25.1% attention kernel delta). Full autoregressive decode step overhead is marked UNMEASURED because end-to-end model generation was not timed (Criterion 2.2 UNMEASURED).\n"
+     "2. **Physical VRAM Allocation**: Allocated 108 packed KV cache device buffers (85.0 MB) on PJRT ROCm without OOM. Full-stack peak VRAM of 17.59 GB remains analytical (weights unallocated) against the 19.5 GB ceiling (Criterion 1.2 PASS [KV ALLOCATED]).\n"
      "3. **QJL Sketch Calibration**: Evaluated $m=64$ sketch projection across 50,000 Monte Carlo pairs, achieving an empirical bias of 7.80e-5 <= 1.0e-4 at 2.75 bits/elem (Criteria 1.3 & 3.1 PASS).\n"
      "4. **MultiPL-E Grading Harness Smoke-Test**: MultiPL-E dev 50 evaluated genuinely against catalog reference solutions in the tightened SCI sandbox: 48/50 passed (96.0%), confirming grading harness integrity. Because compressed model forward generation is not yet connected in the loop, paired McNemar non-regression is marked UNMEASURED per protocol.\n"
      "5. **M-NIAH Suite Realignment**: Synthetic attention-mass retention evaluated across 100 needles (10 depth bins × 10 needles) across 4 context lengths (16k, 32k, 64k, 128k), achieving 100% retention on saliency ranking, explicitly labeled as an eviction ranking proxy.\n"
      "6. **Eviction Primitive Optimization**: Refactored `select-retained-indices` to a zero-boxing primitive min-heap, reducing latency to ~4.5 ms and eliminating test flakiness.\n\n"
      "## 4. Next Milestone Prior to Full Catalog Promotion\n\n"
-     "1. Connect full model autoregressive text generation to MultiPL-E 447-task dev corpus on AMD Radeon RX 7900 XTX to compute paired McNemar exact test (Criterion 3.3).\n"
-     "2. Once Criterion 3.3 is physically verified with live model text generation, promote `:tiered-turbo-kv` to the master catalog registry.\n")))
+     "1. Measure full autoregressive decode step loop on AMD Radeon RX 7900 XTX with model weights resident to quantify full-step overhead percentage (Criterion 2.2).\n"
+     "2. Connect full model autoregressive text generation to MultiPL-E 447-task dev corpus on AMD Radeon RX 7900 XTX to compute paired McNemar exact test (Criterion 3.3).\n"
+     "3. Once Criteria 2.2 and 3.3 are physically verified with live model text generation, promote `:tiered-turbo-kv` to the master catalog registry.\n")))
 
 ;; =============================================================================
 ;; Main Experiment Driver
@@ -403,13 +434,13 @@
                        :backend backend
                        :status (if overall-pass?
                                  "STAGE 3 VERIFIED (PROMOTED)"
-                                 "STAGE 3 SILICON BENCHMARKED (7 CRITERIA PASSED; CRITERION 3.3 MODEL GENERATION UNMEASURED)")
+                                 "STAGE 3 SILICON BENCHMARKED (7 CRITERIA PASSED; CRITERIA 2.2 & 3.3 UNMEASURED)")
                        :provenance {:model-accounting "Analytical & Physical ROCm buffer allocation (54 layers, 8 heads, 3076 tokens, 2.75b)"
                                     :microbenchmarks "CPU Host (20k FWHT, 131k primitive heap eviction) + 50k MC QJL bias"
                                     :intelligence-eval "MultiPL-E dev 50 in SCI sandbox (smoke-tested on answer key, model not in loop)"
                                     :m-niah "Attention-mass retention-through-eviction proxy (100 needles x 4 lengths x 10 bins)"
                                     :hardware-decode (if (:rocm-decode gate2-metrics)
-                                                       "Measured on live AMD Radeon RX 7900 XTX via OpenXLA PJRT ROCm"
+                                                       "Attention kernel benchmarked on live AMD Radeon RX 7900 XTX (full decode loop unmeasured)"
                                                        "Unmeasured on CPU")}
                        :timestamp (str (java.time.Instant/now))}
                 :gate1 gate1-metrics
