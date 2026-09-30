@@ -21,10 +21,10 @@
   {:model ".models/gemma-4-e4b-it-qat-int4"
    :teacher-model "gemma-4-31b-it-qat-int4"
    :backend :rocm
-   :trajectories-file "resources/proposals/gate3_evals/perplexity_probe_v1/teacher_trajectories.edn"
+   :trajectories-file "resources/catalog/gate3_evals/perplexity_probe_v1/teacher_trajectories.edn"
    :tasks-file "resources/catalog/gate3_evals/clojure_bench/tasks_public.edn"
-   :results-file "resources/proposals/gate3_evals/perplexity_probe_v1/results.edn"
-   :summary-csv "resources/proposals/gate3_evals/perplexity_probe_v1/summary.csv"
+   :results-file "resources/catalog/gate3_evals/perplexity_probe_v1/results.edn"
+   :summary-csv "resources/catalog/gate3_evals/perplexity_probe_v1/summary.csv"
    :max-seq-len 3072
    :dry-run false
    :quiet false})

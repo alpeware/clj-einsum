@@ -3,6 +3,9 @@
 **Experiment**: `perplexity_probe_v1`
 **Gate**: `gate3_evals`
 **Generation**: `0`
+**Type**: `experiment`
+**Status**: `decided: no-go`
+**Verdict**: `NO-GO`
 **Literature**: `[]`
 **Hardware-Target**: `{:reference "AMD Radeon RX 7900 XTX (24GB)" :claim-shape "inference-only; no training"}`
 **Extends**: `"prompt_tuning_v1"`

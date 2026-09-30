@@ -20,7 +20,6 @@ program).
 | Item | Track | Status | Owner | Blocked by / Unlocks | Notes |
 |---|---|---|---|---|---|
 | LoRA pure-stack trainer | capability | proposed | — | Unlocks distillation SFT | Large ticket. Pure Clojure/XLA stack, no PyTorch (program constraint) |
-| Student perplexity on teacher trajectories | measurement | proposed | — | Student = E4B-QAT-INT4 (3/10); teacher = 31B-QAT-INT4 (7/10); gap is 4 tasks | Inference-only distillation de-risk; runs before the trainer exists |
 | Program-signature versioning | capability | proposed | — | Superseded in part by :harness-sha (freeze) | Extend prompt-sha: hash(prompt, tool defs, turn structure, decoding params, harness version) on every ledger row |
 | Grading-sandbox hardening (slurp/spit) | capability | proposed | — | — | From adversarial review; load-bearing before the loop becomes training infra |
 | Paren-repair as agent-facing tool | experiment | proposed | — | — | Prompt-tuning sub-avenue; explicit tool, never silent harness fixup |
@@ -30,6 +29,7 @@ program).
 
 | Item | Track | Verdict |
 |---|---|---|
+| Perplexity probe v1 (student surprise on teacher trajectories) | experiment | cataloged 2026-09-30 — **NO-GO**: Gap micro-PPL 1.8264 ($N=6,451$), ref micro-PPL 2.0225 ($N=1,839$), ratio $0.9030 < 1.50$ pre-registered threshold; 0/4 candidate tasks ($r_k \in [0.65, 1.01] < 1.30$); teacher trajectories are in-distribution for student (code PPL 1.28–1.56); SFT on these trajectories ruled out; zero-shot prompt retained |
 | Prompt tuning v1 (worked agentic trajectories) | experiment | cataloged 2026-09-30 — **REJECT**: Phase 2 pilot ($N=50$) $P_0=23/50$ (46.0%), $P_1=23/50$ (46.0%, $\Delta+0$), $P_2=19/50$ (38.0%, $\Delta-4$); 0 canary leaks; early-stop triggered ($\max(\Delta_1, \Delta_2) < 2$); worked self-corrections inflated latency $+37\text{--}39\%$ without net accuracy gain; zero-shot prompt retained; proceed directly to LoRA SFT |
 | MultiPL-E humaneval-clj/mbpp-clj port | capability | done — 558 tasks ingested (161 HE + 397 MBPP); 447 dev / 111 sealed partition; 543/558 (97.31%) verified in pure SCI; 15 quarantined with technical adjudications |
 | Eval harness v2 (KV cache, library port, --tool-syntax) | capability | done — 21.3% pre-conformance wall-time reduction on 31B (isolated KV reuse); AC2 verified (no adverse flips vs v1); library in einsum.agent.core; --tool-syntax :fenced lifts E4B agentic from 20% native (30% union) to 50% & unlocks my-comp on 31B (70% agentic suite) |

@@ -96,4 +96,20 @@
                       :spec-path "resources/catalog/gate3_evals/prompt_tuning_v1/spec.md"
                       :results-path "resources/catalog/gate3_evals/prompt_tuning_v1/pilot_results.edn"
                       :summary-path "resources/catalog/gate3_evals/prompt_tuning_v1/summary.csv"
-                      :verified-by nil}}}
+                      :verified-by nil}
+   :perplexity-probe-v1 {:gate :gate3-evals
+                         :slug "perplexity_probe_v1"
+                         :title "Perplexity Probe v1 (Student Surprise on Teacher Trajectories)"
+                         :track :experiment
+                         :status :active
+                         :verdict :no-go
+                         :frozen "2026-09-30"
+                         :generation 0
+                         :target-hardware "AMD Radeon RX 7900 XTX (24GB)"
+                         :spec-path "resources/catalog/gate3_evals/perplexity_probe_v1/spec.md"
+                         :report-path "resources/catalog/gate3_evals/perplexity_probe_v1/report.md"
+                         :results-path "resources/catalog/gate3_evals/perplexity_probe_v1/results.edn"
+                         :summary-path "resources/catalog/gate3_evals/perplexity_probe_v1/summary.csv"
+                         :trajectories-path "resources/catalog/gate3_evals/perplexity_probe_v1/teacher_trajectories.edn"
+                         :teacher-summary-path "resources/catalog/gate3_evals/perplexity_probe_v1/teacher_summary.csv"
+                         :verified-by nil}}}
