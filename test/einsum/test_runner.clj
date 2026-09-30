@@ -62,6 +62,7 @@
             [einsum.quant.catq-test]
             [einsum.quant.ternary-pjrt-test]
             [einsum.quant.ternary-test]
+            [einsum.quant.turboquant-test]
             [einsum.quant.w4a16-custom-call-test]
             [einsum.quantize-test]
             [einsum.runtime.benchmark.core-test]
@@ -121,6 +122,7 @@
    'einsum.quantize-test
    'einsum.quant.catq-test
    'einsum.quant.ternary-test
+   'einsum.quant.turboquant-test
    'einsum.models.gemma4-test
    'einsum.core-test
    'experiments.gate3-evals.clojure-bench-test

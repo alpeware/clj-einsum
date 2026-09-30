@@ -210,13 +210,17 @@
 
 (defn allocate-kv-cache-buffers
   "Allocates initial zero-filled device VRAM buffers for KV cache of unshared layers.
-   Optionally registers the buffers in `arena` (or `session-arena`)."
+   Optionally registers the buffers in `arena` (or `session-arena`).
+   Supports :kv-quant (:bf16 or :turboquant / :turbo-kv)."
   ([session max-seq-len]
    (allocate-kv-cache-buffers session max-seq-len (or (:session-arena session) arena/*active-arena*)))
   ([{:keys [ctx config]} max-seq-len target-arena]
    (let [num-layers (long (or (:num-layers config) 35))
          num-kv-shared (long (or (:num-kv-shared-layers config) 0))
          num-unshared (- num-layers num-kv-shared)
+         turboquant? (boolean (or (:turboquant-kv? config)
+                                  (= (:kv-quant config) :turboquant)
+                                  (= (:kv-quant config) :turbo-kv)))
          norm-enum (or (:norm-enum config) 13)
          layer-configs (:layer-configs config)
          layer-types (:layer-types config)]
@@ -227,9 +231,14 @@
                           seq-l (if win (min max-seq-len win) max-seq-len)
                           n-kv (long (or (:num-kv-heads c) 1))
                           h-dim (long (or (:head-dim c) (if is-global? 512 256)))
-                          zeros (float-array (* seq-l n-kv h-dim))
-                          k-buf (pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)
-                          v-buf (pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)]
+                          [k-buf v-buf] (if turboquant?
+                                          (let [packed-dim (quot h-dim 4)
+                                                zeros (byte-array (* seq-l n-kv packed-dim))]
+                                            [(pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)
+                                             (pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)])
+                                          (let [zeros (float-array (* seq-l n-kv h-dim))]
+                                            [(pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)
+                                             (pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)]))]
                       (when target-arena
                         (xla/track! target-arena k-buf)
                         (xla/track! target-arena v-buf))

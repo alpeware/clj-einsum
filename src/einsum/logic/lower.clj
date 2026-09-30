@@ -1576,6 +1576,138 @@
                              :always (conj mul-eqn))))]
         (swap! eqns-atom into (concat common-eqns extra-eqns))))))
 
+(defn- lower-turboquant-unpack!
+  "Lowers Fast-TurboQuant 2-bit Lloyd-Max packed keys/values into unpacked, unscaled coordinates,
+   applies in-accelerator multiplier-free FWHT, and applies optional Rademacher sign inversion and scale.
+   Eliminates all O(d^2) dense matrix operations."
+  [eqns-atom counter _head codes-term scale-term signs-term attrs final-out-var known-shapes default-dtype]
+  (let [codes-name (first codes-term)
+        scale-name (when scale-term (first scale-term))
+        signs-name (when signs-term (first signs-term))
+        shape (get known-shapes codes-name)
+        rank (count shape)
+        last-dim (last shape)
+        d (* (long last-dim) 4)
+        leading-dims (subvec (vec shape) 0 (dec rank))
+        out-shape (conj leading-dims d)
+        slice-shape (conj leading-dims last-dim 1)
+        norm-dtype (or default-dtype :bf16)
+
+        c-03 (gen-id "c_tq_03" counter)
+        c-2  (gen-id "c_tq_2" counter)
+        c-4  (gen-id "c_tq_4" counter)
+        c-6  (gen-id "c_tq_6" counter)
+
+        c-03-eqn {:op :stablehlo/constant :value (int 3) :type [:tensor [] :i8] :outvars [c-03]}
+        c-2-eqn  {:op :stablehlo/constant :value (int 2) :type [:tensor [] :i8] :outvars [c-2]}
+        c-4-eqn  {:op :stablehlo/constant :value (int 4) :type [:tensor [] :i8] :outvars [c-4]}
+        c-6-eqn  {:op :stablehlo/constant :value (int 6) :type [:tensor [] :i8] :outvars [c-6]}
+
+        cb-table (gen-id "c_tq_cb" counter)
+        cb-table-eqn {:op :stablehlo/constant :value (float-array [-1.5104 -0.4528 0.4528 1.5104])
+                      :type [:tensor [4] norm-dtype] :outvars [cb-table]}
+
+        ;; Slice 0: (codes & 0x03)
+        s0-code (gen-id "t_tq_s0_code" counter)
+        s0-eqn {:op :stablehlo/and :invars [codes-name c-03] :outvars [s0-code]}
+        s0-i32 (gen-id "t_tq_s0_i32" counter)
+        s0-i32-eqn {:op :stablehlo/convert :invars [s0-code] :outvars [s0-i32] :attrs {:target-dtype :i32}}
+        s0-3d (gen-id "t_tq_s0_3d" counter)
+        s0-3d-eqn {:op :stablehlo/reshape :invars [s0-i32] :outvars [s0-3d] :attrs {:shape slice-shape}}
+        s0-val (gen-id "t_tq_s0_val" counter)
+        s0-gather-eqn {:op :stablehlo/gather :invars [cb-table s0-3d] :outvars [s0-val]
+                       :attrs {:offset_dims [] :collapsed_slice_dims [0] :start_index_map [0]
+                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]}}
+
+        ;; Slice 1: ((codes >> 2) & 0x03)
+        s1-sh (gen-id "t_tq_s1_sh" counter)
+        s1-sh-eqn {:op :stablehlo/shift_right_logical :invars [codes-name c-2] :outvars [s1-sh]}
+        s1-code (gen-id "t_tq_s1_code" counter)
+        s1-eqn {:op :stablehlo/and :invars [s1-sh c-03] :outvars [s1-code]}
+        s1-i32 (gen-id "t_tq_s1_i32" counter)
+        s1-i32-eqn {:op :stablehlo/convert :invars [s1-code] :outvars [s1-i32] :attrs {:target-dtype :i32}}
+        s1-3d (gen-id "t_tq_s1_3d" counter)
+        s1-3d-eqn {:op :stablehlo/reshape :invars [s1-i32] :outvars [s1-3d] :attrs {:shape slice-shape}}
+        s1-val (gen-id "t_tq_s1_val" counter)
+        s1-gather-eqn {:op :stablehlo/gather :invars [cb-table s1-3d] :outvars [s1-val]
+                       :attrs {:offset_dims [] :collapsed_slice_dims [0] :start_index_map [0]
+                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]}}
+
+        ;; Slice 2: ((codes >> 4) & 0x03)
+        s2-sh (gen-id "t_tq_s2_sh" counter)
+        s2-sh-eqn {:op :stablehlo/shift_right_logical :invars [codes-name c-4] :outvars [s2-sh]}
+        s2-code (gen-id "t_tq_s2_code" counter)
+        s2-eqn {:op :stablehlo/and :invars [s2-sh c-03] :outvars [s2-code]}
+        s2-i32 (gen-id "t_tq_s2_i32" counter)
+        s2-i32-eqn {:op :stablehlo/convert :invars [s2-code] :outvars [s2-i32] :attrs {:target-dtype :i32}}
+        s2-3d (gen-id "t_tq_s2_3d" counter)
+        s2-3d-eqn {:op :stablehlo/reshape :invars [s2-i32] :outvars [s2-3d] :attrs {:shape slice-shape}}
+        s2-val (gen-id "t_tq_s2_val" counter)
+        s2-gather-eqn {:op :stablehlo/gather :invars [cb-table s2-3d] :outvars [s2-val]
+                       :attrs {:offset_dims [] :collapsed_slice_dims [0] :start_index_map [0]
+                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]}}
+
+        ;; Slice 3: ((codes >> 6) & 0x03)
+        s3-sh (gen-id "t_tq_s3_sh" counter)
+        s3-sh-eqn {:op :stablehlo/shift_right_logical :invars [codes-name c-6] :outvars [s3-sh]}
+        s3-code (gen-id "t_tq_s3_code" counter)
+        s3-eqn {:op :stablehlo/and :invars [s3-sh c-03] :outvars [s3-code]}
+        s3-i32 (gen-id "t_tq_s3_i32" counter)
+        s3-i32-eqn {:op :stablehlo/convert :invars [s3-code] :outvars [s3-i32] :attrs {:target-dtype :i32}}
+        s3-3d (gen-id "t_tq_s3_3d" counter)
+        s3-3d-eqn {:op :stablehlo/reshape :invars [s3-i32] :outvars [s3-3d] :attrs {:shape slice-shape}}
+        s3-val (gen-id "t_tq_s3_val" counter)
+        s3-gather-eqn {:op :stablehlo/gather :invars [cb-table s3-3d] :outvars [s3-val]
+                       :attrs {:offset_dims [] :collapsed_slice_dims [0] :start_index_map [0]
+                               :index_vector_dim (dec (count slice-shape)) :slice_sizes [1]}}
+
+        concat-dim (dec (count slice-shape))
+        cat-var (gen-id "t_tq_cat" counter)
+        cat-eqn {:op :stablehlo/concatenate :invars [s0-val s1-val s2-val s3-val] :outvars [cat-var]
+                 :attrs {:dimension concat-dim}}
+        reshaped-z (gen-id "t_tq_z_hat" counter)
+        reshaped-eqn {:op :stablehlo/reshape :invars [cat-var] :outvars [reshaped-z] :attrs {:shape out-shape}}
+
+        unpack-eqns [c-03-eqn c-2-eqn c-4-eqn c-6-eqn cb-table-eqn
+                     s0-eqn s0-i32-eqn s0-3d-eqn s0-gather-eqn
+                     s1-sh-eqn s1-eqn s1-i32-eqn s1-3d-eqn s1-gather-eqn
+                     s2-sh-eqn s2-eqn s2-i32-eqn s2-3d-eqn s2-gather-eqn
+                     s3-sh-eqn s3-eqn s3-i32-eqn s3-3d-eqn s3-gather-eqn
+                     cat-eqn reshaped-eqn]
+        _ (swap! eqns-atom into unpack-eqns)
+
+        ;; FWHT Stage (in-accelerator butterfly reduction)
+        fwht-out (gen-id "t_tq_fwht_out" counter)
+        _ (lower-fwht! eqns-atom counter nil [reshaped-z] (assoc attrs :normalized? false) fwht-out (assoc known-shapes reshaped-z out-shape))
+
+        ;; Rademacher sign inversion & scaling: D * FWHT(z_hat) / sqrt(d) * sigma
+        inv-sqrt-scale (/ 1.0 (Math/sqrt (double d)))
+        signs-var (if signs-name
+                    (let [bcast-dims [(dec (count out-shape))]
+                          s-bcast (gen-id "t_tq_signs_bcast" counter)
+                          s-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [signs-name] :outvars [s-bcast]
+                                       :attrs {:broadcast_dimensions bcast-dims :target_shape out-shape}}
+                          mul-s (gen-id "t_tq_had_signs" counter)
+                          mul-s-eqn {:op :stablehlo/multiply :invars [fwht-out s-bcast] :outvars [mul-s]}]
+                      (swap! eqns-atom conj s-bcast-eqn mul-s-eqn)
+                      mul-s)
+                    fwht-out)
+        scaled-var (if scale-name
+                     (let [scale-shape (get known-shapes scale-name)
+                           bcast-dims (vec (range (count scale-shape)))
+                           sc-bcast (gen-id "t_tq_scale_bcast" counter)
+                           sc-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [scale-name] :outvars [sc-bcast]
+                                         :attrs {:broadcast_dimensions bcast-dims :target_shape out-shape}}
+                           mul-sc (gen-id "t_tq_scaled" counter)
+                           mul-sc-eqn {:op :stablehlo/multiply :invars [signs-var sc-bcast] :outvars [mul-sc]}]
+                       (swap! eqns-atom conj sc-bcast-eqn mul-sc-eqn)
+                       mul-sc)
+                     signs-var)
+        c-norm-scale (gen-id "c_tq_norm_scale" counter)
+        c-norm-eqn {:op :stablehlo/constant :value (float inv-sqrt-scale) :type [:tensor [] norm-dtype] :outvars [c-norm-scale]}
+        final-mul-eqn {:op :stablehlo/multiply :invars [scaled-var c-norm-scale] :outvars [final-out-var]}]
+    (swap! eqns-atom conj c-norm-eqn final-mul-eqn)))
+
 (defn ast->graph
   "Compiles a Tensor Logic Hiccup AST into a validated EDN SSA graph for OpenXLA compilation.
    Pipeline: expand -> prune (DCE) -> unify shapes -> lower to dot_general & StableHLO ops.
@@ -1708,6 +1840,10 @@
            (or (= op :ternary-unpack)
                (= op :ternary-dequant))
            (lower-ternary-unpack! eqns-atom counter head (first body) (second body) attrs final-var known-shapes default-dtype)
+
+           (or (= op :turboquant-unpack)
+               (= op :turboquant-dequant))
+           (lower-turboquant-unpack! eqns-atom counter head (first body) (second body) (nth body 2 nil) attrs final-var known-shapes default-dtype)
 
            (= op :while)
            (let [out-spec (second eqn)
