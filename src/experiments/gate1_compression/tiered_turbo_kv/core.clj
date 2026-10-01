@@ -321,7 +321,7 @@
           :harness-smoke-test-pass? (>= pass-rate 0.95)
           :model-evaluated? true
           :measured? true
-          :status :pass
+          :status (if (:non-regression-pass? mcnemar-res) :pass :fail)
           :base-passed (count (filter :pass? base-results))
           :tq-passed (count (filter :pass? tq-results))
           :favorable-b (:favorable-b mcnemar-res)
@@ -329,10 +329,15 @@
           :p-value (:p-value (:mcnemar mcnemar-res))
           :mcnemar (:mcnemar mcnemar-res)
           :pass? (:non-regression-pass? mcnemar-res)
-          :reason (format "Paired McNemar exact test: b=%d, c=%d, p=%.4f (non-regression invariant maintained)"
-                          (long (:favorable-b mcnemar-res))
-                          (long (:unfavorable-c mcnemar-res))
-                          (double (:p-value (:mcnemar mcnemar-res))))})
+          :reason (if (:non-regression-pass? mcnemar-res)
+                    (format "Paired McNemar exact test: b=%d, c=%d, p=%.4f (non-regression invariant maintained)"
+                            (long (:favorable-b mcnemar-res))
+                            (long (:unfavorable-c mcnemar-res))
+                            (double (:p-value (:mcnemar mcnemar-res))))
+                    (format "Paired McNemar exact test: b=%d, c=%d, p=%.4f (statistically significant degradation below p=0.05 floor)"
+                            (long (:favorable-b mcnemar-res))
+                            (long (:unfavorable-c mcnemar-res))
+                            (double (:p-value (:mcnemar mcnemar-res)))))})
        {:total-tasks n
         :passed-tasks passed
         :pass-rate pass-rate
@@ -413,7 +418,9 @@
                            (double (:attention-kernel-overhead-pct dec))))
                  "Unmeasured")
                "<= 8.0%"
-               (if (get-in report [:gate2 :criterion-2-2-pass?]) "PASS" "UNMEASURED")
+               (if (get-in report [:gate2 :criterion-2-2-pass?])
+                 "PASS"
+                 (if (get-in report [:gate2 :rocm-decode :measured?]) "FAIL" "UNMEASURED"))
                (if-let [dec (get-in report [:gate2 :rocm-decode])]
                  (if (:full-step-measured? dec)
                    (format "Empirically Benchmarked on AMD RX 7900 XTX (50 tokens, resident INT4 weights); attn delta: +%.1f us"
@@ -453,7 +460,12 @@
                            (long (:total-tasks mp)))
                    "Unmeasured (Model not in loop)"))
                "Non-regression (p >= 0.05)"
-               (if (get-in report [:gate3 :criterion-3-3-pass?]) "PASS" "UNMEASURED")
+               (if (get-in report [:gate3 :criterion-3-3-pass?])
+                 "PASS"
+                 (if (and (get-in report [:gate3 :multipl-e :measured?])
+                          (get-in report [:gate3 :multipl-e :model-evaluated?]))
+                   "FAIL"
+                   "UNMEASURED"))
                (let [mp (get-in report [:gate3 :multipl-e])]
                  (if (and (:measured? mp) (:model-evaluated? mp))
                    "Paired McNemar exact test on live model outputs on AMD RX 7900 XTX"

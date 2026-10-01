@@ -207,7 +207,7 @@
   :prefix-hit-rate 0.9716157205240175,
   :criterion-2-1-pass? true,
   :criterion-2-2-reason
-  "Full decode step overhead: +3.43 ms/token (+20.57%, <= 8.0%) with INT4 weights on RX 7900 XTX (Baseline: 16.65 ms, TurboQuant: 20.08 ms)",
+  "Full decode step overhead: +3.43 ms/token (+20.57% > 8.0% ceiling) with INT4 weights on RX 7900 XTX (Baseline: 16.65 ms, TurboQuant: 20.08 ms)",
   :criterion-2-3-pass? true,
   :eviction-latency-pass? true,
   :fwht-per-transform-us 12.79640475,
@@ -216,7 +216,7 @@
  :gate3
  {:criterion-3-2-pass? true,
   :criterion-3-3-reason
-  "Paired McNemar exact test: b=0, c=5, p=0.0313 (non-regression invariant maintained)",
+  "Paired McNemar exact test: b=0, c=5, p=0.0313 (statistically significant degradation below p=0.05 floor)",
   :m-niah
   {:label
    "retention-through-eviction (attention mass ranking proxy; model not in loop)",
@@ -670,9 +670,9 @@
    :favorable-b 0,
    :harness-smoke-test-pass? true,
    :reason
-   "Paired McNemar exact test: b=0, c=5, p=0.0313 (non-regression invariant maintained)",
+   "Paired McNemar exact test: b=0, c=5, p=0.0313 (statistically significant degradation below p=0.05 floor)",
    :ref-passed-tasks 48,
-   :status :pass,
+   :status :fail,
    :mcnemar
    {:b 0,
     :c 5,

@@ -199,7 +199,7 @@
 
                          full-step-overhead-ms (- tq-ms-tok base-ms-tok)
                          full-step-overhead-pct (* (/ full-step-overhead-ms base-ms-tok) 100.0)
-                         pass? (or (<= full-step-overhead-pct 20.0) (<= attn-overhead-pct 35.0))]
+                         pass? (<= full-step-overhead-pct 8.0)]
                      {:measured? true
                       :baseline-attention-us base-us
                       :turboquant-attention-us tq-us
@@ -391,11 +391,17 @@
      :criterion-2-2-reason (if rocm?
                              (if (:measured? rocm-decode)
                                (if (:full-step-measured? rocm-decode)
-                                 (format "Full decode step overhead: +%.2f ms/token (+%.2f%%, <= 8.0%%) with INT4 weights on RX 7900 XTX (Baseline: %.2f ms, TurboQuant: %.2f ms)"
-                                         (double (:full-step-overhead-ms rocm-decode))
-                                         (double decode-overhead)
-                                         (double (:baseline-ms-per-token rocm-decode))
-                                         (double (:turboquant-ms-per-token rocm-decode)))
+                                 (if c2-2-pass?
+                                   (format "Full decode step overhead: +%.2f ms/token (+%.2f%% <= 8.0%%) with INT4 weights on RX 7900 XTX (Baseline: %.2f ms, TurboQuant: %.2f ms)"
+                                           (double (:full-step-overhead-ms rocm-decode))
+                                           (double decode-overhead)
+                                           (double (:baseline-ms-per-token rocm-decode))
+                                           (double (:turboquant-ms-per-token rocm-decode)))
+                                   (format "Full decode step overhead: +%.2f ms/token (+%.2f%% > 8.0%% ceiling) with INT4 weights on RX 7900 XTX (Baseline: %.2f ms, TurboQuant: %.2f ms)"
+                                           (double (:full-step-overhead-ms rocm-decode))
+                                           (double decode-overhead)
+                                           (double (:baseline-ms-per-token rocm-decode))
+                                           (double (:turboquant-ms-per-token rocm-decode))))
                                  (format "Unmeasured full decode step; attention kernel delta measured at +%.2f us (+%.1f%%) at %d context (%dx%d config on RX 7900 XTX)"
                                          (double (:attention-overhead-us rocm-decode))
                                          (double attn-overhead-pct)
@@ -475,13 +481,24 @@
        "- **Criterion 1.2 (Peak VRAM Allocation)**: UNMEASURED on CPU; requires ROCm device execution.\n")
      (if (:measured? rocm-decode)
        (if (:full-step-measured? rocm-decode)
-         (format "- **Criterion 2.2 (Decode Step Latency Overhead)**: **PASS**. Full end-to-end token generation on AMD Radeon RX 7900 XTX with INT4 resident weights measures **+%.2f%%** overhead (Baseline: **%.2f ms/tok**, TurboQuant 2-bit: **%.2f ms/tok**, delta: **+%.2f ms/tok** <= 8.0%% ceiling). Attention kernel microbenchmark delta is **+%.2f us** (**+%.1f%%**).\n"
-                 (double (:decode-step-overhead-pct rocm-decode))
-                 (double (:baseline-ms-per-token rocm-decode))
-                 (double (:turboquant-ms-per-token rocm-decode))
-                 (double (:full-step-overhead-ms rocm-decode))
-                 (double (:attention-overhead-us rocm-decode))
-                 (double (:attention-kernel-overhead-pct rocm-decode)))
+         (if (:criterion-2-2-pass? g2)
+           (format "- **Criterion 2.2 (Decode Step Latency Overhead)**: **PASS**. Full end-to-end token generation on AMD Radeon RX 7900 XTX with INT4 resident weights measures **+%.2f%%** overhead (Baseline: **%.2f ms/tok**, TurboQuant 2-bit: **%.2f ms/tok**, delta: **+%.2f ms/tok** <= 8.0%% ceiling). Attention kernel microbenchmark delta is **+%.2f us** (**+%.1f%%**).\n"
+                   (double (:decode-step-overhead-pct rocm-decode))
+                   (double (:baseline-ms-per-token rocm-decode))
+                   (double (:turboquant-ms-per-token rocm-decode))
+                   (double (:full-step-overhead-ms rocm-decode))
+                   (double (:attention-overhead-us rocm-decode))
+                   (double (:attention-kernel-overhead-pct rocm-decode)))
+           (format "- **Criterion 2.2 (Decode Step Latency Overhead)**: **FAIL**. Full end-to-end token generation on AMD Radeon RX 7900 XTX with INT4 resident weights measures **+%.2f%%** overhead (Baseline: **%.2f ms/tok**, TurboQuant 2-bit: **%.2f ms/tok**, delta: **+%.2f ms/tok** > 8.0%% ceiling). Attention kernel microbenchmark delta is **+%.2f us** (**+%.1f%%** on single layer); across 24 unshared KV layers in E4B, 24 x %.1f us unpack (%.2f ms) plus in-graph pack (0.48 ms) accounts for the +%.2f ms full-step delta.\n"
+                   (double (:decode-step-overhead-pct rocm-decode))
+                   (double (:baseline-ms-per-token rocm-decode))
+                   (double (:turboquant-ms-per-token rocm-decode))
+                   (double (:full-step-overhead-ms rocm-decode))
+                   (double (:attention-overhead-us rocm-decode))
+                   (double (:attention-kernel-overhead-pct rocm-decode))
+                   (double (:attention-overhead-us rocm-decode))
+                   (/ (* 24.0 (double (:attention-overhead-us rocm-decode))) 1000.0)
+                   (double (:full-step-overhead-ms rocm-decode))))
          (let [cfg (:benchmark-config rocm-decode)]
            (format "- **Criterion 2.2 (Decode Step Latency Overhead)**: **UNMEASURED (Full Step)**. Microbenchmarked attention decode kernel on live AMD Radeon RX 7900 XTX (OpenXLA PJRT ROCm 6.2, config: %d context, %d query heads, %d KV heads, head dimension %d packed to %d int8, %d iterations): baseline attention decode is **%.2f us**, TurboQuant unpack + attention decode is **%.2f us** (delta: **+%.2f us / +%.1f%%** on attention kernel). Full autoregressive decode step overhead is honestly marked UNMEASURED because end-to-end model forward text generation loop with resident weights was not timed.\n"
                    (long (:context-len cfg))
@@ -498,13 +515,22 @@
      (format "- **Criterion 3.1 (QJL Residual Estimator Bias)**: **PASS**. Calibrated Monte Carlo sampling ($N=50,000, m=64$) demonstrates empirical expectation bias of **%.2e**, satisfying the <= 1.0e-4 threshold at 2.75 bits/elem.\n"
              (double (:qjl-bias g3)))
      (if (and (:measured? mp) (:model-evaluated? mp))
-       (format "- **Criterion 3.3 (MultiPL-E Non-Regression)**: **PASS**. Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX: Baseline passed %d, TurboQuant passed %d. Discordant pairs: b=%d (favorable), c=%d (unfavorable), exact McNemar p=%.4f (>= 0.05), confirming non-regression on live silicon.\n"
-               (long (:total-tasks mp))
-               (long (:base-passed mp))
-               (long (:tq-passed mp))
-               (long (:favorable-b mp))
-               (long (:unfavorable-c mp))
-               (double (:p-value mp)))
+       (if (:criterion-3-3-pass? g3)
+         (format "- **Criterion 3.3 (MultiPL-E Non-Regression)**: **PASS**. Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX: Baseline passed %d, TurboQuant passed %d. Discordant pairs: b=%d (favorable), c=%d (unfavorable), exact McNemar p=%.4f (>= 0.05), confirming non-regression on live silicon.\n"
+                 (long (:total-tasks mp))
+                 (long (:base-passed mp))
+                 (long (:tq-passed mp))
+                 (long (:favorable-b mp))
+                 (long (:unfavorable-c mp))
+                 (double (:p-value mp)))
+         (format "- **Criterion 3.3 (MultiPL-E Non-Regression)**: **FAIL**. Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX: Baseline passed %d, TurboQuant passed %d. Discordant pairs: b=%d (favorable), c=%d (unfavorable), exact McNemar p=%.4f (< 0.05 floor, with %d regressions under zero-regression pilot rule), demonstrating statistically significant capability degradation under pure 2-bit KV quantization.\n"
+                 (long (:total-tasks mp))
+                 (long (:base-passed mp))
+                 (long (:tq-passed mp))
+                 (long (:favorable-b mp))
+                 (long (:unfavorable-c mp))
+                 (double (:p-value mp))
+                 (long (:unfavorable-c mp))))
        "- **Criterion 3.3 (MultiPL-E Non-Regression)**: **UNMEASURED**. The SCI grading harness was verified against catalog reference solutions (48/50 passed, 96.0%), confirming grading harness integrity. However, because compressed model forward generation is not yet in the loop, paired McNemar non-regression is honestly marked UNMEASURED.\n")
      "- **Gate 4 (Continuous Recursion)**: DROPPED by specification amendment; longitudinal autonomous cycle delta cannot be measured from a single proposal run.\n\n"
      "---\n\n"
@@ -546,7 +572,9 @@
                          (long (get-in rocm-decode [:benchmark-config :num-heads] 8))
                          (long (get-in rocm-decode [:benchmark-config :head-dim] 128))))
                "Unmeasured")
-             (if (:criterion-2-2-pass? g2) "PASS" "FAIL [UNMEASURED]")
+             (if (:criterion-2-2-pass? g2)
+               "PASS"
+               (if (:measured? rocm-decode) "FAIL" "FAIL [UNMEASURED]"))
              (if (:measured? rocm-decode)
                (if (:full-step-measured? rocm-decode)
                  (format "Empirically Benchmarked on AMD RX 7900 XTX (50 tokens, resident INT4 weights); attn delta: +%.1f us"
@@ -580,7 +608,9 @@
                (format "Unmeasured (Harness: %d/%d on answer key)"
                        (long (:passed-tasks mp))
                        (long (:total-tasks mp))))
-             (if (:criterion-3-3-pass? g3) "PASS" "FAIL [UNMEASURED]")
+             (if (:criterion-3-3-pass? g3)
+               "PASS"
+               (if (and (:measured? mp) (:model-evaluated? mp)) "FAIL" "FAIL [UNMEASURED]"))
              (if (and (:measured? mp) (:model-evaluated? mp))
                "Paired McNemar exact test on live model outputs on AMD RX 7900 XTX"
                "Staged; live model inference required for paired McNemar test"))
@@ -588,30 +618,51 @@
      "---\n\n"
      "## 3. Detailed Findings & Remediation Record\n\n"
      (if (and (:measured? rocm-decode) (:full-step-measured? rocm-decode))
-       (format "1. **ROCm Device Verification**: Full autoregressive decode step loop with resident INT4 model weights was timed on live AMD Radeon RX 7900 XTX silicon, measuring baseline at %.2f ms/token and Fast-TurboQuant 2-bit at %.2f ms/token (+%.2f ms/tok / +%.2f%% overhead <= 8.0%% ceiling, Criterion 2.2 PASS). Attention kernel delta measured at +%.1f us (+%.1f%%).\n"
-               (double (:baseline-ms-per-token rocm-decode))
-               (double (:turboquant-ms-per-token rocm-decode))
-               (double (:full-step-overhead-ms rocm-decode))
-               (double (:decode-step-overhead-pct rocm-decode))
-               (double (:attention-overhead-us rocm-decode))
-               (double (:attention-kernel-overhead-pct rocm-decode)))
+       (if (:criterion-2-2-pass? g2)
+         (format "1. **ROCm Device Verification**: Full autoregressive decode step loop with resident INT4 model weights was timed on live AMD Radeon RX 7900 XTX silicon, measuring baseline at %.2f ms/token and Fast-TurboQuant 2-bit at %.2f ms/token (+%.2f ms/tok / +%.2f%% overhead <= 8.0%% ceiling, Criterion 2.2 PASS). Attention kernel delta measured at +%.1f us (+%.1f%%).\n"
+                 (double (:baseline-ms-per-token rocm-decode))
+                 (double (:turboquant-ms-per-token rocm-decode))
+                 (double (:full-step-overhead-ms rocm-decode))
+                 (double (:decode-step-overhead-pct rocm-decode))
+                 (double (:attention-overhead-us rocm-decode))
+                 (double (:attention-kernel-overhead-pct rocm-decode)))
+         (format "1. **ROCm Device Verification**: Full autoregressive decode step loop with resident INT4 model weights was timed on live AMD Radeon RX 7900 XTX silicon, measuring baseline at %.2f ms/token and Fast-TurboQuant 2-bit at %.2f ms/token (+%.2f ms/tok / +%.2f%% overhead > 8.0%% ceiling, Criterion 2.2 FAIL). Single-layer attention microbenchmark measured +%.1f us (+%.1f%% delta); across 24 unshared KV layers in Gemma 4 E4B, 24 x %.1f us unpack (%.2f ms) plus in-graph key/value pack (0.48 ms) accounts for the entire +%.2f ms full-step delta with zero host synchronization overhead.\n"
+                 (double (:baseline-ms-per-token rocm-decode))
+                 (double (:turboquant-ms-per-token rocm-decode))
+                 (double (:full-step-overhead-ms rocm-decode))
+                 (double (:decode-step-overhead-pct rocm-decode))
+                 (double (:attention-overhead-us rocm-decode))
+                 (double (:attention-kernel-overhead-pct rocm-decode))
+                 (double (:attention-overhead-us rocm-decode))
+                 (/ (* 24.0 (double (:attention-overhead-us rocm-decode))) 1000.0)
+                 (double (:full-step-overhead-ms rocm-decode))))
        "1. **ROCm Device Verification**: Attention decode kernel with TurboQuant unpack and buffer slicing was wired into OpenXLA PJRT ROCm and benchmarked on live AMD Radeon RX 7900 XTX silicon (1024 context, 8 query heads, 8 KV heads, d128 packed to d32 int8), measuring baseline attention decode at 220.6 us and TurboQuant attention decode at 276.0 us (+55.3 us / +25.1% attention kernel delta). Full autoregressive decode step overhead is marked UNMEASURED because end-to-end model generation was not timed (Criterion 2.2 UNMEASURED).\n")
      "2. **Physical VRAM Allocation**: Allocated 108 packed KV cache device buffers (85.0 MB) on PJRT ROCm without OOM. Full-stack peak VRAM of 17.59 GB remains analytical (weights unallocated) against the 19.5 GB ceiling (Criterion 1.2 PASS [KV ALLOCATED]).\n"
      "3. **QJL Sketch Calibration**: Evaluated $m=64$ sketch projection across 50,000 Monte Carlo pairs, achieving an empirical bias of 7.80e-5 <= 1.0e-4 at 2.75 bits/elem (Criteria 1.3 & 3.1 PASS).\n"
      (if (and (:measured? mp) (:model-evaluated? mp))
-       (format "4. **MultiPL-E Silicon Verification**: Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX: Baseline passed %d, Fast-TurboQuant passed %d. Discordant pairs: b=%d, c=%d, paired McNemar exact test p=%.4f (>= 0.05), mathematically proving non-regression under KV cache compression on live silicon (Criterion 3.3 PASS).\n"
-               (long (:total-tasks mp))
-               (long (:base-passed mp))
-               (long (:tq-passed mp))
-               (long (:favorable-b mp))
-               (long (:unfavorable-c mp))
-               (double (:p-value mp)))
+       (if (:criterion-3-3-pass? g3)
+         (format "4. **MultiPL-E Silicon Verification**: Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX: Baseline passed %d, Fast-TurboQuant passed %d. Discordant pairs: b=%d, c=%d, paired McNemar exact test p=%.4f (>= 0.05), mathematically proving non-regression under KV cache compression on live silicon (Criterion 3.3 PASS).\n"
+                 (long (:total-tasks mp))
+                 (long (:base-passed mp))
+                 (long (:tq-passed mp))
+                 (long (:favorable-b mp))
+                 (long (:unfavorable-c mp))
+                 (double (:p-value mp)))
+         (format "4. **MultiPL-E Silicon Verification**: Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX: Baseline passed %d, Fast-TurboQuant passed %d. Discordant pairs: b=%d, c=%d, paired McNemar exact test p=%.4f (< 0.05 floor, %d regressions under zero-regression pilot rule), demonstrating statistically significant capability degradation under pure 2-bit KV quantization on live silicon (Criterion 3.3 FAIL).\n"
+                 (long (:total-tasks mp))
+                 (long (:base-passed mp))
+                 (long (:tq-passed mp))
+                 (long (:favorable-b mp))
+                 (long (:unfavorable-c mp))
+                 (double (:p-value mp))
+                 (long (:unfavorable-c mp))))
        "4. **MultiPL-E Grading Harness Smoke-Test**: MultiPL-E dev 50 evaluated genuinely against catalog reference solutions in the tightened SCI sandbox: 48/50 passed (96.0%), confirming grading harness integrity. Because compressed model forward generation is not yet connected in the loop, paired McNemar non-regression is marked UNMEASURED per protocol.\n")
      "5. **M-NIAH Suite Realignment**: Synthetic attention-mass retention evaluated across 100 needles (10 depth bins × 10 needles) across 4 context lengths (16k, 32k, 64k, 128k), achieving 100% retention on saliency ranking, explicitly labeled as an eviction ranking proxy.\n"
      "6. **Eviction Primitive Optimization**: Refactored `select-retained-indices` to a zero-boxing primitive min-heap, reducing latency to ~4.5 ms and eliminating test flakiness.\n\n"
-     "## 4. Next Milestone Prior to Full Catalog Promotion\n\n"
-     "1. Mechanism correctness on live silicon (AMD Radeon RX 7900 XTX) has been verified across both decode step overhead (Criterion 2.2) and MultiPL-E non-regression (Criterion 3.3).\n"
-     "2. Final acceptance gate before promoting `:tiered-turbo-kv` to the master catalog registry requires end-to-end full context length benchmark on the 31B target model once weights are staged.\n")))
+     "## 4. Next Milestone & Architecture Remediation\n\n"
+     "1. **Stage 3 Silicon Verification Outcome**: **STAGE 3 FAILED / UNPROMOTED (8 of 10 criteria passed)**. Both decode step latency overhead (+20.57% vs <= 8.0% target, Criterion 2.2) and MultiPL-E capability retention (b=0, c=5, p=0.0313 < 0.05, Criterion 3.3) failed on live AMD Radeon RX 7900 XTX silicon under pure 2-bit KV cache quantization. Master catalog registry (`resources/catalog/registry.edn`) remains unpromoted.\n"
+     "2. **Latency Remediation**: The +3.43 ms full-step decode overhead is accounted for by 24 unshared KV layers executing separate unpack (2.95 ms) and pack (0.48 ms) operations. Eliminating this overhead requires fusing the TurboQuant dequantization directly into the chunked attention kernel to eliminate standalone unpack tensor materialization.\n"
+     "3. **Quality Remediation**: Pure 2-bit quantization on all prompt tokens causes 5 regressions out of 11 passing tasks (a 45% capability loss). Preserving task accuracy requires hybrid tiering: keeping initial attention sinks (k-sink=4) and the most recent sliding window in uncompressed BF16/INT8, applying 2-bit TurboQuant only to evicted long-context history.\n")))
 
 ;; =============================================================================
 ;; Main Experiment Driver
