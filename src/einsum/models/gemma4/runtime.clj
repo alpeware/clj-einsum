@@ -205,31 +205,64 @@
                   (xla/promote! prefill-arena session-arena kv-outs)
                   kv-outs))
 
-              ;; Path C: Sequential prefill from token 0
+              ;; Path C: Chunked prefill (with sequential fallback for tail)
               :else
-              (let [initial-kv (kernels/allocate-kv-cache-buffers session seq-len session-arena)]
+              (let [initial-kv (kernels/allocate-kv-cache-buffers session seq-len session-arena)
+                    chunk-exec (or (:chunked-prefill-executable session)
+                                   (when (>= prefill-limit 128)
+                                     (kernels/compile-gemma4-chunked-prefill-executable session seq-len 128)))
+                    chunk-sz 128
+                    num-full-chunks (if chunk-exec (quot prefill-limit chunk-sz) 0)
+                    chunk-end (* num-full-chunks chunk-sz)]
                 (when-not quiet
-                  (println (format "Prefilling %d prompt tokens into KV-Cache (exceeds parallel prefill limit %d)..."
-                                   prefill-limit safe-prefill-len)))
-                (loop [p 0
-                       cur-kv initial-kv]
-                  (if (< p prefill-limit)
-                    (let [new-kv
-                          (xla/with-device-arena [iter-arena session-arena]
-                            (let [tok (int (nth clamped-prompt-ids p))
-                                  _ (aset x-arr 0 tok)
-                                  _ (aset pos-arr 0 p)
-                                  x-b (xla/device-buffer iter-arena x-arr [1 1] :i32)
-                                  pos-b (xla/device-buffer iter-arena pos-arr [1] :i32)
-                                  step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                  outs (xla/track! iter-arena (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
-                                  outs-vec (if (vector? outs) outs [outs])
-                                  nk (vec (subvec outs-vec 1))]
-                              (xla/promote! iter-arena session-arena nk)
-                              nk))]
-                      (arena/destroy! session-arena cur-kv)
-                      (recur (inc p) new-kv))
-                    cur-kv))))
+                  (if (pos? num-full-chunks)
+                    (println (format "Chunked prefilling %d prompt tokens into KV-Cache (%d x %d chunks, %d tail tokens)..."
+                                     prefill-limit num-full-chunks chunk-sz (- prefill-limit chunk-end)))
+                    (println (format "Prefilling %d prompt tokens into KV-Cache (exceeds parallel prefill limit %d)..."
+                                     prefill-limit safe-prefill-len))))
+                (let [post-chunk-kv
+                      (if (pos? num-full-chunks)
+                        (loop [c 0
+                               cur-kv initial-kv]
+                          (if (< c num-full-chunks)
+                            (let [start-p (* c chunk-sz)
+                                  new-kv
+                                  (xla/with-device-arena [iter-arena session-arena]
+                                    (let [chunk-toks (int-array chunk-sz)
+                                          _ (dotimes [ci chunk-sz]
+                                              (aset chunk-toks ci (int (nth clamped-prompt-ids (+ start-p ci)))))
+                                          pos-c (int-array [start-p])
+                                          x-b (xla/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
+                                          pos-b (xla/device-buffer iter-arena pos-c [1] :i32)
+                                          step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
+                                          outs (xla/track! iter-arena (pjrt/execute-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-step-outs))
+                                          outs-vec (if (vector? outs) outs [outs])
+                                          nk (vec (subvec outs-vec 1))]
+                                      (xla/promote! iter-arena session-arena nk)
+                                      nk))]
+                              (arena/destroy! session-arena cur-kv)
+                              (recur (inc c) new-kv))
+                            cur-kv))
+                        initial-kv)]
+                  (loop [p chunk-end
+                         cur-kv post-chunk-kv]
+                    (if (< p prefill-limit)
+                      (let [new-kv
+                            (xla/with-device-arena [iter-arena session-arena]
+                              (let [tok (int (nth clamped-prompt-ids p))
+                                    _ (aset x-arr 0 tok)
+                                    _ (aset pos-arr 0 p)
+                                    x-b (xla/device-buffer iter-arena x-arr [1 1] :i32)
+                                    pos-b (xla/device-buffer iter-arena pos-arr [1] :i32)
+                                    step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
+                                    outs (xla/track! iter-arena (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                                    outs-vec (if (vector? outs) outs [outs])
+                                    nk (vec (subvec outs-vec 1))]
+                                (xla/promote! iter-arena session-arena nk)
+                                nk))]
+                        (arena/destroy! session-arena cur-kv)
+                        (recur (inc p) new-kv))
+                      cur-kv)))))
 
             t-prefill-1 (System/nanoTime)
             prefill-ms (/ (- t-prefill-1 t-prefill-0) 1e6)
@@ -480,34 +513,78 @@
                  (reset! kv-buffers-atom prefill-kv)
                  [prefill-logits (System/nanoTime)])
 
-               ;; Path C: Sequential fallback prefill
+               ;; Path C: Chunked prefill (with sequential fallback for tail)
                :else
-               (let [cur-log (loop [p 0
-                                    cur-logits nil]
-                               (if (< p prompt-count)
-                                 (let [[new-log new-kv]
-                                       (xla/with-device-arena [step-arena session-arena]
-                                         (let [tok (int (nth clamped-prompt-ids p))
-                                               _ (aset x-arr 0 tok)
-                                               _ (aset pos-arr 0 p)
-                                               x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
-                                               pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
-                                               step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                               outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs))
-                                               outs-vec (if (vector? outs) outs [outs])
-                                               nl (first outs-vec)
-                                               nk (vec (subvec outs-vec 1))]
-                                           (xla/promote! step-arena session-arena nl)
-                                           (xla/promote! step-arena session-arena nk)
-                                           [nl nk]))
-                                       old-kv @kv-buffers-atom]
-                                   (when cur-logits (arena/destroy! session-arena cur-logits))
-                                   (when (seq old-kv)
-                                     (arena/destroy! session-arena old-kv))
-                                   (reset! kv-buffers-atom new-kv)
-                                   (recur (inc p) new-log))
-                                 cur-logits))]
-                 [cur-log (System/nanoTime)]))
+               (let [chunk-exec (or (:chunked-prefill-executable session)
+                                    (when (>= prompt-count 128)
+                                      (kernels/compile-gemma4-chunked-prefill-executable session seq-len 128)))
+                     chunk-sz 128
+                     num-full-chunks (if chunk-exec (quot prompt-count chunk-sz) 0)
+                     chunk-end (* num-full-chunks chunk-sz)
+                     exact-chunks? (and (pos? num-full-chunks) (= chunk-end prompt-count))]
+                 (when-not quiet
+                   (if (pos? num-full-chunks)
+                     (println (format "Chunked prefilling %d prompt tokens into KV-Cache (%d x %d chunks, %d tail tokens)..."
+                                      prompt-count num-full-chunks chunk-sz (- prompt-count chunk-end)))
+                     (println (format "Prefilling %d prompt tokens into KV-Cache..." prompt-count))))
+                 (let [[post-chunk-logits post-chunk-kv]
+                       (if (pos? num-full-chunks)
+                         (loop [c 0
+                                cur-kv @kv-buffers-atom
+                                cur-log nil]
+                           (if (< c num-full-chunks)
+                             (let [start-p (* c chunk-sz)
+                                   [new-log new-kv]
+                                   (xla/with-device-arena [iter-arena session-arena]
+                                     (let [chunk-toks (int-array chunk-sz)
+                                           _ (dotimes [ci chunk-sz]
+                                               (aset chunk-toks ci (int (nth clamped-prompt-ids (+ start-p ci)))))
+                                           pos-c (int-array [start-p])
+                                           x-b (xla/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
+                                           pos-b (xla/device-buffer iter-arena pos-c [1] :i32)
+                                           step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
+                                           outs (xla/track! iter-arena (pjrt/execute-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-outs))
+                                           outs-vec (if (vector? outs) outs [outs])
+                                           nl (first outs-vec)
+                                           nk (vec (subvec outs-vec 1))]
+                                       (xla/promote! iter-arena session-arena nl)
+                                       (xla/promote! iter-arena session-arena nk)
+                                       [nl nk]))
+                                   old-kv cur-kv]
+                               (when cur-log (arena/destroy! session-arena cur-log))
+                               (when (seq old-kv) (arena/destroy! session-arena old-kv))
+                               (recur (inc c) new-kv new-log))
+                             [cur-log cur-kv]))
+                         [nil @kv-buffers-atom])]
+                   (reset! kv-buffers-atom post-chunk-kv)
+                   (if exact-chunks?
+                     [post-chunk-logits (System/nanoTime)]
+                     (let [cur-log (loop [p chunk-end
+                                          cur-logits post-chunk-logits]
+                                     (if (< p prompt-count)
+                                       (let [[new-log new-kv]
+                                             (xla/with-device-arena [step-arena session-arena]
+                                               (let [tok (int (nth clamped-prompt-ids p))
+                                                     _ (aset x-arr 0 tok)
+                                                     _ (aset pos-arr 0 p)
+                                                     x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
+                                                     pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
+                                                     step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                                                     outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                                     outs-vec (if (vector? outs) outs [outs])
+                                                     nl (first outs-vec)
+                                                     nk (vec (subvec outs-vec 1))]
+                                                 (xla/promote! step-arena session-arena nl)
+                                                 (xla/promote! step-arena session-arena nk)
+                                                 [nl nk]))
+                                             old-kv @kv-buffers-atom]
+                                         (when cur-logits (arena/destroy! session-arena cur-logits))
+                                         (when (seq old-kv)
+                                           (arena/destroy! session-arena old-kv))
+                                         (reset! kv-buffers-atom new-kv)
+                                         (recur (inc p) new-log))
+                                       cur-logits))]
+                       [cur-log (System/nanoTime)])))))
 
              cur-tokens (atom (vec clamped-prompt-ids))
              max-tokens (long (or max-new-tokens 256))]
@@ -664,6 +741,8 @@
          safe-prefill-len (cfg/max-safe-prefill-seq-len (:config session))
          prefill-exec (when (and (not turboquant?) (<= max-seq-len safe-prefill-len))
                         (kernels/compile-gemma4-prefill-executable session max-seq-len))
+         chunked-prefill-exec (when (>= max-seq-len 256)
+                                (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len 128))
          step-exec (when vram-loop?
                      (kernels/compile-gemma4-kv-executable session max-seq-len))
          _ (when-not (:quiet opts) (println "Pinning Gemma 4 weights in PJRT VRAM..."))
@@ -673,6 +752,7 @@
             :executable exec
             :exec exec
             :prefill-executable prefill-exec
+            :chunked-prefill-executable chunked-prefill-exec
             :step-executable step-exec
             :kv-state (atom nil)
             :max-seq-len max-seq-len

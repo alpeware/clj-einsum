@@ -177,10 +177,14 @@
         norm-dtype (if (or (:is-int8 config) (:is-int4 config) (:is-ternary config)) :bf16 (get config :weight-dtype :bf16))
         layer-configs (:layer-configs config)
         layer-types (:layer-types config)
+        tier2? (boolean (or (:tier2-eviction? config) (:tier2-eviction config) (:eviction? config)))
         kv-invars (mapcat (fn [i]
                             (let [cfg (when (seq layer-configs) (nth layer-configs i nil))
                                   is-global? (if cfg (:is-global? cfg) (gemma-logic/layer-is-global? layer-types i))
-                                  win (when-not is-global? (or (:sliding-window cfg) (:sliding-window config) (:sliding_window config) 512))
+                                  win (cond
+                                        (and is-global? tier2?) (long (or (:eviction-window config) 512))
+                                        (not is-global?) (or (:sliding-window cfg) (:sliding-window config) (:sliding_window config) 512)
+                                        :else nil)
                                   seq-l (if win (min max-seq-len win) max-seq-len)
                                   h-dim (long (or (:head-dim cfg)
                                                   (if is-global? 512 256)))
@@ -191,8 +195,9 @@
                                 [[(keyword (str "k_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]
                                  [(keyword (str "v_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]])))
                           (range num-unshared))
+        q-len (long (or (:q-len config) (:chunk-size config) 1))
         weight-invars (subvec (build-tensor-logic-invars (assoc config :last-token-only? true) max-seq-len) 2)]
-    (vec (concat [[:x [:tensor [1 1] :i32]]
+    (vec (concat [[:x [:tensor [1 q-len] :i32]]
                   [:pos [:tensor [1] :i32]]]
                  kv-invars
                  weight-invars))))
@@ -233,7 +238,11 @@
      (vec (mapcat (fn [i]
                     (let [c (if (seq layer-configs) (nth layer-configs i nil) nil)
                           is-global? (if c (:is-global? c) (gemma-logic/layer-is-global? layer-types i))
-                          win (when-not is-global? (or (:sliding-window c) (:sliding-window config) (:sliding_window config) 512))
+                          tier2? (boolean (or (:tier2-eviction? config) (:tier2-eviction config) (:eviction? config)))
+                          win (cond
+                                (and is-global? tier2?) (long (or (:eviction-window config) 512))
+                                (not is-global?) (or (:sliding-window c) (:sliding-window config) (:sliding_window config) 512)
+                                :else nil)
                           seq-l (if win (min max-seq-len win) max-seq-len)
                           n-kv (long (or (:num-kv-heads c) 1))
                           h-dim (long (or (:head-dim c) (if is-global? 512 256)))
@@ -341,6 +350,29 @@
       (println "Compiling Gemma 4 KV Cache step graph to native XLA PjRtLoadedExecutable..."))
     (xla/compile-graph ctx graph)))
 
+(defn compile-gemma4-chunked-prefill-executable
+  "Compiles chunked Gemma 4 KV-Cache AST into a native StableHLO MLIR executable.
+   Takes an input chunk of tokens of length `chunk-size` (default 128) and start position `pos`."
+  ([session max-seq-len]
+   (compile-gemma4-chunked-prefill-executable session max-seq-len 128))
+  ([{:keys [ctx config opts]} max-seq-len chunk-size]
+   (let [chunk-sz (long (or chunk-size (:chunk-size config) 128))
+         cfg (assoc config
+                    :max-seq-len max-seq-len
+                    :q-len chunk-sz
+                    :chunk-size chunk-sz
+                    :last-token-only? true)
+         invars (build-gemma4-kv-invars cfg max-seq-len)
+         targets (build-gemma4-kv-outvars cfg)
+         ast (gemma-logic/gemma4-kv-model-ast cfg)
+         _ (when-not (:quiet opts)
+             (println (format "Lowering declarative Tensor Logic Gemma 4 Chunked Prefill (%d layers, chunk-size=%d, max-seq-len=%d) to StableHLO..."
+                              (:num-layers config) chunk-sz max-seq-len)))
+         graph (lower/ast->graph "gemma4_chunked_prefill" invars ast targets)]
+     (when-not (:quiet opts)
+       (println "Compiling Gemma 4 Chunked Prefill graph to native XLA PjRtLoadedExecutable..."))
+     (xla/compile-graph ctx graph))))
+
 (defn compile-gemma4-attention-decode-executable
   "Compiles single-step Gemma 4 attention decode executable into a native StableHLO MLIR executable.
    Supports :kv-quant (:bf16 or :turboquant / :turbo-kv) and optional device buffer slicing."
@@ -369,34 +401,33 @@
                    [:pos [:tensor [1] :i32]]])
 
          ast [:block {:name :gemma4_attention_decode}
-              (when turboquant?
-                [:block {:name :turboquant_unpack_block}
-                 [:turboquant-unpack [:k_unpacked :b :kvs :kvh :dh] [:k_cache :b :kvs :kvh :pdh]]
-                 [:turboquant-unpack [:v_unpacked :b :kvs :kvh :dh] [:v_cache :b :kvs :kvh :pdh]]])
-
-              (let [k-src (if turboquant? :k_unpacked :k_cache)
-                    v-src (if turboquant? :v_unpacked :v_cache)
-                    [k-eff v-eff] (if slicing?
+              (let [[k-eff v-eff] (if slicing?
                                     [:k_sliced :v_sliced]
-                                    [k-src v-src])]
+                                    [:k_cache :v_cache])
+                    d-dim (if turboquant? packed-dim head-dim)
+                    d-idx (if turboquant? :pdh :dh)]
                 [:block {:name :attention_block}
                  (when slicing?
                    [:block {:name :slice_block}
-                    [:dynamic-slice [:k_sliced :b :kvs :kvh :dh] [k-src :b :kvs :kvh :dh]
-                     {:start-indices [0 0 0 0] :slice-sizes [1 retained-len num-kv-heads head-dim]}]
-                    [:dynamic-slice [:v_sliced :b :kvs :kvh :dh] [v-src :b :kvs :kvh :dh]
-                     {:start-indices [0 0 0 0] :slice-sizes [1 retained-len num-kv-heads head-dim]}]])
+                    [:dynamic-slice [k-eff :b :kvs :kvh d-idx] [:k_cache :b :kvs :kvh d-idx]
+                     {:start-indices [0 0 0 0] :slice-sizes [1 retained-len num-kv-heads d-dim]}]
+                    [:dynamic-slice [v-eff :b :kvs :kvh d-idx] [:v_cache :b :kvs :kvh d-idx]
+                     {:start-indices [0 0 0 0] :slice-sizes [1 retained-len num-kv-heads d-dim]}]])
                  [:chunked-attention [:ctx :b :p :h :dh]
                   [:q :b :p :h :dh]
-                  [k-eff :b :kvs :kvh :dh]
-                  [v-eff :b :kvs :kvh :dh]
-                  {:pos :pos
-                   :chunk-size chunk-sz
-                   :head-dim head-dim
-                   :num-heads num-heads
-                   :num-kv-heads num-kv-heads
-                   :max-seq-len retained-len
-                   :shape [1 1 num-heads head-dim]}]])]
+                  [k-eff :b :kvs :kvh d-idx]
+                  [v-eff :b :kvs :kvh d-idx]
+                  (merge {:pos :pos
+                          :chunk-size chunk-sz
+                          :head-dim head-dim
+                          :num-heads num-heads
+                          :num-kv-heads num-kv-heads
+                          :max-seq-len retained-len
+                          :shape [1 1 num-heads head-dim]}
+                         (when turboquant?
+                           {:turboquant? true
+                            :k-scale (double (or (:k-scale opts) 1.0))
+                            :v-scale (double (or (:v-scale opts) 1.0))}))]])]
          graph (lower/ast->graph "gemma4_attention_decode" invars ast #{:ctx})]
      (xla/compile-graph ctx graph))))
 

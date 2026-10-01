@@ -4,7 +4,7 @@
   :generation 1,
   :model-name "gemma-4-31b-it-int4",
   :backend :rocm,
-  :status "STAGE 3 SILICON BENCHMARKED (8 CRITERIA PASSED)",
+  :status "STAGE 3 SILICON BENCHMARKED (7 CRITERIA PASSED)",
   :provenance
   {:model-accounting
    "Analytical & Physical ROCm buffer allocation (54 layers, 8 heads, 3076 tokens, 2.75b)",
@@ -16,7 +16,7 @@
    "Attention-mass retention-through-eviction proxy (100 needles x 4 lengths x 10 bins)",
    :hardware-decode
    "Full decode step and attention kernel benchmarked on live AMD Radeon RX 7900 XTX"},
-  :timestamp "2026-10-01T02:25:59.009961571Z"},
+  :timestamp "2026-10-01T17:37:47.940128412Z"},
  :gate1
  {:gate1-pass? true,
   :criterion-1-3-pass? true,
@@ -173,16 +173,16 @@
  :gate2
  {:prefix-pass? true,
   :criterion-2-2-pass? false,
-  :attention-kernel-overhead-pct 69.23041242168136,
+  :attention-kernel-overhead-pct 61.69842973390729,
   :eviction-latency-samples
-  [4.173812 4.184592 4.015521 3.427585 3.139094],
+  [4.188248 4.097287 3.982586 3.242692 3.162571],
   :decode-overhead-pass? false,
   :rocm-decode
-  {:full-step-overhead-ms 3.425496220000003,
-   :attention-kernel-overhead-pct 69.23041242168136,
-   :decode-step-overhead-pct 20.567813377416673,
-   :turboquant-attention-us 300.62588,
-   :baseline-attention-us 177.64294,
+  {:full-step-overhead-ms 1.7138327199999992,
+   :attention-kernel-overhead-pct 61.69842973390729,
+   :decode-step-overhead-pct 10.317829187523122,
+   :turboquant-attention-us 270.23157999999995,
+   :baseline-attention-us 167.12072,
    :benchmark-config
    {:packed-dim 32,
     :num-heads 8,
@@ -193,506 +193,378 @@
     :tokens 50,
     :accelerator "AMD Radeon RX 7900 XTX (OpenXLA PJRT ROCm 6.2)",
     :context-len 1024},
-   :attention-overhead-us 122.98293999999999,
+   :attention-overhead-us 103.11085999999995,
    :pass? false,
-   :turboquant-ms-per-token 20.08014082,
-   :baseline-ms-per-token 16.654644599999997,
-   :attention-overhead-ms 0.12298293999999999,
+   :turboquant-ms-per-token 18.32423292,
+   :baseline-ms-per-token 16.6104002,
+   :attention-overhead-ms 0.10311085999999994,
    :measured? true,
    :full-step-measured? true},
   :gate2-pass? false,
-  :decode-step-overhead-pct 20.567813377416673,
-  :eviction-latency-ms 4.015521,
+  :decode-step-overhead-pct 10.317829187523122,
+  :eviction-latency-ms 3.982586,
   :multiplier-free-butterfly? true,
   :prefix-hit-rate 0.9716157205240175,
   :criterion-2-1-pass? true,
   :criterion-2-2-reason
-  "Full decode step overhead: +3.43 ms/token (+20.57% > 8.0% ceiling) with INT4 weights on RX 7900 XTX (Baseline: 16.65 ms, TurboQuant: 20.08 ms)",
+  "Full decode step overhead: +1.71 ms/token (+10.32% > 8.0% ceiling) with INT4 weights on RX 7900 XTX (Baseline: 16.61 ms, TurboQuant: 18.32 ms)",
   :criterion-2-3-pass? true,
   :eviction-latency-pass? true,
-  :fwht-per-transform-us 12.79640475,
+  :fwht-per-transform-us 12.93564505,
   :criterion-2-4-pass? true,
   :multiplier-free-pass? true},
  :gate3
- {:criterion-3-2-pass? true,
+ {:criterion-3-2-pass? false,
   :criterion-3-3-reason
-  "Paired McNemar exact test: b=0, c=5, p=0.0313 (statistically significant degradation below p=0.05 floor)",
+  "Paired McNemar exact test: b=2, c=4, p=0.3438 (4 regressions violate zero-regression pilot rule)",
   :m-niah
-  {:label
-   "retention-through-eviction (attention mass ranking proxy; model not in loop)",
-   :total-needles-per-length 100,
-   :depth-bins 10,
-   :lengths [16384 32768 65536 131072],
-   :min-accuracy 1.0,
-   :all-pass? true,
-   :results
+  {:total-samples 20,
+   :exact-accuracy 0.2,
+   :model-in-the-loop? true,
+   :min-accuracy 0.2,
+   :total-exact-passes 4,
+   :prefix-accuracy 0.5,
+   :label
+   "Model-in-the-loop NIAH on AMD RX 7900 XTX (20 samples, 16k & 32k: 20.0% exact, 50.0% prefix)",
+   :results-by-length
    [{:seq-len 16384,
-     :needle-count 100,
-     :retained-count 100,
-     :retrieval-accuracy 1.0,
-     :retained-needle-indices
-     [81
-      245
-      409
-      573
-      737
-      901
-      1064
-      1228
-      1392
-      1556
-      1720
-      1884
-      2047
-      2211
-      2375
-      2539
-      2703
-      2867
-      3030
-      3194
-      3358
-      3522
-      3686
-      3850
-      4013
-      4177
-      4341
-      4505
-      4669
-      4832
-      4996
-      5160
-      5324
-      5488
-      5652
-      5815
-      5979
-      6143
-      6307
-      6471
-      6635
-      6798
-      6962
-      7126
-      7290
-      7454
-      7618
-      7781
-      7945
-      8109
-      8273
-      8437
-      8601
-      8764
-      8928
-      9092
-      9256
-      9420
-      9584
-      9747
-      9911
-      10075
-      10239
-      10403
-      10567
-      10730
-      10894
-      11058
-      11222
-      11386
-      11550
-      11713
-      11877
-      12041
-      12205
-      12369
-      12532
-      12696
-      12860
-      13024
-      13188
-      13352
-      13515
-      13679
-      13843
-      14007
-      14171
-      14335
-      14498
-      14662
-      14826
-      14990
-      15154
-      15318
-      15481
-      15645
-      15809
-      15973
-      16137
-      16301],
-     :missed-needle-indices [],
-     :label
-     "retention-through-eviction (attention mass ranking proxy)"}
+     :samples-count 10,
+     :exact-passes 3,
+     :exact-accuracy 0.3,
+     :prefix-passes 4,
+     :prefix-accuracy 0.4,
+     :samples
+     [{:decode-ms 218.143889,
+       :seq-len 16384,
+       :key "CRIMSON-741",
+       :exact-match? true,
+       :elapsed-s 13.399329623,
+       :output-clean "CRIMSON-741.",
+       :prefix-match? true,
+       :prompt-tokens 15719,
+       :prefill-ms 13033.856084,
+       :pass? true,
+       :depth 0.1,
+       :raw-output "CRIMSON-741.<turn|>",
+       :depth-bin 0,
+       :decode-tok-s 41.257172232773385}
+      {:decode-ms 161.805633,
+       :seq-len 16384,
+       :key "EMERALD-825",
+       :exact-match? true,
+       :elapsed-s 13.23224335,
+       :output-clean "EMERALD-825.",
+       :prefix-match? true,
+       :prompt-tokens 15720,
+       :prefill-ms 12949.607612,
+       :pass? true,
+       :depth 0.2,
+       :raw-output "EMERALD-825.<turn|>",
+       :depth-bin 1,
+       :decode-tok-s 55.622290974257986}
+      {:decode-ms 263.713671,
+       :seq-len 16384,
+       :key "SAPPHIRE-394",
+       :exact-match? true,
+       :elapsed-s 13.371349607,
+       :output-clean "The special code is **SAPPHIRE-394.",
+       :prefix-match? true,
+       :prompt-tokens 15720,
+       :prefill-ms 12981.085975,
+       :pass? true,
+       :depth 0.3,
+       :raw-output "The special code is **SAPPHIRE-394.<turn|>",
+       :depth-bin 2,
+       :decode-tok-s 53.08788106021247}
+      {:decode-ms 182.669245,
+       :seq-len 16384,
+       :key "OBSIDIAN-612",
+       :exact-match? false,
+       :elapsed-s 13.293547485,
+       :output-clean "The special code is **OBSIDIAN**",
+       :prefix-match? true,
+       :prompt-tokens 15720,
+       :prefill-ms 12984.715773,
+       :pass? false,
+       :depth 0.4,
+       :raw-output "The special code is **OBSIDIAN**<turn|>",
+       :depth-bin 3,
+       :decode-tok-s 54.74375284137185}
+      {:decode-ms 101.679678,
+       :seq-len 16384,
+       :key "PLATINUM-508",
+       :exact-match? false,
+       :elapsed-s 13.211334548,
+       :output-clean "**500**",
+       :prefix-match? false,
+       :prompt-tokens 15720,
+       :prefill-ms 12978.712996,
+       :pass? false,
+       :depth 0.5,
+       :raw-output "**500**<turn|>",
+       :depth-bin 4,
+       :decode-tok-s 59.00884147174424}
+      {:decode-ms 219.61804,
+       :seq-len 16384,
+       :key "TITANIUM-937",
+       :exact-match? false,
+       :elapsed-s 13.328556335,
+       :output-clean "The special code is **TITAN-9.",
+       :prefix-match? false,
+       :prompt-tokens 15719,
+       :prefill-ms 12967.538561,
+       :pass? false,
+       :depth 0.6,
+       :raw-output "The special code is **TITAN-9.<turn|>",
+       :depth-bin 5,
+       :decode-tok-s 50.08696006940049}
+      {:decode-ms 101.696317,
+       :seq-len 16384,
+       :key "AMETHYST-246",
+       :exact-match? false,
+       :elapsed-s 13.227593483,
+       :output-clean "**AMETHICS**",
+       :prefix-match? false,
+       :prompt-tokens 15721,
+       :prefill-ms 12992.05115,
+       :pass? false,
+       :depth 0.7,
+       :raw-output "**AMETHICS**<turn|>",
+       :depth-bin 6,
+       :decode-tok-s 58.99918676504283}
+      {:decode-ms 222.819035,
+       :seq-len 16384,
+       :key "TURQUOISE-159",
+       :exact-match? false,
+       :elapsed-s 13.377807426,
+       :output-clean "**The quick brown fox jumps over the dog.**",
+       :prefix-match? false,
+       :prompt-tokens 15721,
+       :prefill-ms 13020.708742,
+       :pass? false,
+       :depth 0.8,
+       :raw-output
+       "**The quick brown fox jumps over the dog.**<turn|>",
+       :depth-bin 7,
+       :decode-tok-s 49.367416028886396}
+      {:decode-ms 181.427285,
+       :seq-len 16384,
+       :key "DIAMOND-483",
+       :exact-match? false,
+       :elapsed-s 13.265608237,
+       :output-clean
+       "The quick brown fox systems across distributed systems.",
+       :prefix-match? false,
+       :prompt-tokens 15719,
+       :prefill-ms 12930.639114,
+       :pass? false,
+       :depth 0.9,
+       :raw-output
+       "The quick brown fox systems across distributed systems.<turn|>",
+       :depth-bin 8,
+       :decode-tok-s 55.11850105677324}
+      {:decode-ms 214.500131,
+       :seq-len 16384,
+       :key "MALACHITE-720",
+       :exact-match? false,
+       :elapsed-s 13.418041148,
+       :output-clean "The quick brown fox jumps over the lazy dog.",
+       :prefix-match? false,
+       :prompt-tokens 15719,
+       :prefill-ms 13063.601094,
+       :pass? false,
+       :depth 1.0,
+       :raw-output
+       "The quick brown fox jumps over the lazy dog.<turn|>",
+       :depth-bin 9,
+       :decode-tok-s 51.28201996296217}]}
     {:seq-len 32768,
-     :needle-count 100,
-     :retained-count 100,
-     :retrieval-accuracy 1.0,
-     :retained-needle-indices
-     [163
-      491
-      819
-      1146
-      1474
-      1802
-      2129
-      2457
-      2785
-      3112
-      3440
-      3768
-      4095
-      4423
-      4751
-      5078
-      5406
-      5734
-      6061
-      6389
-      6717
-      7044
-      7372
-      7700
-      8027
-      8355
-      8683
-      9010
-      9338
-      9666
-      9993
-      10321
-      10649
-      10976
-      11304
-      11632
-      11959
-      12287
-      12615
-      12942
-      13270
-      13598
-      13925
-      14253
-      14581
-      14908
-      15236
-      15564
-      15891
-      16219
-      16547
-      16875
-      17202
-      17530
-      17858
-      18185
-      18513
-      18841
-      19168
-      19496
-      19824
-      20151
-      20479
-      20807
-      21134
-      21462
-      21790
-      22117
-      22445
-      22773
-      23100
-      23428
-      23756
-      24083
-      24411
-      24739
-      25066
-      25394
-      25722
-      26049
-      26377
-      26705
-      27032
-      27360
-      27688
-      28015
-      28343
-      28671
-      28998
-      29326
-      29654
-      29981
-      30309
-      30637
-      30964
-      31292
-      31620
-      31947
-      32275
-      32603],
-     :missed-needle-indices [],
-     :label
-     "retention-through-eviction (attention mass ranking proxy)"}
-    {:seq-len 65536,
-     :needle-count 100,
-     :retained-count 100,
-     :retrieval-accuracy 1.0,
-     :retained-needle-indices
-     [327
-      983
-      1638
-      2293
-      2949
-      3604
-      4259
-      4915
-      5570
-      6225
-      6881
-      7536
-      8191
-      8847
-      9502
-      10157
-      10813
-      11468
-      12123
-      12779
-      13434
-      14090
-      14745
-      15400
-      16056
-      16711
-      17366
-      18022
-      18677
-      19332
-      19988
-      20643
-      21298
-      21954
-      22609
-      23264
-      23920
-      24575
-      25230
-      25886
-      26541
-      27197
-      27852
-      28507
-      29163
-      29818
-      30473
-      31129
-      31784
-      32439
-      33095
-      33750
-      34405
-      35061
-      35716
-      36371
-      37027
-      37682
-      38337
-      38993
-      39648
-      40304
-      40959
-      41614
-      42270
-      42925
-      43580
-      44236
-      44891
-      45546
-      46202
-      46857
-      47512
-      48168
-      48823
-      49478
-      50134
-      50789
-      51444
-      52100
-      52755
-      53411
-      54066
-      54721
-      55377
-      56032
-      56687
-      57343
-      57998
-      58653
-      59309
-      59964
-      60619
-      61275
-      61930
-      62585
-      63241
-      63896
-      64551
-      65207],
-     :missed-needle-indices [],
-     :label
-     "retention-through-eviction (attention mass ranking proxy)"}
-    {:seq-len 131072,
-     :needle-count 100,
-     :retained-count 100,
-     :retrieval-accuracy 1.0,
-     :retained-needle-indices
-     [655
-      1966
-      3276
-      4587
-      5898
-      7208
-      8519
-      9830
-      11141
-      12451
-      13762
-      15073
-      16383
-      17694
-      19005
-      20316
-      21626
-      22937
-      24248
-      25558
-      26869
-      28180
-      29490
-      30801
-      32112
-      33423
-      34733
-      36044
-      37355
-      38665
-      39976
-      41287
-      42598
-      43908
-      45219
-      46530
-      47840
-      49151
-      50462
-      51773
-      53083
-      54394
-      55705
-      57015
-      58326
-      59637
-      60948
-      62258
-      63569
-      64880
-      66190
-      67501
-      68812
-      70122
-      71433
-      72744
-      74055
-      75365
-      76676
-      77987
-      79297
-      80608
-      81919
-      83230
-      84540
-      85851
-      87162
-      88472
-      89783
-      91094
-      92405
-      93715
-      95026
-      96337
-      97647
-      98958
-      100269
-      101580
-      102890
-      104201
-      105512
-      106822
-      108133
-      109444
-      110754
-      112065
-      113376
-      114687
-      115997
-      117308
-      118619
-      119929
-      121240
-      122551
-      123862
-      125172
-      126483
-      127794
-      129104
-      130415],
-     :missed-needle-indices [],
-     :label
-     "retention-through-eviction (attention mass ranking proxy)"}]},
+     :samples-count 10,
+     :exact-passes 1,
+     :exact-accuracy 0.1,
+     :prefix-passes 6,
+     :prefix-accuracy 0.6,
+     :samples
+     [{:decode-ms 72.322483,
+       :seq-len 32768,
+       :key "CRIMSON-741",
+       :exact-match? false,
+       :elapsed-s 27.980000638,
+       :output-clean "CRIMSON",
+       :prefix-match? true,
+       :prompt-tokens 32103,
+       :prefill-ms 27631.756414,
+       :pass? false,
+       :depth 0.1,
+       :raw-output "CRIMSON<turn|>",
+       :depth-bin 0,
+       :decode-tok-s 55.30783560072184}
+      {:decode-ms 232.098943,
+       :seq-len 32768,
+       :key "EMERALD-825",
+       :exact-match? false,
+       :elapsed-s 28.070043154,
+       :output-clean "The special secret code is **EMERALD**.",
+       :prefix-match? true,
+       :prompt-tokens 32104,
+       :prefill-ms 27541.341824,
+       :pass? false,
+       :depth 0.2,
+       :raw-output "The special secret code is **EMERALD**.<turn|>",
+       :depth-bin 1,
+       :decode-tok-s 47.39358076266638}
+      {:decode-ms 233.909567,
+       :seq-len 32768,
+       :key "SAPPHIRE-394",
+       :exact-match? false,
+       :elapsed-s 28.0654383,
+       :output-clean "The special secret code is **SAPPHIRE**.",
+       :prefix-match? true,
+       :prompt-tokens 32104,
+       :prefill-ms 27548.041705,
+       :pass? false,
+       :depth 0.3,
+       :raw-output "The special secret code is **SAPPHIRE**.<turn|>",
+       :depth-bin 2,
+       :decode-tok-s 47.02672122855069}
+      {:decode-ms 184.753017,
+       :seq-len 32768,
+       :key "OBSIDIAN-612",
+       :exact-match? false,
+       :elapsed-s 28.023300064,
+       :output-clean "The special secret code is **modern**",
+       :prefix-match? false,
+       :prompt-tokens 32104,
+       :prefill-ms 27542.211441,
+       :pass? false,
+       :depth 0.4,
+       :raw-output "The special secret code is **modern**<turn|>",
+       :depth-bin 3,
+       :decode-tok-s 48.7136835226891}
+      {:decode-ms 184.606906,
+       :seq-len 32768,
+       :key "PLATINUM-508",
+       :exact-match? false,
+       :elapsed-s 28.059837317,
+       :output-clean "The special secret code is **modern**",
+       :prefix-match? false,
+       :prompt-tokens 32104,
+       :prefill-ms 27570.655564,
+       :pass? false,
+       :depth 0.5,
+       :raw-output "The special secret code is **modern**<turn|>",
+       :depth-bin 4,
+       :decode-tok-s 48.752238987202354}
+      {:decode-ms 280.345145,
+       :seq-len 32768,
+       :key "TITANIUM-937",
+       :exact-match? false,
+       :elapsed-s 28.113877973,
+       :output-clean "The special secret code is **TITANIUM-93**.",
+       :prefix-match? true,
+       :prompt-tokens 32103,
+       :prefill-ms 27518.626584,
+       :pass? false,
+       :depth 0.6,
+       :raw-output
+       "The special secret code is **TITANIUM-93**.<turn|>",
+       :depth-bin 5,
+       :decode-tok-s 46.371411211704775}
+      {:decode-ms 183.420698,
+       :seq-len 32768,
+       :key "AMETHYST-246",
+       :exact-match? true,
+       :elapsed-s 28.074196766,
+       :output-clean "AMETHYST-246",
+       :prefix-match? true,
+       :prompt-tokens 32105,
+       :prefill-ms 27588.278017,
+       :pass? true,
+       :depth 0.7,
+       :raw-output "AMETHYST-246<turn|>",
+       :depth-bin 6,
+       :decode-tok-s 49.0675267193673}
+      {:decode-ms 206.896993,
+       :seq-len 32768,
+       :key "TURQUOISE-159",
+       :exact-match? false,
+       :elapsed-s 28.123541485,
+       :output-clean "The special secret code is **TURNS**.",
+       :prefix-match? false,
+       :prompt-tokens 32105,
+       :prefill-ms 27586.269832,
+       :pass? false,
+       :depth 0.8,
+       :raw-output "The special secret code is **TURNS**.<turn|>",
+       :depth-bin 7,
+       :decode-tok-s 48.33323024660876}
+      {:decode-ms 207.673849,
+       :seq-len 32768,
+       :key "DIAMOND-483",
+       :exact-match? false,
+       :elapsed-s 28.082645339,
+       :output-clean "The special secret code is **42**.",
+       :prefix-match? false,
+       :prompt-tokens 32103,
+       :prefill-ms 27540.848971,
+       :pass? false,
+       :depth 0.9,
+       :raw-output "The special secret code is **42**.<turn|>",
+       :depth-bin 8,
+       :decode-tok-s 48.15242770407747}
+      {:decode-ms 184.211593,
+       :seq-len 32768,
+       :key "MALACHITE-720",
+       :exact-match? false,
+       :elapsed-s 28.109577663,
+       :output-clean "The special secret code is MALACHITE",
+       :prefix-match? true,
+       :prompt-tokens 32103,
+       :prefill-ms 27572.455471,
+       :pass? false,
+       :depth 1.0,
+       :raw-output "The special secret code is MALACHITE<turn|>",
+       :depth-bin 9,
+       :decode-tok-s 48.85685994800556}]}],
+   :pass? false,
+   :total-prefix-passes 10,
+   :measured? true,
+   :all-pass? false},
   :criterion-3-1-pass? true,
   :criterion-3-3-pass? false,
   :qjl-bias 7.802982304042788E-5,
   :qjl-bias-pass? true,
   :multipl-e
   {:total-tasks 50,
-   :unfavorable-c 5,
+   :unfavorable-c 4,
    :model-evaluated? true,
-   :p-value 0.03125,
-   :favorable-b 0,
+   :p-value 0.34375,
+   :favorable-b 2,
    :harness-smoke-test-pass? true,
    :reason
-   "Paired McNemar exact test: b=0, c=5, p=0.0313 (statistically significant degradation below p=0.05 floor)",
+   "Paired McNemar exact test: b=2, c=4, p=0.3438 (4 regressions violate zero-regression pilot rule)",
    :ref-passed-tasks 48,
    :status :fail,
    :mcnemar
-   {:b 0,
-    :c 5,
-    :delta -0.1,
+   {:b 2,
+    :c 4,
+    :delta -0.04,
     :chi2 0.0,
-    :p-value 0.03125,
+    :p-value 0.34375,
     :significant? false,
     :exact? true},
    :pass? false,
-   :tq-passed 6,
-   :base-passed 11,
+   :tq-passed 8,
+   :base-passed 10,
    :measured? true,
    :ref-pass-rate 0.96},
   :multipl-e-pass? false,
   :multipl-e-harness-pass? true,
   :multipl-e-pass-rate 0.96,
-  :m-niah-pass? true,
+  :m-niah-pass? false,
   :gate3-pass? false},
  :gate4
  {:status :dropped-by-spec-amendment,
-  :wall-clock-seconds 467.881054448,
+  :wall-clock-seconds 20.806615356,
   :measured? false,
   :pass? false}}

@@ -611,7 +611,13 @@
          _group-size (quot num-heads num-kv-heads)
          rope-prop (double (or (:rope-proportion cfg) (if is-global? 0.25 1.0)))
          theta (double (or (:theta-base cfg) (if is-global? 1000000.0 10000.0)))
-         window (if is-global? nil (long (or (:sliding-window cfg) (:sliding-window config) (:sliding_window config) 512)))
+         tier2-eviction? (boolean (or (:tier2-eviction? config) (:tier2-eviction config) (:eviction? config)))
+         k-sink (long (or (:k-sink config) (:k_sink config) (if tier2-eviction? 4 0)))
+         eviction-window (long (or (:eviction-window config) (:sliding-window config) (:sliding_window config) 512))
+         window (cond
+                  (and is-global? tier2-eviction?) eviction-window
+                  is-global? nil
+                  :else (long (or (:sliding-window cfg) (:sliding-window config) (:sliding_window config) 512)))
          layer-seq-len (if window (min max-seq-len window) max-seq-len)
          ring-buffer? (boolean (and window (> max-seq-len window)))
 
@@ -622,6 +628,7 @@
          layer-is-int8? (and is-int8? (not skipped?))
          layer-is-int4? (and is-int4? (not skipped?))
          layer-is-ternary? (and is-ternary? (not skipped?))
+         q-len (long (or (:q-len config) (:chunk-size config) 1))
          use-w4a16? (boolean (and layer-is-int4?
                                   (if (some? (:use-w4a16-gemv config))
                                     (:use-w4a16-gemv config)
@@ -632,7 +639,7 @@
                                   (= (:kv-quant config) :turboquant)
                                   (= (:kv-quant config) :turbo-kv)))
 
-         k-scale (if is-global? 0.0625 0.125)
+         k-scale (double (or (:k-scale config) (if is-global? 0.0625 0.125)))
          actual-k-cache (if is-shared? shared-k [:k_cache_out i])
          actual-v-cache (if is-shared? shared-v [:v_cache_out i])]
 
@@ -640,13 +647,13 @@
       ;; 1. Pre-Attention RMSNorm
       [:rms-norm [:x_norm1 :b :p :d] [:h :b :p :d] [:input_ln_w :d] {:eps 1e-6}]
 
-      ;; 2. Q Projection & Reshape for single token
+      ;; 2. Q Projection & Reshape for single or chunked tokens
       (gemma4-linear-proj [:q_raw :b :p :qd] [:x_norm1 :b :p :d] [:q_w :qd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :q_scale norm-dtype proj-attrs)
-      [:reshape [:q_heads_raw :b :p :h :dh] [:q_raw :b :p :qd] {:shape [1 1 num-heads head-dim]}]
+      [:reshape [:q_heads_raw :b :p :h :dh] [:q_raw :b :p :qd] {:shape [1 q-len num-heads head-dim]}]
       [:rms-norm [:q_normed_4d :b :p :h :dh] [:q_heads_raw :b :p :h :dh] [:q_norm_w :dh] {:eps 1e-6}]
-      [:reshape [:q_normed_3d :b :p :qd] [:q_normed_4d :b :p :h :dh] {:shape [1 1 q-dim]}]
+      [:reshape [:q_normed_3d :b :p :qd] [:q_normed_4d :b :p :h :dh] {:shape [1 q-len q-dim]}]
       [:rope [:q_rope :b :p :qd] [:q_normed_3d :b :p :qd] {:head-dim head-dim :theta theta :rope-proportion rope-prop :pos :pos :max-seq-len max-seq-len}]
-      [:reshape [:q_ro :b :p :h :dh] [:q_rope :b :p :qd] {:shape [1 1 num-heads head-dim]}]
+      [:reshape [:q_ro :b :p :h :dh] [:q_rope :b :p :qd] {:shape [1 q-len num-heads head-dim]}]
 
       ;; 3. K, V Projections & Dynamic Cache Update (if not shared)
       (when-not is-shared?
@@ -654,50 +661,49 @@
          (gemma4-linear-proj [:k_raw :b :p :kvd] [:x_norm1 :b :p :d] [:k_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :k_scale norm-dtype proj-attrs)
          (gemma4-linear-proj [:v_raw :b :p :kvd] [:x_norm1 :b :p :d] [:v_w :kvd :d] layer-is-int8? layer-is-int4? layer-is-ternary? :v_scale norm-dtype proj-attrs)
          [:rms-norm [:v_normed :b :p :kvd] [:v_raw :b :p :kvd] {:eps 1e-6}]
-         [:reshape [:k_heads_raw :b :p :kvh :dh] [:k_raw :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
-         [:reshape [:v_heads :b :p :kvh :dh] [:v_normed :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
+         [:reshape [:k_heads_raw :b :p :kvh :dh] [:k_raw :b :p :kvd] {:shape [1 q-len num-kv-heads head-dim]}]
+         [:reshape [:v_heads :b :p :kvh :dh] [:v_normed :b :p :kvd] {:shape [1 q-len num-kv-heads head-dim]}]
          [:rms-norm [:k_normed_4d :b :p :kvh :dh] [:k_heads_raw :b :p :kvh :dh] [:k_norm_w :dh] {:eps 1e-6}]
-         [:reshape [:k_normed_3d :b :p :kvd] [:k_normed_4d :b :p :kvh :dh] {:shape [1 1 kv-dim]}]
+         [:reshape [:k_normed_3d :b :p :kvd] [:k_normed_4d :b :p :kvh :dh] {:shape [1 q-len kv-dim]}]
          [:rope [:k_rope :b :p :kvd] [:k_normed_3d :b :p :kvd] {:head-dim head-dim :theta theta :rope-proportion rope-prop :pos :pos :max-seq-len max-seq-len}]
-         [:reshape [:k_ro :b :p :kvh :dh] [:k_rope :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
+         [:reshape [:k_ro :b :p :kvh :dh] [:k_rope :b :p :kvd] {:shape [1 q-len num-kv-heads head-dim]}]
          (if turboquant?
            [:block {:name (keyword (str "tq_cache_update_" i))}
             [:turboquant-pack [[:k_ro_packed i] :b :p :kvh :pdh] [:k_ro :b :p :kvh :dh] {:scale k-scale}]
             [:turboquant-pack [[:v_heads_packed i] :b :p :kvh :pdh] [:v_heads :b :p :kvh :dh] {:scale 1.0}]
             [:dynamic-update-slice [[:k_cache_out i] :b :kvs :kvh :pdh] [[:k_cache_in i] :b :kvs :kvh :pdh] [[:k_ro_packed i] :b :p :kvh :pdh]
              (merge {:start-indices [0 :pos 0 0]}
-                    (when ring-buffer? {:window window}))]
+                    (when ring-buffer? {:window window :k-sink k-sink}))]
             [:dynamic-update-slice [[:v_cache_out i] :b :kvs :kvh :pdh] [[:v_cache_in i] :b :kvs :kvh :pdh] [[:v_heads_packed i] :b :p :kvh :pdh]
              (merge {:start-indices [0 :pos 0 0]}
-                    (when ring-buffer? {:window window}))]]
+                    (when ring-buffer? {:window window :k-sink k-sink}))]]
            [:block {:name :cache_update}
             [:dynamic-update-slice [[:k_cache_out i] :b :kvs :kvh :dh] [[:k_cache_in i] :b :kvs :kvh :dh] [:k_ro :b :p :kvh :dh]
              (merge {:start-indices [0 :pos 0 0]}
-                    (when ring-buffer? {:window window}))]
+                    (when ring-buffer? {:window window :k-sink k-sink}))]
             [:dynamic-update-slice [[:v_cache_out i] :b :kvs :kvh :dh] [[:v_cache_in i] :b :kvs :kvh :dh] [:v_heads :b :p :kvh :dh]
              (merge {:start-indices [0 :pos 0 0]}
-                    (when ring-buffer? {:window window}))]])])
+                    (when ring-buffer? {:window window :k-sink k-sink}))]])])
 
-      (when turboquant?
-        [:block {:name (keyword (str "tq_unpack_layer_" i))}
-         [:turboquant-unpack [[:k_unpacked i] :b :kvs :kvh :dh] [actual-k-cache :b :kvs :kvh :pdh] {:scale k-scale}]
-         [:turboquant-unpack [[:v_unpacked i] :b :kvs :kvh :dh] [actual-v-cache :b :kvs :kvh :pdh] {:scale 1.0}]])
-
-      ;; 4 & 5. Chunked Scaled Dot-Product Attention (Online Streaming Softmax)
+      ;; 4 & 5. Chunked Scaled Dot-Product Attention (Online Streaming Softmax with fused TurboQuant)
       [:chunked-attention [:ctx :b :p :h :dh]
        [:q_ro :b :p :h :dh]
-       [(if turboquant? [:k_unpacked i] actual-k-cache) :b :kvs :kvh :dh]
-       [(if turboquant? [:v_unpacked i] actual-v-cache) :b :kvs :kvh :dh]
+       [actual-k-cache :b :kvs :kvh (if turboquant? :pdh :dh)]
+       [actual-v-cache :b :kvs :kvh (if turboquant? :pdh :dh)]
        (merge {:pos :pos
                :chunk-size (min 64 layer-seq-len)
                :head-dim head-dim
                :num-heads num-heads
                :num-kv-heads num-kv-heads
                :max-seq-len layer-seq-len
-               :shape [1 1 num-heads head-dim]}
+               :shape [1 q-len num-heads head-dim]}
+              (when turboquant?
+                {:turboquant? true
+                 :k-scale k-scale
+                 :v-scale 1.0})
               (when ring-buffer? {:ring-buffer true :sliding-window window})
               (when (and window (not ring-buffer?)) {:sliding-window window}))]
-      [:reshape [:ctx_flat :b :p :qd] [:ctx :b :p :h :dh] {:shape [1 1 q-dim]}]
+      [:reshape [:ctx_flat :b :p :qd] [:ctx :b :p :h :dh] {:shape [1 q-len q-dim]}]
 
       ;; 6. Output Projection & Post-Attention RMSNorm
       (gemma4-linear-proj [:attn_raw :b :p :d] [:ctx_flat :b :p :qd] [:o_w :d :qd] layer-is-int8? layer-is-int4? layer-is-ternary? :o_scale norm-dtype proj-attrs)
@@ -744,6 +750,7 @@
         num-unshared (- num-layers num-kv-shared)
         has-shared-kv? (and (pos? num-unshared) (pos? num-kv-shared))
         max-seq-len (long (or max-seq-len 128))
+        q-len (long (or (:q-len cfg) (:chunk-size cfg) 1))
         hidden-dim (long (or hidden-dim 1536))
         pl-dim (long (or pl-dim 256))
         total-pl-dim (long (or total-pl-dim (* num-layers pl-dim)))
@@ -752,26 +759,26 @@
         last-unshared-sliding (when has-shared-kv? (last (filter #(not (layer-is-global? layer-types %)) (range num-unshared))))
         last-unshared-full (when has-shared-kv? (last (filter #(layer-is-global? layer-types %) (range num-unshared))))]
     [:block {:name :gemma4_kv_step_model}
-     ;; 1. Token Embedding Lookup for single token [1 1]
+     ;; 1. Token Embedding Lookup for single token [1 1] or chunk [1 q-len]
      [:gather [:tok_embed_raw :b :p :d] [:embed_tokens :v :d] [:x :b :p]]
      [:= [[:h 0] :b :p :d] {:scale (Math/sqrt (double hidden-dim))} [:tok_embed_raw :b :p :d]]
 
-     ;; 2. Gemma 4 Per-Layer Embedding (PLE) generation at p=1
+     ;; 2. Gemma 4 Per-Layer Embedding (PLE) generation at p=q-len
      (when has-ple?
        [:block {:name :ple_generation}
         [:gather [:raw_pl_tok :b :p :total_pl_dim] [:embed_tokens_per_layer :v :total_pl_dim] [:x :b :p]]
         [:= [:pl_tok_scaled :b :p :total_pl_dim] {:scale 16.0} [:raw_pl_tok :b :p :total_pl_dim]]
         [:= [:pl_context_raw :b :p :total_pl_dim] [[:h 0] :b :p :d] [:per_layer_model_projection :total_pl_dim :d]]
-        [:reshape [:pl_tok_4d :b :p :l :pld] [:pl_tok_scaled :b :p :total_pl_dim] {:shape [1 1 num-layers pl-dim]}]
-        [:reshape [:pl_context_4d :b :p :l :pld] [:pl_context_raw :b :p :total_pl_dim] {:shape [1 1 num-layers pl-dim]}]
+        [:reshape [:pl_tok_4d :b :p :l :pld] [:pl_tok_scaled :b :p :total_pl_dim] {:shape [1 q-len num-layers pl-dim]}]
+        [:reshape [:pl_context_4d :b :p :l :pld] [:pl_context_raw :b :p :total_pl_dim] {:shape [1 q-len num-layers pl-dim]}]
         [:rms-norm [:pl_context_norm :b :p :l :pld] [:pl_context_4d :b :p :l :pld] [:per_layer_projection_norm :pld] {:eps 1e-6}]
         [:= [:pl_sum :b :p :l :pld] [:pl_context_norm :b :p :l :pld]]
         [:= [:pl_sum :b :p :l :pld] [:pl_tok_4d :b :p :l :pld]]
         [:= [:ple_all :b :p :l :pld] {:scale (/ 1.0 (Math/sqrt 2.0))} [:pl_sum :b :p :l :pld]]
         (mapv (fn [i]
                 [:block {:name (keyword (str "ple_slice_block_" i))}
-                 [:slice [[:pl_slice i] :b :p :one :pld] [:ple_all :b :p :l :pld] {:start [0 0 i 0] :limit [1 1 (inc i) pl-dim]}]
-                 [:reshape [[:pl_in i] :b :p :pld] [[:pl_slice i] :b :p :one :pld] {:shape [1 1 pl-dim]}]])
+                 [:slice [[:pl_slice i] :b :p :one :pld] [:ple_all :b :p :l :pld] {:start [0 0 i 0] :limit [1 q-len (inc i) pl-dim]}]
+                 [:reshape [[:pl_in i] :b :p :pld] [[:pl_slice i] :b :p :one :pld] {:shape [1 q-len pl-dim]}]])
               (range num-layers))])
 
      ;; 3. Sequential Transformer Layer Blocks with KV Cache
@@ -794,11 +801,18 @@
      ;; 4. Final RMSNorm
      [:rms-norm [:normed :b :p :d] [[:h num-layers] :b :p :d] [:final_norm_w :d] {:eps 1e-6}]
 
-     ;; 5. Tied LM Head (single token logits [1 1 vocab-size])
-     [:= [:logits :b :p :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
-                              {:softcap (double final-logit-softcap)}
-                              {})
-      [:normed :b :p :d] [:embed_tokens :v :d]]]))
+     ;; 5. Tied LM Head (single token or last-token logits [1 1 vocab-size])
+     (if (and (> q-len 1) (:last-token-only? cfg))
+       [:block {:name :last_token_logits}
+        [:slice [:normed_last :b :one :d] [:normed :b :p :d] {:start [0 (dec q-len) 0] :limit [1 q-len hidden-dim]}]
+        [:= [:logits :b :one :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
+                                   {:softcap (double final-logit-softcap)}
+                                   {})
+         [:normed_last :b :one :d] [:embed_tokens :v :d]]]
+       [:= [:logits :b :p :v] (if (and (number? final-logit-softcap) (pos? final-logit-softcap))
+                                {:softcap (double final-logit-softcap)}
+                                {})
+        [:normed :b :p :d] [:embed_tokens :v :d]])]))
 
 ;; ==============================================================================
 ;; 2. Canonical Signature Builders (Invars and Outvars)
@@ -968,10 +982,14 @@
         num-layers (long (or num-layers 35))
         num-kv-shared (long (or num-kv-shared-layers 0))
         num-unshared (- num-layers num-kv-shared)
+        tier2? (boolean (or (:tier2-eviction? config) (:tier2-eviction config) (:eviction? config)))
         kv-invars (mapcat (fn [i]
                             (let [cfg (if (seq layer-configs) (nth layer-configs i nil) nil)
                                   is-global? (if cfg (:is-global? cfg) (layer-is-global? layer-types i))
-                                  win (when-not is-global? (or (:sliding-window cfg) (:sliding-window config) (:sliding_window config) 512))
+                                  win (cond
+                                        (and is-global? tier2?) (long (or (:eviction-window config) 512))
+                                        (not is-global?) (or (:sliding-window cfg) (:sliding-window config) (:sliding_window config) 512)
+                                        :else nil)
                                   seq-l (if win (min max-seq-len win) max-seq-len)
                                   h-dim (long (or (:head-dim cfg) (if is-global? 512 256)))
                                   n-kv (long (or (:num-kv-heads cfg) 1))]
@@ -981,8 +999,9 @@
                                 [[(keyword (str "k_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]
                                  [(keyword (str "v_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]])))
                           (range num-unshared))
+        q-len (long (or (:q-len config) (:chunk-size config) 1))
         weight-invars (subvec (build-tensor-logic-invars (assoc config :last-token-only? true) max-seq-len) 2)]
-    (vec (concat [[:x [:tensor [1 1] :i32]]
+    (vec (concat [[:x [:tensor [1 q-len] :i32]]
                   [:pos [:tensor [1] :i32]]]
                  kv-invars
                  weight-invars))))

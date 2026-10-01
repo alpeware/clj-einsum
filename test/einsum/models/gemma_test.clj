@@ -769,6 +769,108 @@
                       max-diff (reduce max 0.0 (map #(Math/abs (double (- %1 %2))) arr-std arr-chunk))]
                   (< max-diff 1e-4))))
 
+(defspec prop-fused-turboquant-attention-parity 10
+  (prop/for-all [max-seq-len (gen/elements [64 128])
+                 chunk-size (gen/elements [32 64])
+                 num-heads (gen/elements [4 8])
+                 num-kv-heads (gen/elements [1 2])
+                 head-dim (gen/elements [32 64])
+                 k-scale (gen/elements [0.0625 0.125 1.0])
+                 pos-idx (gen/choose 0 63)]
+                (let [pos (min pos-idx (dec max-seq-len))
+                      group-size (quot num-heads num-kv-heads)
+                      num-heads (* num-kv-heads group-size)
+                      packed-dim (quot head-dim 4)
+                      invars [[:pos [:tensor [1] :i32]]
+                              [:q_ro [:tensor [1 1 num-heads head-dim] :f32]]
+                              [:k_cache [:tensor [1 max-seq-len num-kv-heads packed-dim] :i8]]
+                              [:v_cache [:tensor [1 max-seq-len num-kv-heads packed-dim] :i8]]]
+                      ast-unfused [:block {:name :unfused_tq_block}
+                                   [:turboquant-unpack [:k_unpacked :b :kvs :kvh :dh] [:k_cache :b :kvs :kvh :pdh] {:scale k-scale}]
+                                   [:turboquant-unpack [:v_unpacked :b :kvs :kvh :dh] [:v_cache :b :kvs :kvh :pdh] {:scale 1.0}]
+                                   [:chunked-attention [:ctx :b :p :h :dh]
+                                    [:q_ro :b :p :h :dh]
+                                    [:k_unpacked :b :kvs :kvh :dh]
+                                    [:v_unpacked :b :kvs :kvh :dh]
+                                    {:pos :pos
+                                     :chunk-size chunk-size
+                                     :head-dim head-dim
+                                     :num-heads num-heads
+                                     :num-kv-heads num-kv-heads
+                                     :max-seq-len max-seq-len
+                                     :shape [1 1 num-heads head-dim]}]]
+                      ast-fused [:block {:name :fused_tq_block}
+                                 [:chunked-attention [:ctx :b :p :h :dh]
+                                  [:q_ro :b :p :h :dh]
+                                  [:k_cache :b :kvs :kvh :pdh]
+                                  [:v_cache :b :kvs :kvh :pdh]
+                                  {:pos :pos
+                                   :chunk-size chunk-size
+                                   :head-dim head-dim
+                                   :num-heads num-heads
+                                   :num-kv-heads num-kv-heads
+                                   :max-seq-len max-seq-len
+                                   :shape [1 1 num-heads head-dim]
+                                   :turboquant? true
+                                   :k-scale k-scale
+                                   :v-scale 1.0}]]
+                      g-unfused (lower/ast->graph "test_tq_unfused" invars ast-unfused [:ctx])
+                      g-fused (lower/ast->graph "test_tq_fused" invars ast-fused [:ctx])
+                      ctx (xla/init-cpu!)
+                      exec-unfused (xla/compile-graph ctx g-unfused)
+                      exec-fused (xla/compile-graph ctx g-fused)
+                      pos-buf (xla/buffer-from-host-buffer (int-array [pos]) [1] 4)
+                      q-data (float-array (* 1 1 num-heads head-dim))
+                      _ (dotimes [i (count q-data)] (aset q-data i (float (Math/sin (double (inc i))))))
+                      q-buf (xla/buffer-from-host-buffer q-data [1 1 num-heads head-dim] 11)
+                      k-len (* 1 max-seq-len num-kv-heads packed-dim)
+                      k-bytes (byte-array k-len)
+                      v-bytes (byte-array k-len)
+                      _ (dotimes [i k-len]
+                          (aset-byte k-bytes i (unchecked-byte (mod (+ (* i 7) 13) 256)))
+                          (aset-byte v-bytes i (unchecked-byte (mod (+ (* i 11) 23) 256))))
+                      k-buf (xla/buffer-from-host-buffer k-bytes [1 max-seq-len num-kv-heads packed-dim] 2)
+                      v-buf (xla/buffer-from-host-buffer v-bytes [1 max-seq-len num-kv-heads packed-dim] 2)
+                      res-unfused (xla/execute exec-unfused [pos-buf q-buf k-buf v-buf])
+                      res-fused (xla/execute exec-fused [pos-buf q-buf k-buf v-buf])
+                      n-elem (* 1 1 num-heads head-dim)
+                      arr-unfused (pjrt/buffer-to-host-buffer ctx res-unfused n-elem :f32)
+                      arr-fused (pjrt/buffer-to-host-buffer ctx res-fused n-elem :f32)
+                      max-diff (reduce max 0.0 (map #(Math/abs (double (- %1 %2))) arr-unfused arr-fused))]
+                  (< max-diff 1e-3))))
+
+(defspec prop-turboquant-pack-unpack-cosine-similarity 10
+  (prop/for-all [d (gen/elements [64 128 256])
+                 seed (gen/choose 1 1000)]
+                (let [_pd (quot d 4)
+                      invars [[:x [:tensor [1 d] :f32]]]
+                      ast [:block {:name :tq_pack_unpack_block}
+                           [:turboquant-pack [:packed :b :pd] [:x :b :d] {:scale 1.0}]
+                           [:turboquant-unpack [:recon :b :d] [:packed :b :pd] {:scale 1.0}]]
+                      g (lower/ast->graph "test_tq_pack_unpack" invars ast [:recon])
+                      ctx (xla/init-cpu!)
+                      exec (xla/compile-graph ctx g)
+                      rng (java.util.Random. seed)
+                      x-data (float-array d)
+                      _ (dotimes [i d] (aset x-data i (float (.nextGaussian rng))))
+                      x-buf (xla/buffer-from-host-buffer x-data [1 d] 11)
+                      res (xla/execute exec [x-buf])
+                      recon-data (pjrt/buffer-to-host-buffer ctx res d :f32)
+                      dot (loop [i 0 acc 0.0]
+                            (if (< i d)
+                              (recur (inc i) (+ acc (* (double (aget x-data i)) (double (aget recon-data i)))))
+                              acc))
+                      norm-x (Math/sqrt (loop [i 0 acc 0.0]
+                                          (if (< i d)
+                                            (recur (inc i) (+ acc (* (double (aget x-data i)) (double (aget x-data i)))))
+                                            acc)))
+                      norm-r (Math/sqrt (loop [i 0 acc 0.0]
+                                          (if (< i d)
+                                            (recur (inc i) (+ acc (* (double (aget recon-data i)) (double (aget recon-data i)))))
+                                            acc)))
+                      cos-sim (/ dot (* norm-x norm-r))]
+                  (>= cos-sim 0.85))))
+
 (defspec prop-sliding-window-ring-buffer-parity 10
   (prop/for-all [window (gen/elements [16 32])
                  mult (gen/elements [2 3])
@@ -832,6 +934,32 @@
                       arr-ring (pjrt/buffer-to-host-buffer ctx res-ring n-elem :f32)
                       max-diff (reduce max 0.0 (map #(Math/abs (double (- %1 %2))) arr-std arr-ring))]
                   (< max-diff 1e-4))))
+
+(defspec prop-dynamic-update-slice-sink-pinning 10
+  (prop/for-all [window (gen/elements [16 32])
+                 k-sink (gen/elements [2 4])
+                 pos (gen/choose 0 95)]
+                (let [invars [[:cache [:tensor [1 window] :i32]]
+                              [:up [:tensor [1 1] :i32]]
+                              [:pos [:tensor [1] :i32]]]
+                      ast [:block {:name :update_block}
+                           [:dynamic-update-slice [:out :b :s] [:cache :b :s] [:up :b :one]
+                            {:start-indices [0 :pos] :window window :k-sink k-sink}]]
+                      g (lower/ast->graph "test_sink_update" invars ast [:out])
+                      ctx (xla/init-cpu!)
+                      exec (xla/compile-graph ctx g)
+                      cache-arr (int-array window -1)
+                      up-arr (int-array [pos])
+                      pos-arr (int-array [pos])
+                      c-buf (xla/buffer-from-host-buffer cache-arr [1 window] 4)
+                      u-buf (xla/buffer-from-host-buffer up-arr [1 1] 4)
+                      p-buf (xla/buffer-from-host-buffer pos-arr [1] 4)
+                      res (xla/execute exec [c-buf u-buf p-buf])
+                      out-arr (pjrt/buffer-to-host-buffer ctx res window :i32)
+                      expected-slot (if (< pos window)
+                                      pos
+                                      (+ k-sink (mod (- pos k-sink) (- window k-sink))))]
+                  (= (aget out-arr expected-slot) pos))))
 
 (defspec prop-gemma4-prefill-ring-buffer-shapes 10
   (prop/for-all [window (gen/elements [8 16])

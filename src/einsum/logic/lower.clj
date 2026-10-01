@@ -427,6 +427,7 @@
         up-name (first up-term)
         starts (or (:start_indices attrs) (:start-indices attrs) [0 0 0 0])
         window (:window attrs)
+        k-sink (long (or (:k-sink attrs) (:k_sink attrs) 0))
         actual-starts (if (and window (some keyword? starts))
                         (let [c-win (gen-id "c_win" counter)
                               c-win-eqn {:op :stablehlo/constant :value (int window) :type [:tensor [] :i32] :outvars [c-win]}
@@ -434,14 +435,48 @@
                               c-win-1d-eqn {:op :stablehlo/broadcast_in_dim :invars [c-win] :outvars [c-win-1d]
                                             :attrs {:broadcast_dimensions [] :target_shape [1]}}
                               _ (swap! eqns-atom conj c-win-eqn c-win-1d-eqn)]
-                          (mapv (fn [idx]
-                                  (if (keyword? idx)
-                                    (let [mod-var (gen-id "slot_mod" counter)
-                                          mod-eqn {:op :stablehlo/remainder :invars [idx c-win-1d] :outvars [mod-var]}]
-                                      (swap! eqns-atom conj mod-eqn)
-                                      mod-var)
-                                    idx))
-                                starts))
+                          (if (and (pos? k-sink) (> window k-sink))
+                            (let [c-sink (gen-id "c_sink" counter)
+                                  c-sink-eqn {:op :stablehlo/constant :value (int k-sink) :type [:tensor [] :i32] :outvars [c-sink]}
+                                  c-sink-1d (gen-id "c_sink_1d" counter)
+                                  c-sink-1d-eqn {:op :stablehlo/broadcast_in_dim :invars [c-sink] :outvars [c-sink-1d]
+                                                 :attrs {:broadcast_dimensions [] :target_shape [1]}}
+
+                                  c-mod (gen-id "c_mod" counter)
+                                  c-mod-eqn {:op :stablehlo/constant :value (int (- window k-sink)) :type [:tensor [] :i32] :outvars [c-mod]}
+                                  c-mod-1d (gen-id "c_mod_1d" counter)
+                                  c-mod-1d-eqn {:op :stablehlo/broadcast_in_dim :invars [c-mod] :outvars [c-mod-1d]
+                                                :attrs {:broadcast_dimensions [] :target_shape [1]}}
+                                  _ (swap! eqns-atom conj c-sink-eqn c-sink-1d-eqn c-mod-eqn c-mod-1d-eqn)]
+                              (mapv (fn [idx]
+                                      (if (keyword? idx)
+                                        (let [cmp-ge (gen-id "slot_cmp" counter)
+                                              cmp-eqn {:op :stablehlo/compare :invars [idx c-win-1d] :outvars [cmp-ge]
+                                                       :attrs {:comparison_direction "GE"}}
+
+                                              pos-sub (gen-id "slot_sub" counter)
+                                              sub-eqn {:op :stablehlo/subtract :invars [idx c-sink-1d] :outvars [pos-sub]}
+
+                                              mod-var (gen-id "slot_mod" counter)
+                                              mod-eqn {:op :stablehlo/remainder :invars [pos-sub c-mod-1d] :outvars [mod-var]}
+
+                                              roll-slot (gen-id "slot_roll" counter)
+                                              roll-eqn {:op :stablehlo/add :invars [c-sink-1d mod-var] :outvars [roll-slot]}
+
+                                              act-slot (gen-id "slot_act" counter)
+                                              act-eqn {:op :stablehlo/select :invars [cmp-ge roll-slot idx] :outvars [act-slot]}]
+                                          (swap! eqns-atom conj cmp-eqn sub-eqn mod-eqn roll-eqn act-eqn)
+                                          act-slot)
+                                        idx))
+                                    starts))
+                            (mapv (fn [idx]
+                                    (if (keyword? idx)
+                                      (let [mod-var (gen-id "slot_mod" counter)
+                                            mod-eqn {:op :stablehlo/remainder :invars [idx c-win-1d] :outvars [mod-var]}]
+                                        (swap! eqns-atom conj mod-eqn)
+                                        mod-var)
+                                      idx))
+                                  starts)))
                         starts)
         update-eqn {:op :stablehlo/dynamic_update_slice
                     :invars [op-name up-name]
@@ -692,18 +727,179 @@
      (swap! eqns-atom conj max-eqn max-bcast-eqn diff-eqn exp-eqn sum-eqn log-sum-eqn log-sum-bcast-eqn sub-eqn)
      (when needs-f32? (swap! eqns-atom conj conv-out-eqn)))))
 
+(def ^:private hadamard-matrix-base
+  (memoize
+   (fn [n]
+     (loop [h [[1.0]]]
+       (if (= (count h) n)
+         h
+         (let [top (mapv (fn [row] (into row row)) h)
+               bot (mapv (fn [row] (into row (mapv - row))) h)]
+           (recur (into top bot))))))))
+
+(defn- hadamard-matrix-scaled [n scale]
+  (let [base (hadamard-matrix-base n)]
+    (if (== (double scale) 1.0)
+      (vec (flatten base))
+      (let [s (double scale)]
+        (mapv (fn [v] (float (* v s))) (flatten base))))))
+
+(defn- lower-fwht!
+  ([eqns-atom counter head in-term attrs final-out-var known-shapes]
+   (lower-fwht! eqns-atom counter head in-term attrs final-out-var known-shapes nil))
+  ([eqns-atom counter _head in-term attrs final-out-var known-shapes dtype]
+   (let [in-name (first in-term)
+         shape (get known-shapes in-name)
+         rank (count shape)
+         raw-axis (long (or (:axis attrs) (dec rank)))
+         axis (if (neg? raw-axis) (+ rank raw-axis) raw-axis)
+         d (nth shape axis)
+         k (long (/ (Math/log d) (Math/log 2)))
+         _ (assert (= d (bit-shift-left 1 k)) (str "FWHT dimension must be a power of 2, got: " d))
+         leading-dims (subvec (vec shape) 0 axis)
+         batch-size (long (reduce * 1 leading-dims))
+         r-in (gen-id "t_fwht_in" counter)
+         r-in-eqn {:op :stablehlo/reshape
+                   :invars [in-name]
+                   :outvars [r-in]
+                   :attrs {:shape [batch-size d]}}
+         normalized? (get attrs :normalized? true)
+         scale (double (if normalized?
+                         (or (:fwht-scale attrs) (/ 1.0 (Math/sqrt (double d))))
+                         1.0))
+         target-dt (or dtype :bf16)
+         consts-cache (:constants (meta eqns-atom))
+         cache-key [:hadamard d target-dt scale]
+         c-h (if (and consts-cache (get @consts-cache cache-key))
+               (get @consts-cache cache-key)
+               (let [h-vals (hadamard-matrix-scaled d scale)
+                     v (gen-id "c_had_mat" counter)
+                     eqn {:op :stablehlo/constant :value h-vals :type [:tensor [d d] target-dt] :outvars [v]}]
+                 (swap! eqns-atom conj eqn)
+                 (when consts-cache (swap! consts-cache assoc cache-key v))
+                 v))
+         dot-out (gen-id "t_fwht_dot" counter)
+         dot-eqn {:op :stablehlo/dot_general
+                  :invars [r-in c-h]
+                  :outvars [dot-out]
+                  :attrs {:batch_dims {:lhs [] :rhs []}
+                          :contracting_dims {:lhs [1] :rhs [0]}}}
+         out-reshape-eqn {:op :stablehlo/reshape
+                          :invars [dot-out]
+                          :outvars [final-out-var]
+                          :attrs {:shape (vec shape)}}]
+     (swap! eqns-atom conj r-in-eqn dot-eqn out-reshape-eqn))))
+
+(defn- lower-turboquant-dequant-tensor!
+  "Dequantizes a packed TurboQuant int8 tensor of shape [1 num-chunks chunk-size num-kv-heads packed-dim]
+   elementwise using Lloyd-Max polynomial x * (0.89293333 + 0.05066667 * x^2), returning a tensor of
+   shape [1 num-chunks chunk-size num-kv-heads head-dim] with norm-dtype.
+   Fuses directly into chunked attention dot_general tile without standalone buffer materialization."
+  [eqns-atom counter in-var shape norm-dtype]
+  (let [rank (count shape)
+        last-dim (last shape)
+        head-dim (* (long last-dim) 4)
+        leading-dims (subvec (vec shape) 0 (dec rank))
+        out-shape (conj leading-dims head-dim)
+        slice-shape (conj leading-dims last-dim 1)
+
+        c-03 (gen-id "c_tq_03" counter)
+        c-2  (gen-id "c_tq_2" counter)
+        c-4  (gen-id "c_tq_4" counter)
+        c-6  (gen-id "c_tq_6" counter)
+
+        c-03-eqn {:op :stablehlo/constant :value (int 3) :type [:tensor [] :i8] :outvars [c-03]}
+        c-2-eqn  {:op :stablehlo/constant :value (int 2) :type [:tensor [] :i8] :outvars [c-2]}
+        c-4-eqn  {:op :stablehlo/constant :value (int 4) :type [:tensor [] :i8] :outvars [c-4]}
+        c-6-eqn  {:op :stablehlo/constant :value (int 6) :type [:tensor [] :i8] :outvars [c-6]}
+
+        c-15 (gen-id "c_tq_15" counter)
+        c-a  (gen-id "c_tq_a" counter)
+        c-b  (gen-id "c_tq_b" counter)
+        c-15-eqn {:op :stablehlo/constant :value (float 1.5) :type [:tensor [] norm-dtype] :outvars [c-15]}
+        c-a-eqn  {:op :stablehlo/constant :value (float 0.89293333) :type [:tensor [] norm-dtype] :outvars [c-a]}
+        c-b-eqn  {:op :stablehlo/constant :value (float 0.05066667) :type [:tensor [] norm-dtype] :outvars [c-b]}
+
+        decode-slice (fn [raw-code prefix]
+                       (let [flt (gen-id (str prefix "_flt") counter)
+                             flt-eqn {:op :stablehlo/convert :invars [raw-code] :outvars [flt] :attrs {:target-dtype norm-dtype}}
+                             x (gen-id (str prefix "_x") counter)
+                             x-eqn {:op :stablehlo/subtract :invars [flt c-15] :outvars [x]}
+                             x2 (gen-id (str prefix "_x2") counter)
+                             x2-eqn {:op :stablehlo/multiply :invars [x x] :outvars [x2]}
+                             bx2 (gen-id (str prefix "_bx2") counter)
+                             bx2-eqn {:op :stablehlo/multiply :invars [x2 c-b] :outvars [bx2]}
+                             ab (gen-id (str prefix "_ab") counter)
+                             ab-eqn {:op :stablehlo/add :invars [c-a bx2] :outvars [ab]}
+                             val (gen-id (str prefix "_val") counter)
+                             val-eqn {:op :stablehlo/multiply :invars [x ab] :outvars [val]}
+                             sl (gen-id (str prefix "_sl") counter)
+                             sl-eqn {:op :stablehlo/reshape :invars [val] :outvars [sl] :attrs {:shape slice-shape}}]
+                         [sl [flt-eqn x-eqn x2-eqn bx2-eqn ab-eqn val-eqn sl-eqn]]))
+
+        ;; Slice 0: (codes & 0x03)
+        s0-code (gen-id "t_tq_s0_code" counter)
+        s0-eqn {:op :stablehlo/and :invars [in-var c-03] :outvars [s0-code]}
+        [s0-sl s0-eqns] (decode-slice s0-code "t_tq_s0")
+
+        ;; Slice 1: ((codes >> 2) & 0x03)
+        s1-sh (gen-id "t_tq_s1_sh" counter)
+        s1-sh-eqn {:op :stablehlo/shift_right_logical :invars [in-var c-2] :outvars [s1-sh]}
+        s1-code (gen-id "t_tq_s1_code" counter)
+        s1-eqn {:op :stablehlo/and :invars [s1-sh c-03] :outvars [s1-code]}
+        [s1-sl s1-eqns] (decode-slice s1-code "t_tq_s1")
+
+        ;; Slice 2: ((codes >> 4) & 0x03)
+        s2-sh (gen-id "t_tq_s2_sh" counter)
+        s2-sh-eqn {:op :stablehlo/shift_right_logical :invars [in-var c-4] :outvars [s2-sh]}
+        s2-code (gen-id "t_tq_s2_code" counter)
+        s2-eqn {:op :stablehlo/and :invars [s2-sh c-03] :outvars [s2-code]}
+        [s2-sl s2-eqns] (decode-slice s2-code "t_tq_s2")
+
+        ;; Slice 3: ((codes >> 6) & 0x03)
+        s3-sh (gen-id "t_tq_s3_sh" counter)
+        s3-sh-eqn {:op :stablehlo/shift_right_logical :invars [in-var c-6] :outvars [s3-sh]}
+        s3-code (gen-id "t_tq_s3_code" counter)
+        s3-eqn {:op :stablehlo/and :invars [s3-sh c-03] :outvars [s3-code]}
+        [s3-sl s3-eqns] (decode-slice s3-code "t_tq_s3")
+
+        concat-dim (dec (count slice-shape))
+        cat-var (gen-id "t_tq_cat" counter)
+        cat-eqn {:op :stablehlo/concatenate :invars [s0-sl s1-sl s2-sl s3-sl] :outvars [cat-var]
+                 :attrs {:dimension concat-dim}}
+        reshaped-z (gen-id "t_tq_z_hat" counter)
+        reshaped-eqn {:op :stablehlo/reshape :invars [cat-var] :outvars [reshaped-z] :attrs {:shape out-shape}}
+
+        unpack-eqns (vec (concat [c-03-eqn c-2-eqn c-4-eqn c-6-eqn c-15-eqn c-a-eqn c-b-eqn
+                                  s0-eqn]
+                                 s0-eqns
+                                 [s1-sh-eqn s1-eqn]
+                                 s1-eqns
+                                 [s2-sh-eqn s2-eqn]
+                                 s2-eqns
+                                 [s3-sh-eqn s3-eqn]
+                                 s3-eqns
+                                 [cat-eqn reshaped-eqn]))]
+    (swap! eqns-atom into unpack-eqns)
+    reshaped-z))
+
 (defn- lower-chunked-attention!
   "Lowers chunked attention with online streaming softmax across tiled sequence chunks.
    Prevents exceeding the 64 KB Local Data Share (LDS) hardware limit on OpenXLA ROCm.
-   Mathematically identical to causal softmax attention with O(1) shared memory scaling."
+   Mathematically identical to causal softmax attention with O(1) shared memory scaling.
+   Supports :turboquant? true with fused Lloyd-Max dequantization and FWHT query/context transforms."
   [eqns-atom counter _head q-term k-term v-term attrs final-out-var known-shapes default-dtype]
   (let [q-name (first q-term)
         k-name (first k-term)
         v-name (first v-term)
+        turboquant? (boolean (:turboquant? attrs))
+        k-scale (double (or (:k-scale attrs) 1.0))
+        v-scale (double (or (:v-scale attrs) 1.0))
         q-shape (get known-shapes q-name [1 1 8 256])
-        k-shape (get known-shapes k-name [1 128 1 256])
-        max-seq-len (long (or (:max-seq-len attrs) (nth k-shape 1 128)))
         head-dim (long (or (:head-dim attrs) (nth q-shape 3 256)))
+        packed-dim (quot head-dim 4)
+        k-shape (get known-shapes k-name [1 128 1 (if turboquant? packed-dim head-dim)])
+        max-seq-len (long (or (:max-seq-len attrs) (nth k-shape 1 128)))
         num-heads (long (or (:num-heads attrs) (nth q-shape 2 8)))
         num-kv-heads (long (or (:num-kv-heads attrs) (nth k-shape 2 1)))
         group-size (quot num-heads num-kv-heads)
@@ -720,14 +916,42 @@
         dtype (or default-dtype :f32)
         is-f32? (= dtype :f32)
 
-        ;; 1. Reshape K, V to [1 num_chunks chunk_size num_kv_heads head_dim]
-        k-chunked (gen-id "k_chunked" counter)
-        v-chunked (gen-id "v_chunked" counter)
-        k-chunk-eqn {:op :stablehlo/reshape :invars [k-name] :outvars [k-chunked]
-                     :attrs {:shape [1 num-chunks chunk-size num-kv-heads head-dim]}}
-        v-chunk-eqn {:op :stablehlo/reshape :invars [v-name] :outvars [v-chunked]
-                     :attrs {:shape [1 num-chunks chunk-size num-kv-heads head-dim]}}
-        _ (swap! eqns-atom conj k-chunk-eqn v-chunk-eqn)
+        ;; 0. If turboquant?, transform Q via normalized FWHT and apply k-scale fused:
+        ;; Q' = FWHT(Q) / sqrt(d) * k-scale
+        q-eff (if turboquant?
+                (let [q-fwht (gen-id "q_fwht" counter)
+                      scale-val (if (== k-scale 1.0)
+                                  (/ 1.0 (Math/sqrt (double head-dim)))
+                                  (* (/ 1.0 (Math/sqrt (double head-dim))) (double k-scale)))]
+                  (lower-fwht! eqns-atom counter nil [q-name] {:normalized? true :fwht-scale scale-val} q-fwht (assoc known-shapes q-name q-shape) dtype)
+                  q-fwht)
+                q-name)
+
+        ;; 1. Reshape K, V to [1 num_chunks chunk_size num_kv_heads (if turboquant? packed-dim head-dim)]
+        ;; and if turboquant?, dequantize elementwise directly into chunked head-dim tile:
+        k-chunked (if turboquant?
+                    (let [k-ch-p (gen-id "k_chunked_p" counter)
+                          k-ch-eqn {:op :stablehlo/reshape :invars [k-name] :outvars [k-ch-p]
+                                    :attrs {:shape [1 num-chunks chunk-size num-kv-heads packed-dim]}}]
+                      (swap! eqns-atom conj k-ch-eqn)
+                      (lower-turboquant-dequant-tensor! eqns-atom counter k-ch-p [1 num-chunks chunk-size num-kv-heads packed-dim] dtype))
+                    (let [k-ch (gen-id "k_chunked" counter)
+                          k-ch-eqn {:op :stablehlo/reshape :invars [k-name] :outvars [k-ch]
+                                    :attrs {:shape [1 num-chunks chunk-size num-kv-heads head-dim]}}]
+                      (swap! eqns-atom conj k-ch-eqn)
+                      k-ch))
+
+        v-chunked (if turboquant?
+                    (let [v-ch-p (gen-id "v_chunked_p" counter)
+                          v-ch-eqn {:op :stablehlo/reshape :invars [v-name] :outvars [v-ch-p]
+                                    :attrs {:shape [1 num-chunks chunk-size num-kv-heads packed-dim]}}]
+                      (swap! eqns-atom conj v-ch-eqn)
+                      (lower-turboquant-dequant-tensor! eqns-atom counter v-ch-p [1 num-chunks chunk-size num-kv-heads packed-dim] dtype))
+                    (let [v-ch (gen-id "v_chunked" counter)
+                          v-ch-eqn {:op :stablehlo/reshape :invars [v-name] :outvars [v-ch]
+                                    :attrs {:shape [1 num-chunks chunk-size num-kv-heads head-dim]}}]
+                      (swap! eqns-atom conj v-ch-eqn)
+                      v-ch))
 
         ;; 2. Broadcast KV heads if group-size > 1
         k-heads (if (> group-size 1)
@@ -762,20 +986,25 @@
                     (swap! eqns-atom conj rs-eqn)
                     vh))
 
+        q-len (long (nth q-shape 1 1))
+
         ;; 3. Chunked Q @ K^T:
-        ;; q-name: [1 1 num-heads head-dim]
+        ;; q-eff: [1 q-len num-heads head-dim]
         ;; k-heads: [1 num-chunks chunk-size num-heads head-dim]
-        ;; Output: [1 num-heads 1 num-chunks chunk-size]
+        ;; Output: [1 num-heads q-len num-chunks chunk-size]
         chunk-scores (gen-id "c_scores" counter)
         dot-qk-eqn {:op :stablehlo/dot_general
-                    :invars [q-name k-heads]
+                    :invars [q-eff k-heads]
                     :outvars [chunk-scores]
                     :attrs {:batch_dims {:lhs [0 2] :rhs [0 3]}
                             :contracting_dims {:lhs [3] :rhs [4]}}}
         scores-5d (gen-id "scores_5d" counter)
-        rs-s-eqn {:op :stablehlo/reshape :invars [chunk-scores] :outvars [scores-5d]
-                  :attrs {:shape [1 num-heads num-chunks 1 chunk-size]}}
-        _ (swap! eqns-atom conj dot-qk-eqn rs-s-eqn)
+        s-eqn (if (= q-len 1)
+                {:op :stablehlo/reshape :invars [chunk-scores] :outvars [scores-5d]
+                 :attrs {:shape [1 num-heads num-chunks 1 chunk-size]}}
+                {:op :stablehlo/transpose :invars [chunk-scores] :outvars [scores-5d]
+                 :attrs {:permutation [0 1 3 2 4]}})
+        _ (swap! eqns-atom conj dot-qk-eqn s-eqn)
 
         ;; 4. Convert scores to f32 if not f32
         f32-scores (if is-f32?
@@ -786,22 +1015,48 @@
                        (swap! eqns-atom conj conv-eqn)
                        s-f32))
 
-        ;; 5. Causal Mask Generation in 5D [1 1 num-chunks 1 chunk-size]
+        ;; 5. Causal Mask Generation in 5D [1 1 num-chunks q-len chunk-size]
         iota-seq (gen-id "iota_seq" counter)
         iota-eqn {:op :stablehlo/iota :outvars [iota-seq]
                   :attrs {:len max-seq-len :dtype :i32 :iota_dimension 0}}
-        iota-5d (gen-id "iota_5d" counter)
-        iota-rs-eqn {:op :stablehlo/reshape :invars [iota-seq] :outvars [iota-5d]
-                     :attrs {:shape [1 1 num-chunks 1 chunk-size]}}
+        iota-base (gen-id "iota_base" counter)
+        iota-base-eqn {:op :stablehlo/reshape :invars [iota-seq] :outvars [iota-base]
+                       :attrs {:shape [1 1 num-chunks 1 chunk-size]}}
+        _ (swap! eqns-atom conj iota-eqn iota-base-eqn)
+
+        iota-5d (if (= q-len 1)
+                  iota-base
+                  (let [v (gen-id "iota_5d" counter)
+                        eqn {:op :stablehlo/broadcast_in_dim :invars [iota-base] :outvars [v]
+                             :attrs {:broadcast_dimensions [0 1 2 3 4] :target_shape [1 1 num-chunks q-len chunk-size]}}]
+                    (swap! eqns-atom conj eqn)
+                    v))
         pos-scalar (gen-id "pos_s" counter)
         pos-s-eqn {:op :stablehlo/reshape :invars [pos-var] :outvars [pos-scalar] :attrs {:shape []}}
-        pos-5d (gen-id "pos_5d" counter)
-        pos-5d-eqn {:op :stablehlo/broadcast_in_dim :invars [pos-scalar] :outvars [pos-5d]
-                    :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks 1 chunk-size]}}
+        _ (swap! eqns-atom conj pos-s-eqn)
+
+        pos-5d (if (= q-len 1)
+                 (let [v (gen-id "pos_5d" counter)
+                       eqn {:op :stablehlo/broadcast_in_dim :invars [pos-scalar] :outvars [v]
+                            :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks 1 chunk-size]}}]
+                   (swap! eqns-atom conj eqn)
+                   v)
+                 (let [iota-q (gen-id "iota_q" counter)
+                       iota-q-eqn {:op :stablehlo/iota :outvars [iota-q] :attrs {:len q-len :dtype :i32 :iota_dimension 0}}
+                       pos-1d (gen-id "pos_1d" counter)
+                       pos-1d-eqn {:op :stablehlo/broadcast_in_dim :invars [pos-scalar] :outvars [pos-1d]
+                                   :attrs {:broadcast_dimensions [] :target_shape [q-len]}}
+                       pos-q-sum (gen-id "pos_q_sum" counter)
+                       sum-eqn {:op :stablehlo/add :invars [pos-1d iota-q] :outvars [pos-q-sum]}
+                       v (gen-id "pos_5d" counter)
+                       eqn {:op :stablehlo/broadcast_in_dim :invars [pos-q-sum] :outvars [v]
+                            :attrs {:broadcast_dimensions [3] :target_shape [1 1 num-chunks q-len chunk-size]}}]
+                   (swap! eqns-atom conj iota-q-eqn pos-1d-eqn sum-eqn eqn)
+                   v))
         cmp-fut (gen-id "cmp_fut" counter)
         cmp-fut-eqn {:op :stablehlo/compare :invars [iota-5d pos-5d] :outvars [cmp-fut]
                      :attrs {:comparison_direction "GT"}}
-        _ (swap! eqns-atom conj iota-eqn iota-rs-eqn pos-s-eqn pos-5d-eqn cmp-fut-eqn)
+        _ (swap! eqns-atom conj cmp-fut-eqn)
 
         ring-buffer? (:ring-buffer attrs)
         cmp-mask (cond
@@ -813,7 +1068,7 @@
                                        :attrs {:comparison_direction "GE"}}
                          cmp-full-5d (gen-id "cmp_full_5d" counter)
                          cmp-full-5d-eqn {:op :stablehlo/broadcast_in_dim :invars [cmp-full] :outvars [cmp-full-5d]
-                                          :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks 1 chunk-size]}}
+                                          :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks q-len chunk-size]}}
                          not-full-5d (gen-id "not_full_5d" counter)
                          not-full-eqn {:op :stablehlo/not :invars [cmp-full-5d] :outvars [not-full-5d]}
                          mask-cond (gen-id "mask_cond" counter)
@@ -832,7 +1087,7 @@
                          min-p-eqn {:op :stablehlo/add :invars [p-sub c-one] :outvars [min-p]}
                          min-p-5d (gen-id "min_p_5d" counter)
                          min-p-5d-eqn {:op :stablehlo/broadcast_in_dim :invars [min-p] :outvars [min-p-5d]
-                                       :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks 1 chunk-size]}}
+                                       :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks q-len chunk-size]}}
                          cmp-old (gen-id "cmp_old" counter)
                          cmp-old-eqn {:op :stablehlo/compare :invars [iota-5d min-p-5d] :outvars [cmp-old]
                                       :attrs {:comparison_direction "LT"}}
@@ -848,17 +1103,17 @@
         c-neg-eqn {:op :stablehlo/constant :value -10000.0 :type [:tensor [] :f32] :outvars [c-neg]}
         c-neg-5d (gen-id "c_neg_5d" counter)
         c-neg-5d-eqn {:op :stablehlo/broadcast_in_dim :invars [c-neg] :outvars [c-neg-5d]
-                      :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks 1 chunk-size]}}
+                      :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks q-len chunk-size]}}
         c-zero (gen-id "c_zero" counter)
         c-zero-eqn {:op :stablehlo/constant :value 0.0 :type [:tensor [] :f32] :outvars [c-zero]}
         c-zero-5d (gen-id "c_zero_5d" counter)
         c-zero-5d-eqn {:op :stablehlo/broadcast_in_dim :invars [c-zero] :outvars [c-zero-5d]
-                       :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks 1 chunk-size]}}
+                       :attrs {:broadcast_dimensions [] :target_shape [1 1 num-chunks q-len chunk-size]}}
         mask-5d (gen-id "mask_5d" counter)
         mask-sel-eqn {:op :stablehlo/select :invars [cmp-mask c-neg-5d c-zero-5d] :outvars [mask-5d]}
         mask-full (gen-id "mask_full" counter)
         mask-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [mask-5d] :outvars [mask-full]
-                        :attrs {:broadcast_dimensions [0 1 2 3 4] :target_shape [1 num-heads num-chunks 1 chunk-size]}}
+                        :attrs {:broadcast_dimensions [0 1 2 3 4] :target_shape [1 num-heads num-chunks q-len chunk-size]}}
         masked-scores (gen-id "masked_scores" counter)
         masked-s-eqn {:op :stablehlo/add :invars [f32-scores mask-full] :outvars [masked-scores]}
         _ (swap! eqns-atom conj c-neg-eqn c-neg-5d-eqn c-zero-eqn c-zero-5d-eqn mask-sel-eqn mask-bcast-eqn masked-s-eqn)
@@ -872,7 +1127,7 @@
                       :attrs {:axes [2] :keep_dims true}}
         m-global-bcast (gen-id "m_gbcast" counter)
         m-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [m-global] :outvars [m-global-bcast]
-                     :attrs {:broadcast_dimensions [0 1 2 3 4] :target_shape [1 num-heads num-chunks 1 chunk-size]}}
+                     :attrs {:broadcast_dimensions [0 1 2 3 4] :target_shape [1 num-heads num-chunks q-len chunk-size]}}
         m-diff (gen-id "m_diff" counter)
         m-diff-eqn {:op :stablehlo/subtract :invars [masked-scores m-global-bcast] :outvars [m-diff]}
         exp-scores (gen-id "exp_scores" counter)
@@ -888,7 +1143,7 @@
                       :attrs {:axes [2] :keep_dims true}}
         l-global-bcast (gen-id "l_gbcast" counter)
         l-bcast-eqn {:op :stablehlo/broadcast_in_dim :invars [l-global] :outvars [l-global-bcast]
-                     :attrs {:broadcast_dimensions [0 1 2 3 4] :target_shape [1 num-heads 1 1 head-dim]}}
+                     :attrs {:broadcast_dimensions [0 1 2 3 4] :target_shape [1 num-heads 1 q-len head-dim]}}
         _ (swap! eqns-atom conj l-chunk-eqn l-global-eqn l-bcast-eqn)
 
         ;; 8. Chunk Context: exp_scores @ v_heads
@@ -918,15 +1173,37 @@
         ctx-div-eqn {:op :stablehlo/divide :invars [o-sum l-global-bcast] :outvars [ctx-norm-f32]}
         _ (swap! eqns-atom conj o-sum-eqn ctx-div-eqn)
 
-        ;; 9. Final type conversion & reshape to [1 1 num-heads head-dim]
+        ;; 9. Final type conversion & optional TurboQuant FWHT output transform
         ctx-final-var (if is-f32?
                         ctx-norm-f32
                         (let [ctx-dt (gen-id "ctx_dt" counter)
                               c-eqn {:op :stablehlo/convert :invars [ctx-norm-f32] :outvars [ctx-dt] :attrs {:target_dtype dtype}}]
                           (swap! eqns-atom conj c-eqn)
                           ctx-dt))
-        ctx-out-eqn {:op :stablehlo/reshape :invars [ctx-final-var] :outvars [final-out-var]
-                     :attrs {:shape [1 1 num-heads head-dim]}}]
+        ctx-trans-var (if (= q-len 1)
+                        ctx-final-var
+                        (let [r4d (gen-id "ctx_r4d" counter)
+                              r4d-eqn {:op :stablehlo/reshape :invars [ctx-final-var] :outvars [r4d]
+                                       :attrs {:shape [1 num-heads q-len head-dim]}}
+                              trans (gen-id "ctx_trans" counter)
+                              trans-eqn {:op :stablehlo/transpose :invars [r4d] :outvars [trans]
+                                         :attrs {:permutation [0 2 1 3]}}]
+                          (swap! eqns-atom conj r4d-eqn trans-eqn)
+                          trans))
+        final-ctx (if turboquant?
+                    (let [ctx-fwht (gen-id "ctx_fwht" counter)
+                          _ (lower-fwht! eqns-atom counter nil [ctx-trans-var] {:normalized? true} ctx-fwht (assoc known-shapes ctx-trans-var [1 q-len num-heads head-dim]) dtype)]
+                      (if (== v-scale 1.0)
+                        ctx-fwht
+                        (let [c-vscale (gen-id "c_vscale" counter)
+                              c-vscale-eqn {:op :stablehlo/constant :value (float v-scale) :type [:tensor [] dtype] :outvars [c-vscale]}
+                              ctx-sc (gen-id "ctx_scaled" counter)
+                              sc-eqn {:op :stablehlo/multiply :invars [ctx-fwht c-vscale] :outvars [ctx-sc]}]
+                          (swap! eqns-atom conj c-vscale-eqn sc-eqn)
+                          ctx-sc)))
+                    ctx-trans-var)
+        ctx-out-eqn {:op :stablehlo/reshape :invars [final-ctx] :outvars [final-out-var]
+                     :attrs {:shape (or (:shape attrs) [1 q-len num-heads head-dim])}}]
     (swap! eqns-atom conj ctx-out-eqn)))
 
 (defn- lower-rms-norm!
@@ -987,7 +1264,7 @@
          rope-angles (long (* rope-prop half-dim))
          theta (double (or (:theta attrs) (:theta-base attrs) 10000.0))
 
-         dynamic? (and (= seq-len 1) (:pos attrs))
+         dynamic? (boolean (:pos attrs))
          pos-var (when dynamic? (:pos attrs))
 
          ;; Frequencies: full head-dim as base exponent divisor.
@@ -1027,7 +1304,8 @@
                        :attrs {:broadcast_dimensions [3] :target_shape [1 1 seq-len half-dim]}}
          _ (swap! eqns-atom conj c-freqs-eqn freqs-4d-eqn)
 
-         pos-4d (if dynamic?
+         pos-4d (cond
+                  (and dynamic? (= seq-len 1))
                   (let [pos-s (gen-id "rope_pos_s" counter)
                         pos-s-eqn {:op :stablehlo/reshape :invars [pos-var] :outvars [pos-s] :attrs {:shape []}}
                         pos-f32 (gen-id "rope_pos_f32" counter)
@@ -1037,6 +1315,26 @@
                                  :attrs {:broadcast_dimensions [] :target_shape [1 1 1 half-dim]}}]
                     (swap! eqns-atom conj pos-s-eqn pos-f32-eqn p4d-eqn)
                     p4d)
+
+                  dynamic?
+                  (let [pos-s (gen-id "rope_pos_s" counter)
+                        pos-s-eqn {:op :stablehlo/reshape :invars [pos-var] :outvars [pos-s] :attrs {:shape []}}
+                        pos-1d (gen-id "rope_pos_1d" counter)
+                        pos-1d-eqn {:op :stablehlo/broadcast_in_dim :invars [pos-s] :outvars [pos-1d]
+                                    :attrs {:broadcast_dimensions [] :target_shape [seq-len]}}
+                        iota-1d (gen-id "rope_iota" counter)
+                        iota-eqn {:op :stablehlo/iota :outvars [iota-1d] :attrs {:len seq-len :dtype :i32 :iota_dimension 0}}
+                        pos-sum (gen-id "rope_pos_sum" counter)
+                        sum-eqn {:op :stablehlo/add :invars [pos-1d iota-1d] :outvars [pos-sum]}
+                        pos-f32 (gen-id "rope_pos_f32" counter)
+                        pos-f32-eqn {:op :stablehlo/convert :invars [pos-sum] :outvars [pos-f32] :attrs {:target_dtype :f32}}
+                        p4d (gen-id "rope_pos_4d" counter)
+                        p4d-eqn {:op :stablehlo/broadcast_in_dim :invars [pos-f32] :outvars [p4d]
+                                 :attrs {:broadcast_dimensions [2] :target_shape [1 1 seq-len half-dim]}}]
+                    (swap! eqns-atom conj pos-s-eqn pos-1d-eqn iota-eqn sum-eqn pos-f32-eqn p4d-eqn)
+                    p4d)
+
+                  :else
                   (let [iota-1d (gen-id "rope_iota" counter)
                         iota-eqn {:op :stablehlo/iota :outvars [iota-1d] :attrs {:len seq-len :dtype :i32 :iota_dimension 0}}
                         iota-f32 (gen-id "rope_iota_f32" counter)
@@ -1092,79 +1390,6 @@
 
          final-eqn {:op :stablehlo/reshape :invars [back-trans-var] :outvars [final-out-var] :attrs {:shape [batch seq-len total-dim]}}]
      (swap! eqns-atom conj x-cos-eqn x-sin-eqn add-eqn back-trans-eqn final-eqn))))
-
-(defn- lower-fwht! [eqns-atom counter _head in-term attrs final-out-var known-shapes]
-  (let [in-name (first in-term)
-        shape (get known-shapes in-name)
-        rank (count shape)
-        raw-axis (long (or (:axis attrs) (dec rank)))
-        axis (if (neg? raw-axis) (+ rank raw-axis) raw-axis)
-        d (nth shape axis)
-        k (long (/ (Math/log d) (Math/log 2)))
-        _ (assert (= d (bit-shift-left 1 k)) (str "FWHT dimension must be a power of 2, got: " d))
-        leading-dims (subvec (vec shape) 0 axis)
-        batch-size (long (reduce * 1 leading-dims))
-        r-in (gen-id "t_fwht_in" counter)
-        r-in-eqn {:op :stablehlo/reshape
-                  :invars [in-name]
-                  :outvars [r-in]
-                  :attrs {:shape [batch-size d]}}
-        _ (swap! eqns-atom conj r-in-eqn)
-        unscaled-var
-        (loop [s 0
-               cur-var r-in]
-          (if (= s k)
-            cur-var
-            (let [stride (bit-shift-left 1 s)
-                  chunks (long (/ d (* 2 stride)))
-                  r1-var (gen-id (str "t_fwht_s" s "_r1") counter)
-                  r1-eqn {:op :stablehlo/reshape
-                          :invars [cur-var]
-                          :outvars [r1-var]
-                          :attrs {:shape [batch-size chunks 2 stride]}}
-                  a-var (gen-id (str "t_fwht_s" s "_a") counter)
-                  a-eqn {:op :stablehlo/slice
-                         :invars [r1-var]
-                         :outvars [a-var]
-                         :attrs {:start_indices [0 0 0 0]
-                                 :limit_indices [batch-size chunks 1 stride]
-                                 :strides [1 1 1 1]}}
-                  b-var (gen-id (str "t_fwht_s" s "_b") counter)
-                  b-eqn {:op :stablehlo/slice
-                         :invars [r1-var]
-                         :outvars [b-var]
-                         :attrs {:start_indices [0 0 1 0]
-                                 :limit_indices [batch-size chunks 2 stride]
-                                 :strides [1 1 1 1]}}
-                  sum-var (gen-id (str "t_fwht_s" s "_sum") counter)
-                  sum-eqn {:op :stablehlo/add :invars [a-var b-var] :outvars [sum-var]}
-                  diff-var (gen-id (str "t_fwht_s" s "_diff") counter)
-                  diff-eqn {:op :stablehlo/subtract :invars [a-var b-var] :outvars [diff-var]}
-                  cat-var (gen-id (str "t_fwht_s" s "_cat") counter)
-                  cat-eqn {:op :stablehlo/concatenate :invars [sum-var diff-var] :outvars [cat-var]
-                           :attrs {:dimension 2}}
-                  r2-var (gen-id (str "t_fwht_s" s "_r2") counter)
-                  r2-eqn {:op :stablehlo/reshape
-                          :invars [cat-var]
-                          :outvars [r2-var]
-                          :attrs {:shape [batch-size d]}}]
-              (swap! eqns-atom conj r1-eqn a-eqn b-eqn sum-eqn diff-eqn cat-eqn r2-eqn)
-              (recur (inc s) r2-var))))
-        normalized? (get attrs :normalized? true)
-        scaled-var (if normalized?
-                     (let [scale (double (or (:fwht-scale attrs) (/ 1.0 (Math/sqrt (double d)))))
-                           c-scale (gen-id "c_fwht_scale" counter)
-                           c-eqn {:op :stablehlo/constant :value scale :outvars [c-scale]}
-                           mul-var (gen-id "t_fwht_scaled" counter)
-                           mul-eqn {:op :stablehlo/multiply :invars [unscaled-var c-scale] :outvars [mul-var]}]
-                       (swap! eqns-atom conj c-eqn mul-eqn)
-                       mul-var)
-                     unscaled-var)
-        out-reshape-eqn {:op :stablehlo/reshape
-                         :invars [scaled-var]
-                         :outvars [final-out-var]
-                         :attrs {:shape (vec shape)}}]
-    (swap! eqns-atom conj out-reshape-eqn)))
 
 (defn- lower-rht! [eqns-atom counter head in-term signs-term attrs final-out-var known-shapes]
   (let [in-name (first in-term)
@@ -1715,10 +1940,10 @@
 
 (defn- lower-turboquant-pack!
   "Lowers activation/key vector x into Fast-TurboQuant 2-bit Lloyd-Max packed codes:
-   1. In-accelerator multiplier-free FWHT normalized by 1/sqrt(d)
+   1. In-accelerator constant Hadamard matrix contraction normalized by 1/sqrt(d)
    2. 2-bit Lloyd-Max quantization against optimal normal thresholds [-0.9816, 0.0, 0.9816]
-   3. Bit-packs four 2-bit codes into int8 bytes along the last dimension.
-   Eliminates all O(d^2) dense matrix operations."
+   3. Vectorized bit-packing: contracts four 2-bit codes into int8 bytes along the last dimension.
+   Eliminates all O(d^2) dense butterfly branches and bitwise slicing."
   [eqns-atom counter _head in-term attrs final-out-var known-shapes default-dtype]
   (let [in-name (first in-term)
         shape (get known-shapes in-name)
@@ -1732,27 +1957,26 @@
         rank-5d (count pack-5d-shape)
         norm-dtype (or default-dtype :bf16)
 
-        ;; 1. FWHT normalized by 1/sqrt(d)
+        consts-cache (:constants (meta eqns-atom))
+
+        ;; 1. FWHT normalized by 1/sqrt(d) (shares exact same Hadamard matrix as Q & O)
         fwht-out (gen-id "t_tq_pack_fwht" counter)
-        _ (lower-fwht! eqns-atom counter nil [in-name] (assoc attrs :normalized? true) fwht-out known-shapes)
+        _ (lower-fwht! eqns-atom counter nil [in-name]
+                       {:normalized? true}
+                       fwht-out known-shapes norm-dtype)
 
+        ;; 2. Lloyd-Max 2-bit quantization against [-0.9816, 0.0, 0.9816] * scale
         scale-attr (double (or (:scale attrs) 1.0))
-        scaled-fwht (if (== scale-attr 1.0)
-                      fwht-out
-                      (let [c-inv-scale (gen-id "c_tq_inv_scale" counter)
-                            c-inv-eqn {:op :stablehlo/constant :value (float (/ 1.0 scale-attr)) :type [:tensor [] norm-dtype] :outvars [c-inv-scale]}
-                            s-fwht (gen-id "t_tq_scaled_fwht" counter)
-                            s-eqn {:op :stablehlo/multiply :invars [fwht-out c-inv-scale] :outvars [s-fwht]}]
-                        (swap! eqns-atom conj c-inv-eqn s-eqn)
-                        s-fwht))
+        th0-val (float (* -0.9816 scale-attr))
+        th1-val (float 0.0)
+        th2-val (float (* 0.9816 scale-attr))
 
-        ;; 2. Lloyd-Max 2-bit quantization
         c-th0 (gen-id "c_tq_th0" counter)
         c-th1 (gen-id "c_tq_th1" counter)
         c-th2 (gen-id "c_tq_th2" counter)
-        c-th0-eqn {:op :stablehlo/constant :value (float -0.9816) :type [:tensor [] norm-dtype] :outvars [c-th0]}
-        c-th1-eqn {:op :stablehlo/constant :value (float 0.0) :type [:tensor [] norm-dtype] :outvars [c-th1]}
-        c-th2-eqn {:op :stablehlo/constant :value (float 0.9816) :type [:tensor [] norm-dtype] :outvars [c-th2]}
+        c-th0-eqn {:op :stablehlo/constant :value th0-val :type [:tensor [] norm-dtype] :outvars [c-th0]}
+        c-th1-eqn {:op :stablehlo/constant :value th1-val :type [:tensor [] norm-dtype] :outvars [c-th1]}
+        c-th2-eqn {:op :stablehlo/constant :value th2-val :type [:tensor [] norm-dtype] :outvars [c-th2]}
 
         b0 (gen-id "c_tq_th0_bcast" counter)
         b1 (gen-id "c_tq_th1_bcast" counter)
@@ -1767,9 +1991,9 @@
         cmp0 (gen-id "t_tq_cmp0" counter)
         cmp1 (gen-id "t_tq_cmp1" counter)
         cmp2 (gen-id "t_tq_cmp2" counter)
-        cmp0-eqn {:op :stablehlo/compare :invars [scaled-fwht b0] :outvars [cmp0] :attrs {:comparison_direction "GE"}}
-        cmp1-eqn {:op :stablehlo/compare :invars [scaled-fwht b1] :outvars [cmp1] :attrs {:comparison_direction "GE"}}
-        cmp2-eqn {:op :stablehlo/compare :invars [scaled-fwht b2] :outvars [cmp2] :attrs {:comparison_direction "GE"}}
+        cmp0-eqn {:op :stablehlo/compare :invars [fwht-out b0] :outvars [cmp0] :attrs {:comparison_direction "GE"}}
+        cmp1-eqn {:op :stablehlo/compare :invars [fwht-out b1] :outvars [cmp1] :attrs {:comparison_direction "GE"}}
+        cmp2-eqn {:op :stablehlo/compare :invars [fwht-out b2] :outvars [cmp2] :attrs {:comparison_direction "GE"}}
 
         i0 (gen-id "t_tq_i0" counter)
         i1 (gen-id "t_tq_i1" counter)
@@ -1783,9 +2007,9 @@
         code (gen-id "t_tq_code" counter)
         code-eqn {:op :stablehlo/add :invars [add01 i2] :outvars [code]}
 
-        ;; 3. Bit-packing into 4-code int8 bytes
-        pack-var (gen-id "t_tq_pack_5d" counter)
-        pack-eqn {:op :stablehlo/reshape :invars [code] :outvars [pack-var] :attrs {:shape pack-5d-shape}}
+        ;; 3. Vectorized bit-packing: elementwise s0 | (s1 << 2) | (s2 << 4) | (s3 << 6)
+        code-5d (gen-id "t_tq_code_5d" counter)
+        r-5d-eqn {:op :stablehlo/reshape :invars [code] :outvars [code-5d] :attrs {:shape pack-5d-shape}}
 
         zeros-pre (vec (repeat (dec rank-5d) 0))
         ones-pre (vec (repeat rank-5d 1))
@@ -1795,21 +2019,36 @@
         s2 (gen-id "t_tq_s2" counter)
         s3 (gen-id "t_tq_s3" counter)
 
-        s0-eqn {:op :stablehlo/slice :invars [pack-var] :outvars [s0]
+        s0-eqn {:op :stablehlo/slice :invars [code-5d] :outvars [s0]
                 :attrs {:start_indices (conj zeros-pre 0) :limit_indices (conj leading-dims pd 1) :strides ones-pre}}
-        s1-eqn {:op :stablehlo/slice :invars [pack-var] :outvars [s1]
+        s1-eqn {:op :stablehlo/slice :invars [code-5d] :outvars [s1]
                 :attrs {:start_indices (conj zeros-pre 1) :limit_indices (conj leading-dims pd 2) :strides ones-pre}}
-        s2-eqn {:op :stablehlo/slice :invars [pack-var] :outvars [s2]
+        s2-eqn {:op :stablehlo/slice :invars [code-5d] :outvars [s2]
                 :attrs {:start_indices (conj zeros-pre 2) :limit_indices (conj leading-dims pd 3) :strides ones-pre}}
-        s3-eqn {:op :stablehlo/slice :invars [pack-var] :outvars [s3]
+        s3-eqn {:op :stablehlo/slice :invars [code-5d] :outvars [s3]
                 :attrs {:start_indices (conj zeros-pre 3) :limit_indices (conj leading-dims pd 4) :strides ones-pre}}
 
-        c-2 (gen-id "c_tq_sh2" counter)
-        c-4 (gen-id "c_tq_sh4" counter)
-        c-6 (gen-id "c_tq_sh6" counter)
-        c-2-eqn {:op :stablehlo/constant :value (int 2) :type [:tensor [] :i8] :outvars [c-2]}
-        c-4-eqn {:op :stablehlo/constant :value (int 4) :type [:tensor [] :i8] :outvars [c-4]}
-        c-6-eqn {:op :stablehlo/constant :value (int 6) :type [:tensor [] :i8] :outvars [c-6]}
+        c-2 (if (and consts-cache (get @consts-cache [:tq_sh2 :i8]))
+              (get @consts-cache [:tq_sh2 :i8])
+              (let [v (gen-id "c_tq_sh2" counter)
+                    eqn {:op :stablehlo/constant :value (int 2) :type [:tensor [] :i8] :outvars [v]}]
+                (swap! eqns-atom conj eqn)
+                (when consts-cache (swap! consts-cache assoc [:tq_sh2 :i8] v))
+                v))
+        c-4 (if (and consts-cache (get @consts-cache [:tq_sh4 :i8]))
+              (get @consts-cache [:tq_sh4 :i8])
+              (let [v (gen-id "c_tq_sh4" counter)
+                    eqn {:op :stablehlo/constant :value (int 4) :type [:tensor [] :i8] :outvars [v]}]
+                (swap! eqns-atom conj eqn)
+                (when consts-cache (swap! consts-cache assoc [:tq_sh4 :i8] v))
+                v))
+        c-6 (if (and consts-cache (get @consts-cache [:tq_sh6 :i8]))
+              (get @consts-cache [:tq_sh6 :i8])
+              (let [v (gen-id "c_tq_sh6" counter)
+                    eqn {:op :stablehlo/constant :value (int 6) :type [:tensor [] :i8] :outvars [v]}]
+                (swap! eqns-atom conj eqn)
+                (when consts-cache (swap! consts-cache assoc [:tq_sh6 :i8] v))
+                v))
 
         s1-sh (gen-id "t_tq_s1_sh" counter)
         s2-sh (gen-id "t_tq_s2_sh" counter)
@@ -1820,25 +2059,23 @@
 
         or01 (gen-id "t_tq_or01" counter)
         or23 (gen-id "t_tq_or23" counter)
-        packed-var (gen-id "t_tq_packed_sl" counter)
+        packed-5d (gen-id "t_tq_packed_5d" counter)
         or01-eqn {:op :stablehlo/or :invars [s0 s1-sh] :outvars [or01]}
         or23-eqn {:op :stablehlo/or :invars [s2-sh s3-sh] :outvars [or23]}
-        packed-eqn {:op :stablehlo/or :invars [or01 or23] :outvars [packed-var]}
+        packed-5d-eqn {:op :stablehlo/or :invars [or01 or23] :outvars [packed-5d]}
 
-        out-eqn {:op :stablehlo/reshape :invars [packed-var] :outvars [final-out-var] :attrs {:shape out-shape}}
-
-        all-eqns [c-th0-eqn c-th1-eqn c-th2-eqn
-                  b0-eqn b1-eqn b2-eqn
-                  cmp0-eqn cmp1-eqn cmp2-eqn
-                  i0-eqn i1-eqn i2-eqn
-                  add01-eqn code-eqn
-                  pack-eqn
-                  s0-eqn s1-eqn s2-eqn s3-eqn
-                  c-2-eqn c-4-eqn c-6-eqn
-                  s1-sh-eqn s2-sh-eqn s3-sh-eqn
-                  or01-eqn or23-eqn packed-eqn
-                  out-eqn]]
-    (swap! eqns-atom into all-eqns)))
+        r-out-eqn {:op :stablehlo/reshape :invars [packed-5d] :outvars [final-out-var] :attrs {:shape out-shape}}]
+    (swap! eqns-atom conj
+           c-th0-eqn c-th1-eqn c-th2-eqn
+           b0-eqn b1-eqn b2-eqn
+           cmp0-eqn cmp1-eqn cmp2-eqn
+           i0-eqn i1-eqn i2-eqn
+           add01-eqn code-eqn
+           r-5d-eqn
+           s0-eqn s1-eqn s2-eqn s3-eqn
+           s1-sh-eqn s2-sh-eqn s3-sh-eqn
+           or01-eqn or23-eqn packed-5d-eqn
+           r-out-eqn)))
 
 (defn ast->graph
   "Compiles a Tensor Logic Hiccup AST into a validated EDN SSA graph for OpenXLA compilation.
@@ -1876,7 +2113,7 @@
          known-dtypes (merge in-dtypes const-dtypes)
          known-shapes (shape/unify-shapes in-shapes pruned)
 
-         eqns-atom (atom [])
+         eqns-atom (atom [] :meta {:constants (atom {})})
          counter (atom 0)
 
         ;; 4. Track occurrences of heads for inline implicit accumulation
