@@ -556,7 +556,7 @@
                  (long (:favorable-b mp))
                  (long (:unfavorable-c mp))
                  (double (:p-value mp)))
-         (format "- **Criterion 3.3 (MultiPL-E Non-Regression)**: **FAIL**. Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX with Tier 2 Attention Sinks (K_sink=4) and sliding window (W=512) configured identically across both arms: Baseline passed %d, TurboQuant passed %d. Discordant pairs: b=%d (favorable), c=%d (unfavorable), exact McNemar p=%.4f (with %d regressions violating zero-regression pilot rule), demonstrating capability degradation under 2-bit KV quantization.\n"
+         (format "- **Criterion 3.3 (MultiPL-E Non-Regression)**: **FAIL**. Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX with Tier 2 Attention Sinks (K_sink=4) and sliding window (W=512) configured identically across both arms: Baseline passed %d, TurboQuant passed %d. Discordant pairs: b=%d (favorable), c=%d (unfavorable), exact McNemar p=%.4f (with %d regressions violating zero-regression pilot rule), demonstrating capability degradation under 2-bit KV quantization (Note: greedy T=0.0 runs exhibit minor device non-determinism—e.g. baseline has read 10–11 passes across runs—though verdicts remain stable throughout).\n"
                  (long (:total-tasks mp))
                  (long (:base-passed mp))
                  (long (:tq-passed mp))
@@ -695,7 +695,7 @@
                  (long (:favorable-b mp))
                  (long (:unfavorable-c mp))
                  (double (:p-value mp)))
-         (format "4. **MultiPL-E Silicon Verification**: Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX with Tier 2 Attention Sinks (K_sink=4) and sliding window (W=512) configured identically on both arms to isolate 2-bit quantization: Baseline passed %d, Fast-TurboQuant passed %d. Discordant pairs: b=%d, c=%d, paired McNemar exact test p=%.4f (with %d regressions violating zero-regression pilot rule), demonstrating residual capability degradation under 2-bit KV quantization on live silicon (Criterion 3.3 FAIL).\n"
+         (format "4. **MultiPL-E Silicon Verification**: Evaluated %d MultiPL-E Clojure tasks with resident model weights on AMD Radeon RX 7900 XTX with Tier 2 Attention Sinks (K_sink=4) and sliding window (W=512) configured identically on both arms to isolate 2-bit quantization: Baseline passed %d, Fast-TurboQuant passed %d. Discordant pairs: b=%d, c=%d, paired McNemar exact test p=%.4f (with %d regressions violating zero-regression pilot rule), demonstrating residual capability degradation under 2-bit KV quantization on live silicon (Criterion 3.3 FAIL). *(Reproducibility Note)*: Greedy T=0.0 generation runs on accelerator hardware are not perfectly reproducible run-to-run (e.g. baseline pass count has read 11, 10, 11 across repeated 50-task sweeps, likely attributable to non-associative floating-point reduction orderings across parallel GPU threads); however, all qualitative findings and falsification verdicts remain stable through run-to-run variation.\n"
                  (long (:total-tasks mp))
                  (long (:base-passed mp))
                  (long (:tq-passed mp))
@@ -729,7 +729,7 @@
                    (* 100.0 (double (:prefix-accuracy mn (:exact-accuracy mn 0.0))))))
          "5. **M-NIAH Suite Realignment**: Synthetic attention-mass retention evaluated across 100 needles (10 depth bins × 10 needles) across 4 context lengths (16k, 32k, 64k, 128k), achieving 100% retention on saliency ranking, explicitly labeled as an eviction ranking proxy.\n")
        "")
-     "6. **Eviction Primitive Optimization**: Refactored `select-retained-indices` to a zero-boxing primitive min-heap, reducing latency to ~4.5 ms and eliminating test flakiness.\n\n"
+     "6. **Eviction Primitive Optimization & Test Suite Stability**: Refactored `select-retained-indices` to a zero-boxing primitive min-heap, reducing latency to ~4.5 ms. *(Note on test flakiness)*: While this significantly improved test stability, claiming test flakiness was completely eliminated is overstated—occasional generative test failures have still been observed across multi-run fast-suite executions (e.g. 1 failure across 4 runs; under ongoing isolation), though runs routinely pass cleanly.\n\n"
      "## 4. Next Milestone & Architecture Remediation\n\n"
      (let [ov-pct (double (or (:decode-step-overhead-pct rocm-decode) 10.32))
            ov-ms (double (or (:full-step-overhead-ms rocm-decode) 1.71))
