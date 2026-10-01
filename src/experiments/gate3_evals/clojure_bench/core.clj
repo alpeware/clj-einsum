@@ -163,30 +163,84 @@ Only provide your final response once your definition passes all public tests.")
 
 (declare submission-form?)
 
+(defn balance-trailing-delimiters
+  "Appends missing closing delimiters to a string with unclosed delimiters at EOF."
+  [^String s]
+  (if (str/blank? s)
+    s
+    (let [n (.length s)]
+      (loop [i 0
+             in-str? false
+             escaped? false
+             in-comment? false
+             stack []]
+        (if (>= i n)
+          (if (and (empty? stack) (not in-str?))
+            s
+            (let [closers (mapv (fn [c] (case c \( \) \[ \] \{ \} nil)) (rseq stack))]
+              (str s (apply str (remove nil? closers)))))
+          (let [c (.charAt s i)]
+            (cond
+              ;; Inside string
+              in-str?
+              (cond
+                escaped? (recur (inc i) true false in-comment? stack)
+                (= c \\) (recur (inc i) true true in-comment? stack)
+                (= c \") (recur (inc i) false false in-comment? stack)
+                :else (recur (inc i) true false in-comment? stack))
+
+              ;; Inside line comment
+              in-comment?
+              (if (or (= c \newline) (= c \return))
+                (recur (inc i) false false false stack)
+                (recur (inc i) false false true stack))
+
+              ;; Regular code
+              (= c \") (recur (inc i) true false false stack)
+              (= c \;) (recur (inc i) false false true stack)
+              (or (= c \() (= c \[) (= c \{))
+              (recur (inc i) false false false (conj stack c))
+
+              (= c \))
+              (recur (inc i) false false false (if (= (peek stack) \() (pop stack) stack))
+
+              (= c \])
+              (recur (inc i) false false false (if (= (peek stack) \[) (pop stack) stack))
+
+              (= c \})
+              (recur (inc i) false false false (if (= (peek stack) \{) (pop stack) stack))
+
+              :else
+              (recur (inc i) false false false stack))))))))
+
 (defn isolate-submission-forms
   "Given candidate code string, extracts only the valid top-level s-expression forms,
    dropping any non-form or trailing scaffolding tokens.
    If target-fn is supplied and the extracted forms do not define target-fn,
-   falls back to code-str to preserve the submission form for evaluation and grading."
+   falls back to code-str (with trailing delimiter balancing) to preserve the submission form for evaluation and grading."
   ([code-str]
    (isolate-submission-forms code-str nil))
   ([code-str target-fn]
    (when (string? code-str)
      (let [reader-ctx (sci/init {})
-           extracted (try
-                       (loop [reader (sci/source-reader code-str)
-                              forms []]
-                         (let [[form form-str] (try (sci/parse-next+string reader-ctx reader) (catch Throwable _ nil))]
-                           (if (or (nil? form) (= form :sci.core/eof))
-                             (if (seq forms) (str/join "\n\n" forms) code-str)
-                             (if (and (seq? form) (symbol? (first form)))
-                               (recur reader (conj forms form-str))
-                               (if (seq forms)
-                                 (str/join "\n\n" forms)
-                                 (recur reader forms))))))
-                       (catch Throwable _ code-str))]
+           parse-forms (fn [raw]
+                         (try
+                           (loop [reader (sci/source-reader raw)
+                                  forms []]
+                             (let [[form form-str] (try (sci/parse-next+string reader-ctx reader) (catch Throwable _ nil))]
+                               (if (or (nil? form) (= form :sci.core/eof))
+                                 (when (seq forms) (str/join "\n\n" forms))
+                                 (if (and (seq? form) (symbol? (first form)))
+                                   (recur reader (conj forms form-str))
+                                   (if (seq forms)
+                                     (str/join "\n\n" forms)
+                                     (recur reader forms))))))
+                           (catch Throwable _ nil)))
+           extracted (or (parse-forms code-str)
+                         (parse-forms (balance-trailing-delimiters code-str))
+                         (balance-trailing-delimiters code-str))]
        (if (and target-fn (not (submission-form? extracted target-fn)))
-         code-str
+         (balance-trailing-delimiters code-str)
          extracted)))))
 
 (defn- extract-top-level-symbols

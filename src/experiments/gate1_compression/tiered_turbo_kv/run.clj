@@ -707,4 +707,5 @@
         (gemma4-inf/reexec-with-libjsig! args "experiments.gate1-compression.tiered-turbo-kv.run"))
       (do
         (run-tiered-turbo-kv-experiment! opts)
+        (shutdown-agents)
         (System/exit 0)))))
