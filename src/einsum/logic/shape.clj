@@ -144,6 +144,21 @@
                            (conj leading-dims (* (long last-dim) 4)))]
          (assoc known-shapes head-name (vec out-shape)))
 
+       (or (= (first eqn) :turboquant-pack)
+           (= (first eqn) :turboquant-quant))
+       (let [head (ast/head eqn)
+             head-name (if (vector? head) (first head) head)
+             attrs (ast/attrs eqn)
+             body (ast/body-terms eqn)
+             in-name (first (first body))
+             in-shape (get known-shapes in-name [1 1])
+             rank (count in-shape)
+             leading-dims (subvec (vec in-shape) 0 (dec rank))
+             last-dim (last in-shape)
+             out-shape (or (:shape attrs)
+                           (conj leading-dims (quot (long last-dim) 4)))]
+         (assoc known-shapes head-name (vec out-shape)))
+
        (= (first eqn) :argmax)
        (let [head (ast/head eqn)
              head-name (if (vector? head) (first head) head)

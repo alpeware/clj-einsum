@@ -679,8 +679,12 @@
                                   (instance? MemorySegment buffer-handle) buffer-handle
                                   :else buffer-handle)
          num-elements (long num-elements)
-         elem-bytes (if (= dtype :bf16) 2 4)
-         byte-size (* num-elements elem-bytes)]
+         elem-bytes (case dtype
+                      :bf16 2
+                      (:i8 :int8) 1
+                      (:i32 :int32 :f32) 4
+                      4)
+         byte-size (max 1024 (* num-elements elem-bytes))]
      (with-open [arena (Arena/ofConfined)]
        (let [dst-seg (.allocate arena (long byte-size) (long 64))
              args (.allocate arena (long 56))]
@@ -708,13 +712,22 @@
                  (.set ^MemorySegment destroy-args ValueLayout/ADDRESS (long 16) event-ptr)
                  (let [destroy-handle (downcall-ptr linker api-ptr OFFSET_EVENT_DESTROY ValueLayout/ADDRESS [ValueLayout/ADDRESS])
                        _ (.invokeWithArguments ^MethodHandle destroy-handle [destroy-args])])))))
-         (if (= dtype :bf16)
+         (cond
+           (= dtype :bf16)
            (let [dst-floats (float-array num-elements)]
              (dotimes [i num-elements]
                (let [s (.getAtIndex dst-seg ValueLayout/JAVA_SHORT (long i))
                      raw-int (unchecked-int (bit-shift-left (bit-and (int s) 0xffff) 16))]
                  (aset dst-floats i (Float/intBitsToFloat raw-int))))
              dst-floats)
+
+           (or (= dtype :i8) (= dtype :int8))
+           (.toArray dst-seg ValueLayout/JAVA_BYTE)
+
+           (or (= dtype :i32) (= dtype :int32))
+           (.toArray dst-seg ValueLayout/JAVA_INT)
+
+           :else
            (.toArray dst-seg ValueLayout/JAVA_FLOAT)))))))
 
 (defn create-host-float-buffer-transfer-context

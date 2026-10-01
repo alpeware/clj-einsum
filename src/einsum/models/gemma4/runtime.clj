@@ -544,15 +544,21 @@
                    (arena/destroy! session-arena old-kv)
                    (reset! kv-buffers-atom new-kv)
                    (recur (inc step) new-log))))))
-         (when is-persistent?
-           (reset! kv-state {:cached-tokens @cur-tokens
-                             :kv-buffers @kv-buffers-atom}))
          (let [t1 (System/nanoTime)
                total-ms (/ (- t1 t0) 1e6)
                prefill-ms (/ (- t-prefill-end t0) 1e6)
                decode-ms (/ (- t1 t-prefill-end) 1e6)
                gen-count (- (count @cur-tokens) prompt-count)
                decode-tok-s (if (pos? decode-ms) (/ (* gen-count 1000.0) decode-ms) 0.0)]
+           (when is-persistent?
+             (reset! kv-state {:cached-tokens @cur-tokens
+                               :kv-buffers @kv-buffers-atom
+                               :prefill-ms prefill-ms
+                               :decode-ms decode-ms
+                               :decode-tok-s decode-tok-s
+                               :decode-ms-tok (if (pos? gen-count) (/ decode-ms (double gen-count)) 0.0)
+                               :gen-count gen-count
+                               :total-ms total-ms}))
            (when-not quiet
              (println)
              (println "\n------------------------------------------------------------------")
@@ -633,24 +639,30 @@
   ([opts]
    (init-agent-vram-session opts (long (or (:max-seq-len opts) 1024))))
   ([opts max-seq-len]
-   (let [method (or (:method opts)
-                    (if (and (number? (:temperature opts)) (> (:temperature opts) 0.0))
+   (let [turboquant? (boolean (or (:turboquant-kv? opts)
+                                  (:turboquant-kv opts)
+                                  (= (:kv-quant opts) :turboquant)
+                                  (= (:kv-quant opts) :turbo-kv)))
+         method (or (:method opts)
+                    (if (or turboquant? (and (number? (:temperature opts)) (> (:temperature opts) 0.0)))
                       :kv-cache
                       :vram-loop))
          vram-loop? (if (contains? opts :vram-loop?)
                       (:vram-loop? opts)
-                      (= method :vram-loop))
+                      (and (not turboquant?) (= method :vram-loop)))
          opts (assoc opts :mode :agent :max-seq-len max-seq-len :method method :vram-loop? vram-loop?)
          session (init-inference-session opts)
+         turboquant? (or turboquant? (:turboquant-kv? (:config session)))
          _ (when-not (:quiet opts)
-             (println (format "Pre-compiling Gemma 4 %s graph (max-seq-len=%d)..."
+             (println (format "Pre-compiling Gemma 4 %s graph (max-seq-len=%d%s)..."
                               (if vram-loop? "In-VRAM While Loop" "KV-Cache")
-                              max-seq-len)))
+                              max-seq-len
+                              (if turboquant? ", Fast-TurboQuant 2-Bit" ""))))
          exec (if vram-loop?
                 (kernels/compile-in-vram-loop-executable session max-seq-len)
                 (kernels/compile-gemma4-kv-executable session max-seq-len))
          safe-prefill-len (cfg/max-safe-prefill-seq-len (:config session))
-         prefill-exec (when (<= max-seq-len safe-prefill-len)
+         prefill-exec (when (and (not turboquant?) (<= max-seq-len safe-prefill-len))
                         (kernels/compile-gemma4-prefill-executable session max-seq-len))
          step-exec (when vram-loop?
                      (kernels/compile-gemma4-kv-executable session max-seq-len))
@@ -751,7 +763,8 @@
           prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
                          (if (:prefill-executable session)
                            (:prefill-executable session)
-                           (when (and (or (= (or (:method opts) :kv-cache) :kv-cache)
+                           (when (and (not (:turboquant-kv? (:config session)))
+                                      (or (= (or (:method opts) :kv-cache) :kv-cache)
                                           (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
                                       (<= max-seq-len safe-prefill-len))
                              (profile/with-profile metrics-atom "graph_compilation"
@@ -815,11 +828,23 @@
     :new-tokens <int>
     :new-token-ids <vec>}."
   [session prompt]
-  (let [{:keys [tokenizer]} session
+  (let [{:keys [tokenizer opts]} session
+        opts (merge (:opts session) opts)
+        model-str (or (:model opts) (get-in session [:config :model-dir]) "")
+        is-it-model (str/includes? (str/lower-case model-str) "-it")
+        is-already-templated (or (str/includes? (or prompt "") "<|turn>user") (str/includes? (or prompt "") "<|turn>model"))
         raw-ids (encode tokenizer prompt)
-        prompt-ids (if (= (first raw-ids) (bos-id tokenizer))
-                     raw-ids
-                     (vec (cons (bos-id tokenizer) raw-ids)))
+        prompt-ids (cond
+                     (and is-it-model (not is-already-templated))
+                     (let [clean-ids (if (= (first raw-ids) (bos-id tokenizer)) (rest raw-ids) raw-ids)
+                           prefix (if (:thinking opts)
+                                    [(bos-id tokenizer) 105 9731 107 98 106 107 105 2364 107]
+                                    [(bos-id tokenizer) 105 2364 107])]
+                       (vec (concat prefix clean-ids [106 107 105 4368 107])))
+                     :else
+                     (if (= (first raw-ids) (bos-id tokenizer))
+                       (vec raw-ids)
+                       (vec (cons (bos-id tokenizer) raw-ids))))
         prompt-len (count prompt-ids)
         seq-len (long (or (:max-seq-len session) (get-in session [:config :max-seq-len]) 2048))
         safe-prompt-len (min prompt-len (max 0 (- seq-len 2)))
@@ -827,10 +852,12 @@
         total-len (count final-context)
         slice-start (min total-len safe-prompt-len)
         new-ids (subvec final-context slice-start)]
-    {:text (decode tokenizer new-ids)
-     :prompt-tokens prompt-len
-     :new-tokens (count new-ids)
-     :new-token-ids (vec new-ids)}))
+    (merge {:text (decode tokenizer new-ids)
+            :prompt-tokens prompt-len
+            :new-tokens (count new-ids)
+            :new-token-ids (vec new-ids)}
+           (when-let [ks (and (:kv-state session) @(:kv-state session))]
+             (select-keys ks [:prefill-ms :decode-ms :decode-tok-s :decode-ms-tok :total-ms])))))
 
 (defn generate-new-text-string
   "Generates text response using Gemma 4 model session and returns ONLY newly generated text string without prompt prefix."

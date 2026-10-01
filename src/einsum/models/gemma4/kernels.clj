@@ -20,7 +20,7 @@
         int4? (boolean (or is-int4 (= weight-dtype :int4)))
         is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
         norm-dtype (if (or is-int8 int4? is-ternary) :bf16 (or weight-dtype :f32))
-        has-ple? (pos? total-pl-dim)
+        has-ple? (pos? (long (or total-pl-dim 0)))
         use-w4a16? (and int4?
                         (if (some? (:use-w4a16-gemv config))
                           (boolean (:use-w4a16-gemv config))

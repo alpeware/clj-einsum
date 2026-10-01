@@ -632,8 +632,9 @@
                                   (= (:kv-quant config) :turboquant)
                                   (= (:kv-quant config) :turbo-kv)))
 
-         actual-k-cache (if is-shared? shared-k (if turboquant? [:k_cache_in i] [:k_cache_out i]))
-         actual-v-cache (if is-shared? shared-v (if turboquant? [:v_cache_in i] [:v_cache_out i]))]
+         k-scale (if is-global? 0.0625 0.125)
+         actual-k-cache (if is-shared? shared-k [:k_cache_out i])
+         actual-v-cache (if is-shared? shared-v [:v_cache_out i])]
 
      [:block {:name [:gemma4_kv_layer i]}
       ;; 1. Pre-Attention RMSNorm
@@ -660,21 +661,27 @@
          [:rope [:k_rope :b :p :kvd] [:k_normed_3d :b :p :kvd] {:head-dim head-dim :theta theta :rope-proportion rope-prop :pos :pos :max-seq-len max-seq-len}]
          [:reshape [:k_ro :b :p :kvh :dh] [:k_rope :b :p :kvd] {:shape [1 1 num-kv-heads head-dim]}]
          (if turboquant?
-           [:block {:name [:tq_cache_passthrough i]}
-            [:= [[:k_cache_out i] :b :kvs :kvh :pdh] [:k_cache_in :b :kvs :kvh :pdh]]
-            [:= [[:v_cache_out i] :b :kvs :kvh :pdh] [:v_cache_in :b :kvs :kvh :pdh]]]
-           [:block {:name [:cache_update i]}
-            [:dynamic-update-slice [[:k_cache_out i] :b :kvs :kvh :dh] [:k_cache_in :b :kvs :kvh :dh] [:k_ro :b :p :kvh :dh]
+           [:block {:name (keyword (str "tq_cache_update_" i))}
+            [:turboquant-pack [[:k_ro_packed i] :b :p :kvh :pdh] [:k_ro :b :p :kvh :dh] {:scale k-scale}]
+            [:turboquant-pack [[:v_heads_packed i] :b :p :kvh :pdh] [:v_heads :b :p :kvh :dh] {:scale 1.0}]
+            [:dynamic-update-slice [[:k_cache_out i] :b :kvs :kvh :pdh] [[:k_cache_in i] :b :kvs :kvh :pdh] [[:k_ro_packed i] :b :p :kvh :pdh]
              (merge {:start-indices [0 :pos 0 0]}
                     (when ring-buffer? {:window window}))]
-            [:dynamic-update-slice [[:v_cache_out i] :b :kvs :kvh :dh] [:v_cache_in :b :kvs :kvh :dh] [:v_heads :b :p :kvh :dh]
+            [:dynamic-update-slice [[:v_cache_out i] :b :kvs :kvh :pdh] [[:v_cache_in i] :b :kvs :kvh :pdh] [[:v_heads_packed i] :b :p :kvh :pdh]
+             (merge {:start-indices [0 :pos 0 0]}
+                    (when ring-buffer? {:window window}))]]
+           [:block {:name :cache_update}
+            [:dynamic-update-slice [[:k_cache_out i] :b :kvs :kvh :dh] [[:k_cache_in i] :b :kvs :kvh :dh] [:k_ro :b :p :kvh :dh]
+             (merge {:start-indices [0 :pos 0 0]}
+                    (when ring-buffer? {:window window}))]
+            [:dynamic-update-slice [[:v_cache_out i] :b :kvs :kvh :dh] [[:v_cache_in i] :b :kvs :kvh :dh] [:v_heads :b :p :kvh :dh]
              (merge {:start-indices [0 :pos 0 0]}
                     (when ring-buffer? {:window window}))]])])
 
       (when turboquant?
-        [:block {:name [:tq_unpack_layer i]}
-         [:turboquant-unpack [[:k_unpacked i] :b :kvs :kvh :dh] [actual-k-cache :b :kvs :kvh :pdh]]
-         [:turboquant-unpack [[:v_unpacked i] :b :kvs :kvh :dh] [actual-v-cache :b :kvs :kvh :pdh]]])
+        [:block {:name (keyword (str "tq_unpack_layer_" i))}
+         [:turboquant-unpack [[:k_unpacked i] :b :kvs :kvh :dh] [actual-k-cache :b :kvs :kvh :pdh] {:scale k-scale}]
+         [:turboquant-unpack [[:v_unpacked i] :b :kvs :kvh :dh] [actual-v-cache :b :kvs :kvh :pdh] {:scale 1.0}]])
 
       ;; 4 & 5. Chunked Scaled Dot-Product Attention (Online Streaming Softmax)
       [:chunked-attention [:ctx :b :p :h :dh]
@@ -955,6 +962,9 @@
   (let [{:keys [num-layers num-kv-shared-layers weight-dtype is-int8 is-int4 is-ternary layer-configs layer-types]} config
         is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
         norm-dtype (if (or is-int8 is-int4 is-ternary) :bf16 weight-dtype)
+        turboquant? (boolean (or (:turboquant-kv? config)
+                                 (= (:kv-quant config) :turboquant)
+                                 (= (:kv-quant config) :turbo-kv)))
         num-layers (long (or num-layers 35))
         num-kv-shared (long (or num-kv-shared-layers 0))
         num-unshared (- num-layers num-kv-shared)
@@ -963,10 +973,13 @@
                                   is-global? (if cfg (:is-global? cfg) (layer-is-global? layer-types i))
                                   win (when-not is-global? (or (:sliding-window cfg) (:sliding-window config) (:sliding_window config) 512))
                                   seq-l (if win (min max-seq-len win) max-seq-len)
-                                  h-dim (or (:head-dim cfg) (if is-global? 512 256))
-                                  n-kv (or (:num-kv-heads cfg) 1)]
-                              [[(keyword (str "k_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]
-                               [(keyword (str "v_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]]))
+                                  h-dim (long (or (:head-dim cfg) (if is-global? 512 256)))
+                                  n-kv (long (or (:num-kv-heads cfg) 1))]
+                              (if turboquant?
+                                [[(keyword (str "k_cache_in_" i)) [:tensor [1 seq-l n-kv (quot h-dim 4)] :i8]]
+                                 [(keyword (str "v_cache_in_" i)) [:tensor [1 seq-l n-kv (quot h-dim 4)] :i8]]]
+                                [[(keyword (str "k_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]
+                                 [(keyword (str "v_cache_in_" i)) [:tensor [1 seq-l n-kv h-dim] norm-dtype]]])))
                           (range num-unshared))
         weight-invars (subvec (build-tensor-logic-invars (assoc config :last-token-only? true) max-seq-len) 2)]
     (vec (concat [[:x [:tensor [1 1] :i32]]

@@ -208,4 +208,9 @@
      :norm-enum norm-enum
      :backend (or (:backend opts) (:target opts))
      :target (or (:target opts) (:backend opts))
-     :use-w4a16-gemv (:use-w4a16-gemv opts)}))
+     :use-w4a16-gemv (:use-w4a16-gemv opts)
+     :kv-quant (:kv-quant opts)
+     :turboquant-kv? (boolean (or (:turboquant-kv? opts)
+                                  (:turboquant-kv opts)
+                                  (= (:kv-quant opts) :turboquant)
+                                  (= (:kv-quant opts) :turbo-kv)))}))

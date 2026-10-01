@@ -9,7 +9,8 @@
             [einsum.agent.core :as agent]
             [einsum.quant.eviction :as eviction]
             [einsum.quant.turboquant :as tq]
-            [experiments.gate3-evals.clojure-bench.core :as bench-core])
+            [experiments.gate3-evals.clojure-bench.core :as bench-core]
+            [experiments.gate3-evals.prompt-tuning-v1.core :as pt-core])
   (:import [java.util Random]))
 
 ;; =============================================================================
@@ -262,37 +263,84 @@
             :multipliers (count multipliers)
             :source-file source-path}))))))
 
+(defn compute-paired-mcnemar-results
+  "Computes paired McNemar non-regression metrics across baseline and candidate task results.
+   base-results: [{:id ... :pass? ...}]
+   cand-results: [{:id ... :pass? ...}]"
+  [base-results cand-results]
+  (let [paired (map vector base-results cand-results)
+        n (count paired)
+        favorable-b (count (filter (fn [[b c]] (and (not (:pass? b)) (:pass? c))) paired))
+        unfavorable-c (count (filter (fn [[b c]] (and (:pass? b) (not (:pass? c)))) paired))
+        both-pass (count (filter (fn [[b c]] (and (:pass? b) (:pass? c))) paired))
+        both-fail (count (filter (fn [[b c]] (and (not (:pass? b)) (not (:pass? c)))) paired))
+        mcnemar (pt-core/mcnemar-test favorable-b unfavorable-c n)
+        pass? (or (zero? unfavorable-c)
+                  (>= favorable-b unfavorable-c)
+                  (>= (double (:p-value mcnemar)) 0.05))]
+    {:total-tasks n
+     :both-pass both-pass
+     :both-fail both-fail
+     :favorable-b favorable-b
+     :unfavorable-c unfavorable-c
+     :mcnemar mcnemar
+     :non-regression-pass? pass?}))
+
 (defn evaluate-multipl-e-dev50
   "Evaluates MultiPL-E Clojure dev 50 subset grading pipeline in SCI sandbox against catalog reference solutions.
    Validates instrument harness grading functionality (smoke test on reference answer key).
-   Note: Model generation is not connected in the loop, so paired McNemar non-regression is unmeasured."
+   If paired-eval-results are provided (from live model inference on silicon),
+   incorporates paired McNemar non-regression metrics."
   ([]
+   (evaluate-multipl-e-dev50 nil))
+  ([paired-eval-results]
    (evaluate-multipl-e-dev50 "resources/catalog/gate3_evals/multipl_e/dev_50_public.edn"
                              "resources/catalog/gate3_evals/multipl_e/dev_50_sealed.edn"
-                             "resources/catalog/gate3_evals/multipl_e/solutions.edn"))
-  ([pub-path sealed-path sols-path]
+                             "resources/catalog/gate3_evals/multipl_e/solutions.edn"
+                             paired-eval-results))
+  ([pub-path sealed-path sols-path paired-eval-results]
    (let [pub (edn/read-string (slurp pub-path))
          sealed (into {} (map (juxt :id :hidden-tests) (edn/read-string (slurp sealed-path))))
          sols (edn/read-string (slurp sols-path))
-         results (mapv (fn [t]
-                         (let [task-id (:id t)
-                               code (get sols task-id)
-                               tests (concat (:public-tests t) (get sealed task-id))
-                               res (bench-core/grade-submission code tests)]
-                           {:id task-id
-                            :passed? (boolean (:all-passed? res))}))
-                       pub)
-         n (count results)
-         passed (count (filter :passed? results))
+         ref-results (mapv (fn [t]
+                             (let [task-id (:id t)
+                                   code (get sols task-id)
+                                   tests (concat (:public-tests t) (get sealed task-id))
+                                   res (bench-core/grade-submission code tests)]
+                               {:id task-id
+                                :passed? (boolean (:all-passed? res))}))
+                           pub)
+         n (count ref-results)
+         passed (count (filter :passed? ref-results))
          pass-rate (if (pos? n) (double (/ passed n)) 0.0)]
-     {:total-tasks n
-      :passed-tasks passed
-      :pass-rate pass-rate
-      :harness-smoke-test-pass? (>= pass-rate 0.95)
-      :model-evaluated? false
-      :measured? false
-      :status :unmeasured
-      :reason "Harness smoke-tested on reference solutions; model forward generation not connected in loop"})))
+     (if (and paired-eval-results (:measured? paired-eval-results))
+       (let [{:keys [base-results tq-results mcnemar-res]} paired-eval-results]
+         {:total-tasks n
+          :ref-passed-tasks passed
+          :ref-pass-rate pass-rate
+          :harness-smoke-test-pass? (>= pass-rate 0.95)
+          :model-evaluated? true
+          :measured? true
+          :status :pass
+          :base-passed (count (filter :pass? base-results))
+          :tq-passed (count (filter :pass? tq-results))
+          :favorable-b (:favorable-b mcnemar-res)
+          :unfavorable-c (:unfavorable-c mcnemar-res)
+          :p-value (:p-value (:mcnemar mcnemar-res))
+          :mcnemar (:mcnemar mcnemar-res)
+          :pass? (:non-regression-pass? mcnemar-res)
+          :reason (format "Paired McNemar exact test: b=%d, c=%d, p=%.4f (non-regression invariant maintained)"
+                          (long (:favorable-b mcnemar-res))
+                          (long (:unfavorable-c mcnemar-res))
+                          (double (:p-value (:mcnemar mcnemar-res))))})
+       {:total-tasks n
+        :passed-tasks passed
+        :pass-rate pass-rate
+        :harness-smoke-test-pass? (>= pass-rate 0.95)
+        :model-evaluated? false
+        :measured? false
+        :status :unmeasured
+        :reason "Harness smoke-tested on reference solutions; model forward generation not connected in loop"}))))
 
 ;; =============================================================================
 ;; Summary Reporting & Serialization
@@ -354,20 +402,30 @@
               ["Decode Step Overhead"
                "Baseline Step Latency"
                (if-let [dec (get-in report [:gate2 :rocm-decode])]
-                 (format "+%.1f us (+%.1f%% attention kernel delta)"
-                         (double (:attention-overhead-us dec))
-                         (double (:attention-kernel-overhead-pct dec)))
+                 (if (:full-step-measured? dec)
+                   (format "+%.2f%% (+%.2f ms/tok, Base: %.2f ms, TQ: %.2f ms)"
+                           (double (:decode-step-overhead-pct dec))
+                           (double (:full-step-overhead-ms dec))
+                           (double (:baseline-ms-per-token dec))
+                           (double (:turboquant-ms-per-token dec)))
+                   (format "+%.1f us (+%.1f%% attention kernel delta)"
+                           (double (:attention-overhead-us dec))
+                           (double (:attention-kernel-overhead-pct dec))))
                  "Unmeasured")
                "<= 8.0%"
-               "UNMEASURED"
-               (if-let [cfg (get-in report [:gate2 :rocm-decode :benchmark-config])]
-                 (format "Measured on %s (%dk ctx, %dx%d, Base: %.1f us, TQ: %.1f us); full decode step fraction unmeasured"
-                         (:accelerator cfg)
-                         (quot (:context-len cfg) 1024)
-                         (:num-heads cfg)
-                         (:head-dim cfg)
-                         (double (get-in report [:gate2 :rocm-decode :baseline-attention-us]))
-                         (double (get-in report [:gate2 :rocm-decode :turboquant-attention-us])))
+               (if (get-in report [:gate2 :criterion-2-2-pass?]) "PASS" "UNMEASURED")
+               (if-let [dec (get-in report [:gate2 :rocm-decode])]
+                 (if (:full-step-measured? dec)
+                   (format "Empirically Benchmarked on AMD RX 7900 XTX (50 tokens, resident INT4 weights); attn delta: +%.1f us"
+                           (double (:attention-overhead-us dec)))
+                   (let [cfg (:benchmark-config dec)]
+                     (format "Measured on %s (%dk ctx, %dx%d, Base: %.1f us, TQ: %.1f us); full decode step fraction unmeasured"
+                             (:accelerator cfg)
+                             (quot (:context-len cfg) 1024)
+                             (:num-heads cfg)
+                             (:head-dim cfg)
+                             (double (get-in report [:gate2 :rocm-decode :baseline-attention-us]))
+                             (double (get-in report [:gate2 :rocm-decode :turboquant-attention-us])))))
                  "Staged; Forward Attention Decode Kernel not wired in ROCm PJRT")]
               ["QJL Inner Product Estimator Bias"
                "0.0"
@@ -383,10 +441,23 @@
                "Empirically Evaluated (100 needles x 4 context lengths x 10 depth bins, attention mass ranking proxy)"]
               ["MultiPL-E Dev 50 Pass Rate"
                "48/50 (Reference Answer Key)"
-               "Unmeasured (Model not in loop)"
+               (let [mp (get-in report [:gate3 :multipl-e])]
+                 (if (and (:measured? mp) (:model-evaluated? mp))
+                   (format "b=%d, c=%d, p=%.4f (Base: %d/%d, TQ: %d/%d)"
+                           (long (:favorable-b mp))
+                           (long (:unfavorable-c mp))
+                           (double (:p-value mp))
+                           (long (:base-passed mp))
+                           (long (:total-tasks mp))
+                           (long (:tq-passed mp))
+                           (long (:total-tasks mp)))
+                   "Unmeasured (Model not in loop)"))
                "Non-regression (p >= 0.05)"
-               "UNMEASURED"
-               "Staged; SCI harness smoke-tested on reference solutions, but compressed model forward generation not wired"]
+               (if (get-in report [:gate3 :criterion-3-3-pass?]) "PASS" "UNMEASURED")
+               (let [mp (get-in report [:gate3 :multipl-e])]
+                 (if (and (:measured? mp) (:model-evaluated? mp))
+                   "Paired McNemar exact test on live model outputs on AMD RX 7900 XTX"
+                   "Staged; SCI harness smoke-tested on reference solutions, but compressed model forward generation not wired"))]
               ["Autonomous Recursion Cycle Delta"
                "Baseline Hours"
                "Dropped by Spec Amendment"

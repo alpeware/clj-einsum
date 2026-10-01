@@ -228,6 +228,12 @@
              (= arg "--ternary")
              (recur (subvec remaining 1) (assoc opts :precision :ternary :is-ternary true))
 
+             (or (= arg "--turboquant-kv") (= arg "--turbo-kv"))
+             (recur (subvec remaining 1) (assoc opts :turboquant-kv true :turboquant-kv? true :kv-quant :turboquant))
+
+             (= arg "--kv-quant")
+             (recur (subvec remaining 2) (assoc opts :kv-quant (keyword (str/replace val #"^:+" ""))))
+
              ;; Comma-separated set of integers
              (= arg "--skip-layers")
              (let [layers (into #{} (map #(Long/parseLong (str/trim %)) (str/split val #",")))]

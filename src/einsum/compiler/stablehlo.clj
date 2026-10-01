@@ -246,7 +246,8 @@
                                 "tensor<i1>")]
                     (assoc acc (first outvars) out-t))
 
-                  (or (= op :stablehlo/not) (= op :stablehlo/and) (= op :stablehlo/or) (= op :stablehlo/shift_right_logical))
+                  (or (= op :stablehlo/not) (= op :stablehlo/and) (= op :stablehlo/or)
+                      (= op :stablehlo/shift_right_logical) (= op :stablehlo/shift_left))
                   (let [in-t (get acc (first in-vars) "tensor<i1>")
                         [in-dims in-dtype] (or (parse-tensor-dims in-t) [[] "i1"])
                         dtype-str (or in-dtype "i1")
