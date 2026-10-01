@@ -98,6 +98,8 @@
    (println "==================================================================")
    (let [lengths (or (:lengths user-opts) [16384 32768])
          model-path (or (:model user-opts) ".models/gemma-4-e4b-it-qat-int4")
+         turbo? (get user-opts :turboquant-kv? (get user-opts :turboquant-kv true))
+         kv-label (if turbo? "Fast-TurboQuant 2-Bit" "Uncompressed BF16")
          tok (tok/from-file model-path)
          results-by-len
          (mapv
@@ -105,8 +107,8 @@
             (let [session-opts (merge {:backend :rocm
                                        :target :rocm
                                        :model model-path
-                                       :kv-quant :turboquant
-                                       :turboquant-kv? true
+                                       :kv-quant (if turbo? :turboquant :bf16)
+                                       :turboquant-kv? turbo?
                                        :max-seq-len len
                                        :max-new-tokens 15}
                                       user-opts)
@@ -129,7 +131,8 @@
          total-prefix (reduce + (map :prefix-passes results-by-len))
          summary {:pilot "model-in-the-loop-niah-16k-32k"
                   :model model-path
-                  :kv-cache "Fast-TurboQuant 2-Bit"
+                  :kv-cache kv-label
+                  :turboquant-kv? turbo?
                   :total-samples total-samples
                   :total-exact-passes total-exact
                   :overall-exact-accuracy (/ (double total-exact) (double total-samples))
@@ -137,7 +140,7 @@
                   :overall-prefix-accuracy (/ (double total-prefix) (double total-samples))
                   :results-by-length results-by-len}]
      (println "\n==================================================================")
-     (println "=== Model-in-the-Loop NIAH Pilot Summary ===")
+     (println (format "=== Model-in-the-Loop NIAH Pilot Summary (%s) ===" kv-label))
      (println "==================================================================")
      (doseq [r results-by-len]
        (println (format "  • %5d Tokens: %2d/%2d Exact Match (%.1f%%) | %2d/%2d Prefix/Component Match (%.1f%%)"
@@ -149,10 +152,74 @@
      (println "==================================================================")
      summary)))
 
-(defn -main [& _args]
-  (let [summary (run-niah-pilot)
-        out-file (io/file "resources/proposals/gate1_compression/tiered_turbo_kv/niah_pilot_results.edn")]
-    (.mkdirs (.getParentFile out-file))
-    (spit out-file (with-out-str (pprint summary)))
-    (println (format "Saved pilot results to [%s]" (.getPath out-file))))
+(defn run-niah-probe-64k
+  "Runs a single 64k context probe on AMD Radeon RX 7900 XTX to document long-context behavior
+   under Fast-TurboQuant 2-Bit KV cache, saving the telemetry and raw output to disk."
+  ([] (run-niah-probe-64k {}))
+  ([user-opts]
+   (println "==================================================================")
+   (println "=== Model-in-the-Loop 64k NIAH Probe on AMD RX 7900 XTX ===")
+   (println "==================================================================")
+   (let [model-path (or (:model user-opts) ".models/gemma-4-e4b-it-qat-int4")
+         tok (tok/from-file model-path)
+         seq-len 65536
+         target-tokens (- seq-len 500)
+         needle (nth TEST-NEEDLES 4) ;; Depth 0.50, PLATINUM-508
+         session-opts (merge {:backend :rocm
+                              :target :rocm
+                              :model model-path
+                              :kv-quant :turboquant
+                              :turboquant-kv? true
+                              :max-seq-len seq-len
+                              :max-new-tokens 25}
+                             user-opts)
+         session (runtime/init-agent-vram-session session-opts seq-len)
+         prompt (build-haystack-prompt tok target-tokens (:depth needle) (:needle needle) QUERY-PROMPT)
+         prompt-len (count (tok-proto/encode tok prompt))
+         t0 (System/nanoTime)
+         res (runtime/generate-new-tokens-and-text session prompt)
+         t1 (System/nanoTime)
+         elapsed-s (/ (- t1 t0) 1e9)
+         eval-res (evaluate-needle-output (:text res) (:key needle))
+         _ (runtime/close-agent-session! session)
+         probe-summary (merge {:probe "model-in-the-loop-niah-64k-probe"
+                               :model model-path
+                               :kv-cache "Fast-TurboQuant 2-Bit"
+                               :seq-len seq-len
+                               :target-tokens target-tokens
+                               :prompt-tokens prompt-len
+                               :needle needle
+                               :elapsed-s elapsed-s
+                               :prefill-ms (double (or (:prefill-ms res) 0.0))
+                               :decode-ms (double (or (:decode-ms res) 0.0))
+                               :decode-tok-s (double (or (:decode-tok-s res) 0.0))
+                               :raw-output (:text res)}
+                              eval-res)
+         out-file (io/file "resources/proposals/gate1_compression/tiered_turbo_kv/niah_probe_64k.edn")]
+     (println (format "64k Probe Result: Match=%s | Output: %s (%.1fs)"
+                      (str (:pass? eval-res)) (pr-str (:output-clean eval-res)) elapsed-s))
+     (.mkdirs (.getParentFile out-file))
+     (spit out-file (with-out-str (pprint probe-summary)))
+     (println (format "Saved 64k probe results to [%s]" (.getPath out-file)))
+     probe-summary)))
+
+(defn -main [& args]
+  (let [mode (first args)]
+    (cond
+      (= mode "baseline")
+      (let [summary (run-niah-pilot {:turboquant-kv? false :kv-quant :bf16})
+            out-file (io/file "resources/proposals/gate1_compression/tiered_turbo_kv/niah_pilot_baseline_results.edn")]
+        (.mkdirs (.getParentFile out-file))
+        (spit out-file (with-out-str (pprint summary)))
+        (println (format "Saved baseline pilot results to [%s]" (.getPath out-file))))
+
+      (= mode "probe64k")
+      (run-niah-probe-64k)
+
+      :else
+      (let [summary (run-niah-pilot)
+            out-file (io/file "resources/proposals/gate1_compression/tiered_turbo_kv/niah_pilot_results.edn")]
+        (.mkdirs (.getParentFile out-file))
+        (spit out-file (with-out-str (pprint summary)))
+        (println (format "Saved pilot results to [%s]" (.getPath out-file))))))
   (System/exit 0))

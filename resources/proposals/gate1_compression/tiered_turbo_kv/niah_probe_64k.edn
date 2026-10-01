@@ -1,0 +1,22 @@
+{:decode-ms 786.692096,
+ :seq-len 65536,
+ :exact-match? false,
+ :needle
+ {:depth-bin 4,
+  :depth 0.5,
+  :key "PLATINUM-508",
+  :needle "NOTE: The special secret code is PLATINUM-508."},
+ :elapsed-s 66.084051099,
+ :kv-cache "Fast-TurboQuant 2-Bit",
+ :output-clean
+ "The quick brown fox jumps over the lazy dog. Immutable persistent data structures ensure safe concurrency in modern systems across distributed architectures.",
+ :target-tokens 65036,
+ :prefix-match? false,
+ :prompt-tokens 63612,
+ :prefill-ms 64813.912189,
+ :probe "model-in-the-loop-niah-64k-probe",
+ :pass? false,
+ :raw-output
+ "The quick brown fox jumps over the lazy dog. Immutable persistent data structures ensure safe concurrency in modern systems across distributed architectures.<turn|>",
+ :decode-tok-s 31.778633759147365,
+ :model ".models/gemma-4-e4b-it-qat-int4"}

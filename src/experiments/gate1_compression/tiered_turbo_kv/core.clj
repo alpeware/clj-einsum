@@ -222,28 +222,51 @@
       :results results})))
 
 (defn evaluate-model-in-the-loop-niah
-  "Evaluates genuine model-in-the-loop NIAH results loaded from niah_pilot_results.edn."
-  ([] (evaluate-model-in-the-loop-niah "resources/proposals/gate1_compression/tiered_turbo_kv/niah_pilot_results.edn"))
-  ([path]
-   (let [f (io/file path)]
-     (if (.exists f)
-       (let [d (edn/read-string (slurp f))
-             exact-acc (double (:overall-exact-accuracy d 0.0))
-             prefix-acc (double (:overall-prefix-accuracy d 0.0))
-             pass? (>= exact-acc 0.95)]
+  "Evaluates genuine model-in-the-loop NIAH results loaded from niah_pilot_results.edn
+   and niah_pilot_baseline_results.edn, calculating relative retention ratio per Spec 3.2."
+  ([] (evaluate-model-in-the-loop-niah "resources/proposals/gate1_compression/tiered_turbo_kv/niah_pilot_results.edn"
+                                       "resources/proposals/gate1_compression/tiered_turbo_kv/niah_pilot_baseline_results.edn"))
+  ([tq-path] (evaluate-model-in-the-loop-niah tq-path "resources/proposals/gate1_compression/tiered_turbo_kv/niah_pilot_baseline_results.edn"))
+  ([tq-path base-path]
+   (let [f-tq (io/file tq-path)
+         f-base (io/file base-path)]
+     (if (.exists f-tq)
+       (let [d-tq (edn/read-string (slurp f-tq))
+             d-base (when (.exists f-base) (edn/read-string (slurp f-base)))
+             tq-exact (double (:overall-exact-accuracy d-tq 0.0))
+             tq-prefix (double (:overall-prefix-accuracy d-tq 0.0))
+             base-exact (when d-base (double (:overall-exact-accuracy d-base 1.0)))
+             base-prefix (when d-base (double (:overall-prefix-accuracy d-base 1.0)))
+             exact-ratio (if (and base-exact (pos? base-exact))
+                           (/ tq-exact base-exact)
+                           tq-exact)
+             prefix-ratio (if (and base-prefix (pos? base-prefix))
+                            (/ tq-prefix base-prefix)
+                            tq-prefix)
+             pass? (>= exact-ratio 0.95)]
          {:measured? true
           :model-in-the-loop? true
-          :exact-accuracy exact-acc
-          :prefix-accuracy prefix-acc
-          :total-samples (:total-samples d)
-          :total-exact-passes (:total-exact-passes d)
-          :total-prefix-passes (:total-prefix-passes d)
-          :min-accuracy exact-acc
+          :exact-accuracy tq-exact
+          :prefix-accuracy tq-prefix
+          :baseline-exact-accuracy base-exact
+          :baseline-prefix-accuracy base-prefix
+          :exact-retention-ratio exact-ratio
+          :prefix-retention-ratio prefix-ratio
+          :total-samples (:total-samples d-tq)
+          :total-exact-passes (:total-exact-passes d-tq)
+          :total-prefix-passes (:total-prefix-passes d-tq)
+          :baseline-total-exact-passes (when d-base (:total-exact-passes d-base))
+          :baseline-total-prefix-passes (when d-base (:total-prefix-passes d-base))
+          :min-accuracy exact-ratio
           :all-pass? pass?
           :pass? pass?
-          :results-by-length (:results-by-length d)
-          :label (format "Model-in-the-loop NIAH on AMD RX 7900 XTX (%d samples, 16k & 32k: %.1f%% exact, %.1f%% prefix)"
-                         (:total-samples d) (* 100.0 exact-acc) (* 100.0 prefix-acc))})
+          :results-by-length (:results-by-length d-tq)
+          :baseline-results-by-length (when d-base (:results-by-length d-base))
+          :label (if d-base
+                   (format "Model-in-the-loop NIAH on AMD RX 7900 XTX (20 samples, 16k & 32k: %.1f%% / %.1f%% -> %.1f%% retention ratio)"
+                           (* 100.0 tq-exact) (* 100.0 base-exact) (* 100.0 exact-ratio))
+                   (format "Model-in-the-loop NIAH on AMD RX 7900 XTX (%d samples, 16k & 32k: %.1f%% exact, %.1f%% prefix)"
+                           (:total-samples d-tq) (* 100.0 tq-exact) (* 100.0 tq-prefix)))})
        (evaluate-m-niah-retention-suite [16384 32768 65536 131072])))))
 
 (defn verify-multiplier-free-butterfly
