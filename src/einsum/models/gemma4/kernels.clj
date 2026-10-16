@@ -187,8 +187,14 @@
                                         :else nil)
                                   seq-l (if win (min max-seq-len win) max-seq-len)
                                   h-dim (long (or (:head-dim cfg)
-                                                  (if is-global? 512 256)))
-                                  n-kv (long (or (:num-kv-heads cfg) 1))]
+                                                  (if is-global?
+                                                    (or (:global-head-dim config) 512)
+                                                    (or (:head-dim config) 256))))
+                                  n-kv (long (or (:num-kv-heads cfg)
+                                                 (if is-global?
+                                                   (or (:num-global-kv-heads config) 1)
+                                                   (:num-kv-heads config))
+                                                 1))]
                               (if turboquant?
                                 [[(keyword (str "k_cache_in_" i)) [:tensor [1 seq-l n-kv (quot h-dim 4)] :i8]]
                                  [(keyword (str "v_cache_in_" i)) [:tensor [1 seq-l n-kv (quot h-dim 4)] :i8]]]
@@ -244,8 +250,15 @@
                                 (not is-global?) (or (:sliding-window c) (:sliding-window config) (:sliding_window config) 512)
                                 :else nil)
                           seq-l (if win (min max-seq-len win) max-seq-len)
-                          n-kv (long (or (:num-kv-heads c) 1))
-                          h-dim (long (or (:head-dim c) (if is-global? 512 256)))
+                          n-kv (long (or (:num-kv-heads c)
+                                         (if is-global?
+                                           (or (:num-global-kv-heads config) 1)
+                                           (:num-kv-heads config))
+                                         1))
+                          h-dim (long (or (:head-dim c)
+                                          (if is-global?
+                                            (or (:global-head-dim config) 512)
+                                            (or (:head-dim config) 256))))
                           [k-buf v-buf] (if turboquant?
                                           (let [packed-dim (quot h-dim 4)
                                                 zeros (byte-array (* seq-l n-kv packed-dim))]
@@ -326,14 +339,21 @@
   (let [cfg (assoc config :max-seq-len max-seq-len :last-token-only? true)
         invars (build-tensor-logic-invars cfg max-seq-len)
         targets (build-gemma4-prefill-outvars cfg)
-        ast (gemma-logic/gemma4-model-ast cfg)
-        _ (when-not (:quiet opts)
-            (println (format "Lowering declarative Tensor Logic Gemma 4 Prefill (%d layers, max-seq-len=%d) to StableHLO..."
-                             (:num-layers config) max-seq-len)))
-        graph (lower/ast->graph "gemma4_prefill" invars ast targets)]
-    (when-not (:quiet opts)
-      (println "Compiling Gemma 4 Prefill graph to native XLA PjRtLoadedExecutable..."))
-    (xla/compile-graph ctx graph)))
+        ast (gemma-logic/gemma4-model-ast cfg)]
+    (if (= (:backend ctx) :uop)
+      (let [compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
+        (when-not (:quiet opts)
+          (println (format "Compiling declarative Tensor Logic Gemma 4 Prefill (%d layers, max-seq-len=%d) via pure-Clojure UOp backend..."
+                           (:num-layers config) max-seq-len)))
+        (compile-uop ctx "gemma4_prefill" invars ast targets))
+      (do
+        (when-not (:quiet opts)
+          (println (format "Lowering declarative Tensor Logic Gemma 4 Prefill (%d layers, max-seq-len=%d) to StableHLO..."
+                           (:num-layers config) max-seq-len)))
+        (let [graph (lower/ast->graph "gemma4_prefill" invars ast targets)]
+          (when-not (:quiet opts)
+            (println "Compiling Gemma 4 Prefill graph to native XLA PjRtLoadedExecutable..."))
+          (xla/compile-graph ctx graph))))))
 
 (defn compile-gemma4-kv-executable
   "Compiles single-step Gemma 4 KV-Cache AST into a native StableHLO MLIR executable."
@@ -341,14 +361,21 @@
   (let [cfg (assoc config :max-seq-len max-seq-len :last-token-only? true)
         invars (build-gemma4-kv-invars cfg max-seq-len)
         targets (build-gemma4-kv-outvars cfg)
-        ast (gemma-logic/gemma4-kv-model-ast cfg)
-        _ (when-not (:quiet opts)
-            (println (format "Lowering declarative Tensor Logic Gemma 4 KV Cache Step (%d layers, max-seq-len=%d) to StableHLO..."
-                             (:num-layers config) max-seq-len)))
-        graph (lower/ast->graph "gemma4_kv_step" invars ast targets)]
-    (when-not (:quiet opts)
-      (println "Compiling Gemma 4 KV Cache step graph to native XLA PjRtLoadedExecutable..."))
-    (xla/compile-graph ctx graph)))
+        ast (gemma-logic/gemma4-kv-model-ast cfg)]
+    (if (= (:backend ctx) :uop)
+      (let [compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
+        (when-not (:quiet opts)
+          (println (format "Compiling declarative Tensor Logic Gemma 4 KV Cache Step (%d layers, max-seq-len=%d) via pure-Clojure UOp backend..."
+                           (:num-layers config) max-seq-len)))
+        (compile-uop ctx "gemma4_kv_step" invars ast targets))
+      (do
+        (when-not (:quiet opts)
+          (println (format "Lowering declarative Tensor Logic Gemma 4 KV Cache Step (%d layers, max-seq-len=%d) to StableHLO..."
+                           (:num-layers config) max-seq-len)))
+        (let [graph (lower/ast->graph "gemma4_kv_step" invars ast targets)]
+          (when-not (:quiet opts)
+            (println "Compiling Gemma 4 KV Cache step graph to native XLA PjRtLoadedExecutable..."))
+          (xla/compile-graph ctx graph))))))
 
 (defn compile-gemma4-chunked-prefill-executable
   "Compiles chunked Gemma 4 KV-Cache AST into a native StableHLO MLIR executable.
@@ -364,14 +391,21 @@
                     :last-token-only? true)
          invars (build-gemma4-kv-invars cfg max-seq-len)
          targets (build-gemma4-kv-outvars cfg)
-         ast (gemma-logic/gemma4-kv-model-ast cfg)
-         _ (when-not (:quiet opts)
-             (println (format "Lowering declarative Tensor Logic Gemma 4 Chunked Prefill (%d layers, chunk-size=%d, max-seq-len=%d) to StableHLO..."
-                              (:num-layers config) chunk-sz max-seq-len)))
-         graph (lower/ast->graph "gemma4_chunked_prefill" invars ast targets)]
-     (when-not (:quiet opts)
-       (println "Compiling Gemma 4 Chunked Prefill graph to native XLA PjRtLoadedExecutable..."))
-     (xla/compile-graph ctx graph))))
+         ast (gemma-logic/gemma4-kv-model-ast cfg)]
+     (if (= (:backend ctx) :uop)
+       (let [compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
+         (when-not (:quiet opts)
+           (println (format "Compiling declarative Tensor Logic Gemma 4 Chunked Prefill (%d layers, chunk-size=%d, max-seq-len=%d) via pure-Clojure UOp backend..."
+                            (:num-layers config) chunk-sz max-seq-len)))
+         (compile-uop ctx "gemma4_chunked_prefill" invars ast targets))
+       (do
+         (when-not (:quiet opts)
+           (println (format "Lowering declarative Tensor Logic Gemma 4 Chunked Prefill (%d layers, chunk-size=%d, max-seq-len=%d) to StableHLO..."
+                            (:num-layers config) chunk-sz max-seq-len)))
+         (let [graph (lower/ast->graph "gemma4_chunked_prefill" invars ast targets)]
+           (when-not (:quiet opts)
+             (println "Compiling Gemma 4 Chunked Prefill graph to native XLA PjRtLoadedExecutable..."))
+           (xla/compile-graph ctx graph)))))))
 
 (defn compile-gemma4-attention-decode-executable
   "Compiles single-step Gemma 4 attention decode executable into a native StableHLO MLIR executable.

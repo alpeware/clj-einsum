@@ -94,6 +94,21 @@
     (when (seq wins)
       (reduce min wins))))
 
+(defn- execute-step-executable
+  "Executes a compiled step, chunk, or prefill executable (PJRT or UOp) given step inputs."
+  [ctx exec step-inputs num-outs]
+  (if (or (= (:backend ctx) :uop) (:uop-executable? exec))
+    (let [exec-uop (requiring-resolve 'einsum.uop.runtime/execute-uop-executable)
+          out-map (exec-uop ctx exec step-inputs)]
+      (if (== (long num-outs) 1)
+        (first (vals out-map))
+        (let [sched-outvars (get-in exec [:uop-graph :outvars])
+              ordered (if (seq sched-outvars)
+                        (mapv #(get out-map %) sched-outvars)
+                        (vec (vals out-map)))]
+          ordered)))
+    (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs)))
+
 (defn run-vram-loop-generation
   "Executes autoregressive token generation entirely within device VRAM using 1-shot prefill
    (or sequential prefill for large contexts, with prefix KV-cache reuse across agent turns)
@@ -181,7 +196,7 @@
                                       x-b (xla/device-buffer iter-arena x-arr [1 1] :i32)
                                       pos-b (xla/device-buffer iter-arena pos-arr [1] :i32)
                                       step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                      outs (xla/track! iter-arena (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                                      outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
                                       outs-vec (if (vector? outs) outs [outs])
                                       nk (vec (subvec outs-vec 1))]
                                   (xla/promote! iter-arena session-arena nk)
@@ -199,7 +214,7 @@
                       prefill-inputs (into [in-b pos-b] device-weights)
                       num-prefill-outs (inc (* 2 num-unshared))
                       prefill-outs (xla/track! prefill-arena
-                                               (pjrt/execute-executable ctx (or (:handle prefill-exec) prefill-exec) prefill-inputs num-prefill-outs))
+                                               (execute-step-executable ctx (or (:handle prefill-exec) prefill-exec) prefill-inputs num-prefill-outs))
                       prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
                       kv-outs (vec (subvec prefill-outs-vec 1))]
                   (xla/promote! prefill-arena session-arena kv-outs)
@@ -235,7 +250,7 @@
                                           x-b (xla/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
                                           pos-b (xla/device-buffer iter-arena pos-c [1] :i32)
                                           step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                          outs (xla/track! iter-arena (pjrt/execute-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-step-outs))
+                                          outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-step-outs))
                                           outs-vec (if (vector? outs) outs [outs])
                                           nk (vec (subvec outs-vec 1))]
                                       (xla/promote! iter-arena session-arena nk)
@@ -255,7 +270,7 @@
                                     x-b (xla/device-buffer iter-arena x-arr [1 1] :i32)
                                     pos-b (xla/device-buffer iter-arena pos-arr [1] :i32)
                                     step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                    outs (xla/track! iter-arena (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                                    outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
                                     outs-vec (if (vector? outs) outs [outs])
                                     nk (vec (subvec outs-vec 1))]
                                 (xla/promote! iter-arena session-arena nk)
@@ -477,7 +492,7 @@
                                                x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
                                                pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
                                                step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                               outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                               outs (xla/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
                                                outs-vec (if (vector? outs) outs [outs])
                                                nl (first outs-vec)
                                                nk (vec (subvec outs-vec 1))]
@@ -503,7 +518,7 @@
                              in-b (xla/device-buffer step-arena in-arr [1 seq-len] :i32)
                              pos-b (xla/device-buffer step-arena pos-p [1] :i32)
                              step-inputs (into [in-b pos-b] device-weights)
-                             outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle prefill-exec) prefill-exec) step-inputs num-outs))
+                             outs (xla/track! step-arena (execute-step-executable ctx (or (:handle prefill-exec) prefill-exec) step-inputs num-outs))
                              outs-vec (if (vector? outs) outs [outs])
                              pl (first outs-vec)
                              pkv (vec (subvec outs-vec 1))]
@@ -543,7 +558,7 @@
                                            x-b (xla/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
                                            pos-b (xla/device-buffer iter-arena pos-c [1] :i32)
                                            step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                           outs (xla/track! iter-arena (pjrt/execute-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-outs))
+                                           outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-outs))
                                            outs-vec (if (vector? outs) outs [outs])
                                            nl (first outs-vec)
                                            nk (vec (subvec outs-vec 1))]
@@ -570,7 +585,7 @@
                                                      x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
                                                      pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
                                                      step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                                     outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                                     outs (xla/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
                                                      outs-vec (if (vector? outs) outs [outs])
                                                      nl (first outs-vec)
                                                      nk (vec (subvec outs-vec 1))]
@@ -610,7 +625,7 @@
                                x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
                                pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
                                step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                               outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                               outs (xla/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
                                outs-vec (if (vector? outs) outs [outs])
                                nl (first outs-vec)
                                nk (vec (subvec outs-vec 1))]
@@ -1008,11 +1023,11 @@
                                pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
                                target-b (xla/device-buffer step-arena target-arr [1 1] :i32)
                                step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                               outs (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                               outs (xla/track! step-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
                                outs-vec (if (vector? outs) outs [outs])
                                logits-buf (first outs-vec)
                                nk (vec (subvec outs-vec 1))
-                               lp-out (xla/track! step-arena (pjrt/execute-executable ctx (or (:handle target-exec) target-exec) [logits-buf target-b] 1))
+                               lp-out (xla/track! step-arena (execute-step-executable ctx (or (:handle target-exec) target-exec) [logits-buf target-b] 1))
                                lp-buf (if (vector? lp-out) (first lp-out) lp-out)
                                floats (pjrt/buffer-to-host-buffer ctx lp-buf 1 :f32)
                                lp (aget floats 0)]

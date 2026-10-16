@@ -34,6 +34,8 @@
           (uop/uop-reshape (vec (repeat rank 1)))
           (uop/uop-expand target-shape)))))
 
+(declare align-tensor-indices)
+
 (defn- align-and-broadcast
   "Given a tensor UOp `t-uop` with symbolic indices `t-idxs`, aligns and broadcasts it
    to `target-idxs` with `target-shape` using only `:uop/permute`, `:uop/reshape`, and `:uop/expand`."
@@ -54,6 +56,12 @@
     (let [perm (indices->dim-numbers t-idxs target-idxs)]
       (uop/uop-permute t-uop perm))
 
+    ;; Scalar / 1-element tensor can broadcast to any target shape
+    (== 1 (reduce * 1 (or (:shape t-uop) [])))
+    (-> t-uop
+        (uop/uop-reshape (vec (repeat (count target-shape) 1)))
+        (uop/uop-expand target-shape))
+
     ;; Subset of target-idxs: permute to target relative order, reshape with 1s, expand to target-shape
     (set/subset? (set t-idxs) (set target-idxs))
     (let [t-set (set t-idxs)
@@ -67,6 +75,16 @@
       (-> permuted
           (uop/uop-reshape reshaped-1s)
           (uop/uop-expand target-shape)))
+
+    ;; General case with singleton dummy axes (e.g. [:one] or size-1 axes not in target-idxs)
+    (let [dim-map (zipmap t-idxs (:shape t-uop))
+          non-singleton-idxs (vec (remove #(= 1 (get dim-map % 0)) t-idxs))]
+      (set/subset? (set non-singleton-idxs) (set target-idxs)))
+    (let [dim-map (zipmap t-idxs (:shape t-uop))
+          non-singleton-idxs (vec (remove #(= 1 (get dim-map % 0)) t-idxs))
+          non-singleton-shape (mapv #(get dim-map %) non-singleton-idxs)
+          squeezed (uop/uop-reshape t-uop non-singleton-shape)]
+      (align-tensor-indices squeezed non-singleton-idxs target-shape target-idxs))
 
     :else
     (throw (ex-info "Cannot align tensor indices to target indices"
@@ -153,10 +171,9 @@
                     (or clamp (= act :clamp))
                     (let [[low high] (if (sequential? clamp) (vec clamp) [0.0 1.0])
                           c-low (broadcast-scalar dt (double low) sh)
-                          c-high (broadcast-scalar dt (double high) sh)]
-                      (-> scaled
-                          (uop/uop-alu :uop/max c-low)
-                          (uop/uop-alu :uop/min c-high)))
+                          c-high (broadcast-scalar dt (double high) sh)
+                          clamped-low (uop/uop-alu :uop/max scaled c-low)]
+                      (uop/uop-alu :uop/min clamped-low c-high))
 
                     (= act :relu)
                     (uop/uop-alu :uop/max scaled (broadcast-scalar dt 0.0 sh))
@@ -189,11 +206,10 @@
     (if softcap
       (let [cap (double softcap)
             c-cap (broadcast-scalar dt cap sh)
-            c-inv (broadcast-scalar dt (/ 1.0 cap) sh)]
-        (-> activated
-            (uop/uop-alu :uop/mul c-inv)
-            uop-tanh
-            (uop/uop-alu :uop/mul c-cap)))
+            c-inv (broadcast-scalar dt (/ 1.0 cap) sh)
+            scaled-down (uop/uop-alu :uop/mul activated c-inv)
+            tanhed (uop-tanh scaled-down)]
+        (uop/uop-alu :uop/mul tanhed c-cap))
       activated)))
 
 ;; -----------------------------------------------------------------------------
@@ -507,7 +523,7 @@
         k-exp (-> (uop/uop-reshape (uop/uop-permute k-trans [0 1 3 2]) [b h 1 kvs dh])
                   (uop/uop-expand [b h p kvs dh]))
         qk-prod (uop/uop-alu :uop/mul q-exp k-exp)
-        raw-scores (uop/uop-reduce :uop/add qk-prod [4])
+        raw-scores (uop/uop-reduce qk-prod :add [4])
         scale (uop/uop-const :f32 (/ 1.0 (Math/sqrt (double dh))) [1 1 1 1])
         scaled-scores (uop/uop-alu :uop/mul raw-scores (broadcast-shape-suffix scale [b h p kvs]))
         masked-scores (lower-causal-softmax scaled-scores attrs)
@@ -518,7 +534,7 @@
         v-exp (-> (uop/uop-reshape v-trans [b h 1 kvs dh])
                   (uop/uop-expand [b h p kvs dh]))
         sv-prod (uop/uop-alu :uop/mul s-exp v-exp)
-        out-trans (uop/uop-reduce :uop/add sv-prod [3])
+        out-trans (uop/uop-reduce sv-prod :add [3])
         ;; Permute back to [b, p, h, dh]
         out (uop/uop-permute out-trans [0 2 1 3])]
     (if out-shape (uop/uop-reshape out (vec out-shape)) out)))
@@ -586,8 +602,8 @@
 
                     (= op :slice)
                     (let [in-uop (get env (first (first body)))
-                          starts (:start_indices attrs)
-                          limits (:limit_indices attrs)
+                          starts (or (:start_indices attrs) (:start attrs) (:starts attrs))
+                          limits (or (:limit_indices attrs) (:limit attrs) (:limits attrs))
                           bounds (mapv vector starts limits)]
                       (uop/uop-shrink in-uop bounds))
 

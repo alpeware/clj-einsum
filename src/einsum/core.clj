@@ -256,24 +256,38 @@
   ([graph]
    (compile-graph (get-context) graph))
   ([ctx graph]
-   (if (= (:backend ctx) :interpreter)
+   (cond
+     (= (:backend ctx) :interpreter)
      (let [fused (fuse/fuse-graph graph)]
        {:handle fused
         :graph fused
         :backend :interpreter
         :ctx ctx})
+
+     (= (:backend ctx) :uop)
+     (if-let [compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
+       (compile-uop ctx (:name graph "graph") (:invars graph) (or (:ast graph) graph) (:outvars graph))
+       (throw (ex-info "UOp backend runtime not found" {:ctx ctx})))
+
+     :else
      (let [exec (compile/compile-graph ctx (:client ctx) graph)]
        (if (map? exec)
          (assoc exec :ctx ctx)
          exec)))))
 
 (defn buffer-from-host-buffer
-  "Transfers host primitive array/buffer into native PJRT device memory buffer."
+  "Transfers host primitive array/buffer into native PJRT device memory buffer or UOp device buffer."
   ([host-data shape dtype-enum]
    (let [ctx (get-context)]
-     (pjrt/buffer-from-host-buffer ctx (:client ctx) host-data shape dtype-enum)))
+     (buffer-from-host-buffer ctx (:client ctx) host-data shape dtype-enum)))
   ([ctx client host-data shape dtype-enum]
-   (pjrt/buffer-from-host-buffer ctx client host-data shape dtype-enum)))
+   (if (= (:backend ctx) :uop)
+     (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)
+           dt (if (keyword? dtype-enum)
+                dtype-enum
+                (case (int dtype-enum) 1 :i1 2 :i8 4 :i32 10 :f16 11 :f32 13 :bf16 :f32))]
+       (host->dev ctx host-data shape dt))
+     (pjrt/buffer-from-host-buffer ctx client host-data shape dtype-enum))))
 
 (defn execute
   "Executes a compiled StableHLO graph executable on the PJRT device runtime or pure-JVM interpreter."
@@ -287,7 +301,8 @@
                       :else exec)]
     (if-not exec-handle
       (throw (ex-info "Invalid executable handle" {:exec exec}))
-      (if (= (:backend ctx) :interpreter)
+      (cond
+        (= (:backend ctx) :interpreter)
         (let [invars (or (get-in exec [:graph :invars]) [])
               input-tensors (mapv (fn [idx input-data]
                                     (if (and (map? input-data) (contains? input-data :data))
@@ -305,6 +320,19 @@
           (if (= 1 (count (get-in exec [:graph :outvars])))
             (val (first out-map))
             out-map))
+
+        (or (= (:backend ctx) :uop) (:uop-executable? exec))
+        (let [exec-uop (requiring-resolve 'einsum.uop.runtime/execute-uop-executable)
+              out-map (exec-uop ctx exec flat-inputs)
+              outvars (or (get-in exec [:uop-graph :outvars]) (get-in exec [:graph :outvars]))
+              ordered (if (seq outvars)
+                        (mapv #(get out-map %) outvars)
+                        (vec (vals out-map)))]
+          (if (= 1 (count ordered))
+            (first ordered)
+            ordered))
+
+        :else
         (let [invars (or (get-in exec [:graph :invars]) [])
               all-segs? (every? #(instance? MemorySegment %) flat-inputs)
               device-buffers (if all-segs?
