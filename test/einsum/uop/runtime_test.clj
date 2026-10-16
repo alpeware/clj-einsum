@@ -189,3 +189,42 @@
       (is (close-floats? smollm-ref smollm-cpu 1e-3))
       (is (close-floats? smollm-ref smollm-uop 1e-3))
       (is (= (argmax smollm-ref) (argmax smollm-cpu) (argmax smollm-uop))))))
+
+(deftest test-uop-bf16-storage-and-execution-parity
+  (testing "Kernel with native bf16 weights executes on :uop-cpu and :uop with numerical parity against interpreter"
+    (let [m 2 k 8 n 4
+          a-floats (float-array (repeatedly (* m k) #(- (rand 2.0) 1.0)))
+          b-shorts (short-array (repeatedly (* k n) #(short (bit-shift-right (Float/floatToIntBits (float (- (rand 2.0) 1.0))) 16))))
+          ast [:block {:name :mm_bf16}
+               [:= [:Y :i :j] [:A :i :k] [:B :k :j]]]
+          in-spec [[:A [:tensor [m k] :f32]]
+                   [:B [:tensor [k n] :bf16]]]
+          interp-ctx (xla/init-backend! :interpreter {:quiet? true})
+          cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})
+          uop-ctx (xla/init-backend! :uop {:quiet? true})]
+      (with-open [k-ref (xla/compile-kernel interp-ctx "mm_bf16_test" ast {:in in-spec :out [:Y]})
+                  k-cpu (xla/compile-kernel cpu-ctx "mm_bf16_test" ast {:in in-spec :out [:Y]})
+                  k-uop (xla/compile-kernel uop-ctx "mm_bf16_test" ast {:in in-spec :out [:Y]})]
+        (let [ref-out (xla/to-host-slice (k-ref [a-floats b-shorts]) 0 (* m n) (* m n))
+              cpu-out (xla/to-host-slice (k-cpu [a-floats b-shorts]) 0 (* m n) (* m n))
+              uop-out (xla/to-host-slice (k-uop [a-floats b-shorts]) 0 (* m n) (* m n))]
+          (is (close-floats? ref-out cpu-out 1e-2))
+          (is (close-floats? ref-out uop-out 1e-2)))))))
+
+(defspec prop-uop-bf16-matmul-parity
+  25
+  (prop/for-all [m (gen/choose 1 4)
+                 k (gen/choose 2 8)
+                 n (gen/choose 1 4)]
+                (let [a-floats (float-array (repeatedly (* m k) #(- (rand 2.0) 1.0)))
+                      b-shorts (short-array (repeatedly (* k n) #(short (bit-shift-right (Float/floatToIntBits (float (- (rand 2.0) 1.0))) 16))))
+                      ast [:= [:Y :i :j] [:A :i :k] [:B :k :j]]
+                      in-spec [[:A [:tensor [m k] :f32]]
+                               [:B [:tensor [k n] :bf16]]]
+                      interp-ctx (xla/init-backend! :interpreter {:quiet? true})
+                      cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})]
+                  (with-open [k-ref (xla/compile-kernel interp-ctx "mm_p_bf16" ast {:in in-spec :out [:Y]})
+                              k-cpu (xla/compile-kernel cpu-ctx "mm_p_bf16" ast {:in in-spec :out [:Y]})]
+                    (let [ref-out (xla/to-host-slice (k-ref [a-floats b-shorts]) 0 (* m n) (* m n))
+                          cpu-out (xla/to-host-slice (k-cpu [a-floats b-shorts]) 0 (* m n) (* m n))]
+                      (close-floats? ref-out cpu-out 1e-2))))))

@@ -211,9 +211,9 @@
   "Allocates an uninitialized device buffer of `elem-count` elements of `dtype` on `ctx`."
   [ctx shape dtype]
   (let [target (or (:uop-target ctx) :cpu)
-        compute-dt (normalize-compute-dtype dtype)
+        storage-dt (or dtype :f32)
         elem-count (long (reduce * 1 shape))
-        byte-size (max 8 (* elem-count (dtype-byte-size compute-dt)))]
+        byte-size (max 8 (* elem-count (dtype-byte-size storage-dt)))]
     (if (= target :rocm)
       (let [hip (or (:hip ctx) (init-hip-bindings!))
             ^MethodHandle hipMalloc (:hipMalloc hip)]
@@ -224,8 +224,8 @@
                 dptr (.get ptr-slot ValueLayout/ADDRESS 0)]
             {:uop-buffer? true
              :target :rocm
-             :dtype compute-dt
-             :orig-dtype (or dtype :f32)
+             :dtype storage-dt
+             :orig-dtype storage-dt
              :shape (vec shape)
              :size elem-count
              :byte-size byte-size
@@ -235,8 +235,8 @@
             seg (.allocate buf-arena (long byte-size) 64)]
         {:uop-buffer? true
          :target :cpu
-         :dtype compute-dt
-         :orig-dtype (or dtype :f32)
+         :dtype storage-dt
+         :orig-dtype storage-dt
          :shape (vec shape)
          :size elem-count
          :byte-size byte-size
@@ -262,82 +262,114 @@
   nil)
 
 (defn- populate-host-segment!
-  "Writes `host-data` into off-heap `MemorySegment` `dst-seg` of `compute-dt` (`:f32`, `:i32`, `:i8`, `:f64`).
-   Transparently upcasts `:bf16` `short[]` or `:bf16` `MemorySegment` slices into `:f32`."
-  [^MemorySegment dst-seg host-data elem-count orig-dtype compute-dt]
+  "Writes `host-data` into off-heap `MemorySegment` `dst-seg` of `storage-dt` (`:f32`, `:bf16`, `:i32`, `:i8`, `:f64`).
+   Transparently handles `:bf16` <-> `:f32` conversion or zero-copy short array/segment copies."
+  [^MemorySegment dst-seg host-data elem-count orig-dtype storage-dt]
   (let [elem-count (long elem-count)]
     (cond
-    ;; 1. Already a MemorySegment
+      ;; 1. Already a MemorySegment
       (instance? MemorySegment host-data)
       (let [^MemorySegment src-seg host-data
             src-bytes (.byteSize src-seg)
-            dst-bytes (* elem-count (dtype-byte-size compute-dt))]
-        (if (and (= orig-dtype :bf16) (= compute-dt :f32) (== src-bytes (* 2 elem-count)))
-        ;; Upcast bf16 MemorySegment to f32 in bulk
+            dst-bytes (* elem-count (dtype-byte-size storage-dt))]
+        (cond
+          (and (= orig-dtype :bf16) (= storage-dt :f32) (== src-bytes (* 2 elem-count)))
+          ;; Upcast bf16 MemorySegment to f32
           (dotimes [i elem-count]
             (let [s (.get src-seg ValueLayout/JAVA_SHORT_UNALIGNED (* i 2))]
               (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (interpret/bf16->f32 s))))
+
+          (and (= orig-dtype :f32) (= storage-dt :bf16) (== src-bytes (* 4 elem-count)))
+          ;; Downcast f32 MemorySegment to bf16
+          (dotimes [i elem-count]
+            (let [f (.get src-seg ValueLayout/JAVA_FLOAT_UNALIGNED (* i 4))]
+              (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 f))))
+
+          :else
           (MemorySegment/copy src-seg 0 dst-seg 0 (min src-bytes dst-bytes))))
 
-    ;; 2. Float array
+      ;; 2. Float array
       (instance? FLOAT-ARRAY-CLASS host-data)
       (let [^floats arr host-data
             n (min elem-count (alength arr))]
-        (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_FLOAT 0 n))
+        (if (= storage-dt :bf16)
+          (dotimes [i n]
+            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (aget arr i))))
+          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_FLOAT 0 n)))
 
-    ;; 3. Int array
+      ;; 3. Int array
       (instance? INT-ARRAY-CLASS host-data)
       (let [^ints arr host-data
             n (min elem-count (alength arr))]
-        (if (= compute-dt :f32)
+        (cond
+          (= storage-dt :f32)
           (dotimes [i n]
             (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (float (aget arr i))))
+          (= storage-dt :bf16)
+          (dotimes [i n]
+            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (aget arr i)))))
+          :else
           (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_INT 0 n)))
 
-    ;; 4. Short array (e.g. bf16)
+      ;; 4. Short array (e.g. bf16)
       (instance? SHORT-ARRAY-CLASS host-data)
       (let [^shorts arr host-data
             n (min elem-count (alength arr))]
-        (if (= compute-dt :f32)
+        (if (= storage-dt :f32)
           (dotimes [i n]
             (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (interpret/bf16->f32 (aget arr i))))
           (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_SHORT 0 n)))
 
-    ;; 5. Byte array
+      ;; 5. Byte array
       (instance? BYTE-ARRAY-CLASS host-data)
       (let [^bytes arr host-data
             n (min elem-count (alength arr))]
         (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_BYTE 0 n))
 
-    ;; 6. Double array
+      ;; 6. Double array
       (instance? DOUBLE-ARRAY-CLASS host-data)
       (let [^doubles arr host-data
             n (min elem-count (alength arr))]
-        (if (= compute-dt :f32)
+        (cond
+          (= storage-dt :f32)
           (dotimes [i n]
             (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (float (aget arr i))))
+          (= storage-dt :bf16)
+          (dotimes [i n]
+            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (aget arr i)))))
+          :else
           (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_DOUBLE 0 n)))
 
-    ;; 7. Long array
+      ;; 7. Long array
       (instance? LONG-ARRAY-CLASS host-data)
       (let [^longs arr host-data
             n (min elem-count (alength arr))]
-        (if (= compute-dt :i32)
+        (cond
+          (= storage-dt :i32)
           (dotimes [i n]
             (.setAtIndex dst-seg ValueLayout/JAVA_INT (long i) (int (aget arr i))))
+          (= storage-dt :bf16)
+          (dotimes [i n]
+            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (aget arr i)))))
+          :else
           (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_LONG 0 n)))
 
-    ;; 8. Interpreter-style tensor map {:data ...}
+      ;; 8. Interpreter-style tensor map {:data ...}
       (and (map? host-data) (contains? host-data :data))
-      (populate-host-segment! dst-seg (:data host-data) elem-count (or (:dtype host-data) orig-dtype) compute-dt)
+      (populate-host-segment! dst-seg (:data host-data) elem-count (or (:dtype host-data) orig-dtype) storage-dt)
 
-    ;; 9. Sequential Clojure collection
+      ;; 9. Sequential Clojure collection
       (sequential? host-data)
       (let [v (vec host-data)
             n (min elem-count (count v))]
-        (if (= compute-dt :i32)
+        (cond
+          (= storage-dt :i32)
           (dotimes [i n]
             (.setAtIndex dst-seg ValueLayout/JAVA_INT (long i) (int (nth v i))))
+          (= storage-dt :bf16)
+          (dotimes [i n]
+            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (nth v i)))))
+          :else
           (dotimes [i n]
             (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (float (nth v i))))))
 
@@ -351,48 +383,47 @@
   (if (uop-buffer? host-data)
     host-data
     (let [target (or (:uop-target ctx) :cpu)
-          orig-dt (or dtype :f32)
-          compute-dt (normalize-compute-dtype orig-dt)
+          storage-dt (or dtype :f32)
           elem-count (long (reduce * 1 shape))
-          byte-size (max 8 (* elem-count (dtype-byte-size compute-dt)))]
+          byte-size (max 8 (* elem-count (dtype-byte-size storage-dt)))]
       ;; Fast path on CPU if `host-data` is already an aligned off-heap MemorySegment of matching dtype
       (if (and (= target :cpu)
                (instance? MemorySegment host-data)
-               (= orig-dt compute-dt)
-               (>= (.byteSize ^MemorySegment host-data) (* elem-count (dtype-byte-size compute-dt))))
+               (= (or dtype :f32) storage-dt)
+               (>= (.byteSize ^MemorySegment host-data) (* elem-count (dtype-byte-size storage-dt))))
         {:uop-buffer? true
          :target :cpu
-         :dtype compute-dt
-         :orig-dtype orig-dt
+         :dtype storage-dt
+         :orig-dtype storage-dt
          :shape (vec shape)
          :size elem-count
          :byte-size (.byteSize ^MemorySegment host-data)
          :ptr ^MemorySegment host-data
          :owned? false}
-        (let [dev-buf (allocate-device-buffer ctx shape orig-dt)]
+        (let [dev-buf (allocate-device-buffer ctx shape storage-dt)]
           (if (= target :rocm)
             (let [hip (or (:hip ctx) (init-hip-bindings!))
                   ^MethodHandle hipMemcpy (:hipMemcpy hip)]
               ;; If host-data is already a MemorySegment of matching dtype, copy directly HtoD without staging!
               (if (and (instance? MemorySegment host-data)
-                       (= orig-dt compute-dt)
-                       (>= (.byteSize ^MemorySegment host-data) (* elem-count (dtype-byte-size compute-dt))))
+                       (= (or dtype :f32) storage-dt)
+                       (>= (.byteSize ^MemorySegment host-data) (* elem-count (dtype-byte-size storage-dt))))
                 (let [rc (int (.invokeWithArguments hipMemcpy
                                                     (into-array Object [(:ptr dev-buf)
                                                                         ^MemorySegment host-data
-                                                                        (long (* elem-count (dtype-byte-size compute-dt)))
+                                                                        (long (* elem-count (dtype-byte-size storage-dt)))
                                                                         (int 1)])))]
                   (check-hip! rc "hipMemcpy(HtoD direct)"))
                 (with-open [staging (Arena/ofConfined)]
                   (let [stage-seg (.allocate staging (long byte-size) 64)
-                        _ (populate-host-segment! stage-seg host-data elem-count orig-dt compute-dt)
+                        _ (populate-host-segment! stage-seg host-data elem-count (or dtype :f32) storage-dt)
                         rc (int (.invokeWithArguments hipMemcpy
                                                       (into-array Object [(:ptr dev-buf)
                                                                           stage-seg
-                                                                          (long (* elem-count (dtype-byte-size compute-dt)))
+                                                                          (long (* elem-count (dtype-byte-size storage-dt)))
                                                                           (int 1)])))]
                     (check-hip! rc "hipMemcpy(HtoD staged)")))))
-            (populate-host-segment! (:ptr dev-buf) host-data elem-count orig-dt compute-dt))
+            (populate-host-segment! (:ptr dev-buf) host-data elem-count (or dtype :f32) storage-dt))
           dev-buf)))))
 
 (defn device->host-floats
@@ -413,14 +444,24 @@
                                                                   (long byte-len)
                                                                   (int 2)])))]
             (check-hip! rc "hipMemcpy(DtoH)")
-            (if (= dt :i32)
+            (cond
+              (= dt :i32)
               (dotimes [i elem-count]
                 (aset out i (float (.getAtIndex stage-seg ValueLayout/JAVA_INT (long i)))))
+              (= dt :bf16)
+              (dotimes [i elem-count]
+                (aset out i (interpret/bf16->f32 (.getAtIndex stage-seg ValueLayout/JAVA_SHORT (long i)))))
+              :else
               (MemorySegment/copy stage-seg ValueLayout/JAVA_FLOAT 0 out 0 (int elem-count))))))
       (let [^MemorySegment seg (:ptr uop-buf)]
-        (if (= dt :i32)
+        (cond
+          (= dt :i32)
           (dotimes [i elem-count]
             (aset out i (float (.getAtIndex seg ValueLayout/JAVA_INT (long i)))))
+          (= dt :bf16)
+          (dotimes [i elem-count]
+            (aset out i (interpret/bf16->f32 (.getAtIndex seg ValueLayout/JAVA_SHORT (long i)))))
+          :else
           (MemorySegment/copy seg ValueLayout/JAVA_FLOAT 0 out 0 (int elem-count)))))
     out))
 
@@ -459,6 +500,8 @@
   (let [sb (StringBuilder.)
         _ (.append sb "// Generated by clj-einsum UOp Batched C99 Module\n")
         _ (.append sb "#include <math.h>\n#include <stdint.h>\n\n")
+        _ (.append sb "static inline float bf16_to_f32(unsigned short x) {\n  union { unsigned int u; float f; } v;\n  v.u = ((unsigned int)x) << 16;\n  return v.f;\n}\n")
+        _ (.append sb "static inline unsigned short f32_to_bf16(float x) {\n  union { float f; unsigned int u; } v;\n  v.f = x;\n  return (unsigned short)((v.u + 0x7fffU + ((v.u >> 16) & 1U)) >> 16);\n}\n\n")
         _ (doseq [rk unique-rendered-kernels]
             (.append sb (:canonical-body rk))
             (.append sb "\n"))
@@ -511,6 +554,8 @@
         sb (StringBuilder.)
         _ (.append sb "// Generated by clj-einsum UOp Batched HIP Module\n")
         _ (.append sb "#ifndef INFINITY\n#define INFINITY (1.0f/0.0f)\n#endif\n\n")
+        _ (.append sb "static inline __device__ __host__ float bf16_to_f32(unsigned short x) {\n  union { unsigned int u; float f; } v;\n  v.u = ((unsigned int)x) << 16;\n  return v.f;\n}\n")
+        _ (.append sb "static inline __device__ __host__ unsigned short f32_to_bf16(float x) {\n  union { float f; unsigned int u; } v;\n  v.f = x;\n  return (unsigned short)((v.u + 0x7fffU + ((v.u >> 16) & 1U)) >> 16);\n}\n\n")
         _ (doseq [rk unique-rendered-kernels]
             (.append sb (:canonical-body rk))
             (.append sb "\n"))

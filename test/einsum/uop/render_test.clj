@@ -107,3 +107,37 @@
           (is (not (str/blank? (:source hip))))
           (is (seq (:buffer-slots c99)))
           (is (= (:buffer-slots c99) (:buffer-slots hip))))))))
+
+(deftest test-render-bf16-storage-and-bitcast-helpers
+  (testing "Kernel with bf16 storage emits unsigned short pointers and bf16 bitcast helper calls"
+    (let [invars [[:A [:tensor [4 16] :f32]]
+                  [:B [:tensor [16 8] :bf16]]]
+          ast [:= [:C :i :j] [:A :i :k] [:B :k :j]]
+          uop-graph (uop-lower/ast->uop-graph "mm_bf16" invars ast [:C])
+          sched (schedule/schedule-graph uop-graph)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:target :rocm})
+          c99-prog (render/render-kernel opt-k0 {:target :cpu})
+          hip-prog (render/render-kernel opt-k0 {:target :rocm})]
+      ;; Param 2 (:B) has dtype :bf16 -> declared as const unsigned short* __restrict__ buf_2
+      (is (str/includes? (:source c99-prog) "const unsigned short* __restrict__ buf_2"))
+      (is (str/includes? (:source hip-prog) "const unsigned short* __restrict__ buf_2"))
+      ;; Headers declare bitcast functions
+      (is (str/includes? (:source c99-prog) "bf16_to_f32"))
+      (is (str/includes? (:source hip-prog) "bf16_to_f32"))
+      ;; Kernel body calls bf16_to_f32
+      (is (str/includes? (:source c99-prog) "bf16_to_f32("))
+      (is (str/includes? (:source hip-prog) "bf16_to_f32(")))))
+
+(defspec prop-bf16-bitcast-roundtrip
+  50
+  (prop/for-all [f (gen/fmap (fn [[s exp mant]]
+                               (let [sign (if (pos? (int s)) 1.0 -1.0)
+                                     v (* sign (Math/pow 2.0 (double exp)) (+ 1.0 (/ (double mant) 128.0)))]
+                                 (float v)))
+                             (gen/tuple (gen/choose -1 1) (gen/choose -10 10) (gen/choose 0 127)))]
+                (let [bits (Float/floatToIntBits f)
+                      bf16-short (short (bit-shift-right bits 16))
+                      f-back (Float/intBitsToFloat (unchecked-int (bit-shift-left (bit-and (int bf16-short) 0xffff) 16)))]
+                  (or (zero? (Float/compare f f-back))
+                      (< (Math/abs (- (double f) (double f-back))) (* (Math/abs (double f)) 0.01))))))
