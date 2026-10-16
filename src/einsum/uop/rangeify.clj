@@ -149,6 +149,50 @@
                                                  coords bounds)]
                              (lower-at in-node in-coords))
 
+                           :uop/dynamic-slice
+                           (let [in-node (first src)
+                                 {:keys [starts-spec]} arg
+                                 in-coords (mapv (fn [c s]
+                                                   (cond
+                                                     (uop/uop? s)
+                                                     (let [s-val (lower-at s [])]
+                                                       (rewrite/simplify-uop (uop/uop-alu :uop/add c s-val)))
+
+                                                     (number? s)
+                                                     (if (zero? (long s))
+                                                       c
+                                                       (rewrite/simplify-uop (uop/uop-alu :uop/add c (uop/uop-const :i32 (long s)))))
+
+                                                     :else c))
+                                                 coords starts-spec)]
+                             (lower-at in-node in-coords))
+
+                           :uop/dynamic-update-slice
+                           (let [cache-in-node (first src)
+                                 k-new-node (second src)
+                                 pos-node (nth src 2)
+                                 {:keys [window k-sink]} arg
+                                 pos-val (lower-at pos-node [])
+                                 eff-slot (if (and window (pos? (long (or k-sink 0))))
+                                            (let [c-win (uop/uop-const :i32 (long window))
+                                                  c-sink (uop/uop-const :i32 (long k-sink))
+                                                  c-mod (uop/uop-const :i32 (long (- window k-sink)))
+                                                  rolled (uop/uop-alu :uop/add c-sink
+                                                                      (uop/uop-alu :uop/mod (uop/uop-alu :uop/sub pos-val c-sink) c-mod))]
+                                              (uop/uop-alu :uop/where (uop/uop-alu :uop/cmpge pos-val c-win) rolled pos-val))
+                                            pos-val)
+                                 time-coord (nth coords 1)
+                                 q-len (nth (:shape k-new-node) 1 1)
+                                 match? (if (== 1 q-len)
+                                          (uop/uop-alu :uop/cmpeq time-coord eff-slot)
+                                          (uop/uop-alu :uop/and
+                                                       (uop/uop-alu :uop/cmpge time-coord eff-slot)
+                                                       (uop/uop-alu :uop/cmplt time-coord (uop/uop-alu :uop/add eff-slot (uop/uop-const :i32 q-len)))))
+                                 val-cache (lower-at cache-in-node coords)
+                                 k-coords (assoc coords 1 (uop/uop-alu :uop/sub time-coord eff-slot))
+                                 val-new (lower-at k-new-node k-coords)]
+                             (uop/uop-alu :uop/where match? val-new val-cache))
+
                            :uop/flip
                            (let [in-node (first src)
                                  flip-mask arg

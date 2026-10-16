@@ -233,6 +233,7 @@
                                         :uop/exp2 (format "exp2f(%s)" e0)
                                         :uop/log2 (format "log2f(%s)" e0)
                                         :uop/sin (format "sinf(%s)" e0)
+                                        :uop/cos (format "cosf(%s)" e0)
                                         :uop/sqrt (format "sqrtf(%s)" e0)
                                         :uop/trunc (format "truncf(%s)" e0)
                                         :uop/cast (let [in-dt (:dtype (first src))

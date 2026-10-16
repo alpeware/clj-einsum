@@ -22,7 +22,7 @@
 
 (def UNARY_ALU_OPS
   "Elementwise unary ALU UOps."
-  #{:uop/neg :uop/recip :uop/exp2 :uop/log2 :uop/sin :uop/sqrt :uop/trunc :uop/cast :uop/bitcast})
+  #{:uop/neg :uop/recip :uop/exp2 :uop/log2 :uop/sin :uop/cos :uop/sqrt :uop/trunc :uop/cast :uop/bitcast})
 
 (def BINARY_ALU_OPS
   "Elementwise binary ALU UOps."
@@ -47,6 +47,7 @@
   "Low-level loop, indexing, memory, and program structure UOps (used during & after rangeify)."
   #{:uop/index :uop/load :uop/store :uop/alloc
     :uop/range :uop/end :uop/if :uop/endif :uop/barrier
+    :uop/dynamic-slice :uop/dynamic-update-slice
     :uop/wmma :uop/after :uop/assign :uop/sink :uop/linear :uop/call :uop/program})
 
 (def ALL_UOP_OPS
@@ -104,6 +105,11 @@
                             m
                             (assoc m intern-key node))))]
          (get tbl intern-key))))))
+
+(defn uop?
+  "Returns true if `x` is a valid UOp node map."
+  [x]
+  (and (map? x) (contains? x :op) (contains? x :dtype)))
 
 (defn valid-uop?
   "Returns true if `node` and all of its transitive `:src` dependencies satisfy UOpSchema."

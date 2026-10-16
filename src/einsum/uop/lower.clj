@@ -340,17 +340,20 @@
 
 (defn- lower-causal-softmax
   "Lowers `[:causal-softmax head scores attrs]` into a causal upper-triangular mask + numerically stable softmax."
-  [scores-uop _attrs]
+  [scores-uop attrs]
   (let [sh (:shape scores-uop)
         dt (:dtype scores-uop)
         rank (count sh)
         q-len (nth sh (- rank 2) 1)
         k-len (nth sh (dec rank) 1)
+        window (or (:sliding-window attrs) (:sliding_window attrs) (:window attrs))
         ;; Build causal mask tensor of shape [q-len, k-len] where col > row -> -1e9 else 0.0
-        ;; Represented as a constant UOp or broadcasted mask so rangeify can inline or load it
+        ;; If sliding-window is specified, also mask out entries where (row - col) >= window
         mask-vals (vec (for [r (range q-len)
                              c (range k-len)]
-                         (if (> c r) -1.0e9 0.0)))
+                         (if (or (> c r) (and window (>= (- r c) window)))
+                           -1.0e9
+                           0.0)))
         mask-uop (-> (uop/uop :uop/vconst dt [] mask-vals [(* q-len k-len)])
                      (uop/uop-reshape [q-len k-len])
                      (broadcast-shape-suffix sh))
@@ -358,51 +361,167 @@
     (lower-softmax-core masked-scores -1)))
 
 (defn- lower-rope
-  "Lowers Rotary Position Embeddings `[:rope head x {:head-dim dh :theta theta}]` into pure UOps."
-  [x-uop attrs]
-  (let [sh (:shape x-uop)
-        dt (:dtype x-uop)
-        b (first sh)
-        seq-len (second sh)
-        total-d (last sh)
-        head-dim (long (or (:head-dim attrs) 64))
-        half-dim (quot head-dim 2)
-        num-heads (quot total-d head-dim)
-        theta (double (or (:theta attrs) 10000.0))
-        ;; Precompute exact RoPE cos and sin tables for [1, seq-len, 1, half-dim]
-        cos-vals (vec (for [pos (range seq-len)
-                            i (range half-dim)]
-                        (let [freq (/ 1.0 (Math/pow theta (/ (* 2.0 i) (double head-dim))))]
-                          (Math/cos (* (double pos) freq)))))
-        sin-vals (vec (for [pos (range seq-len)
-                            i (range half-dim)]
-                        (let [freq (/ 1.0 (Math/pow theta (/ (* 2.0 i) (double head-dim))))]
-                          (Math/sin (* (double pos) freq)))))
-        half-shape [b seq-len num-heads half-dim]
-        cos-uop (-> (uop/uop :uop/vconst dt [] cos-vals [(* seq-len half-dim)])
-                    (uop/uop-reshape [1 seq-len 1 half-dim])
-                    (uop/uop-expand half-shape))
-        sin-uop (-> (uop/uop :uop/vconst dt [] sin-vals [(* seq-len half-dim)])
-                    (uop/uop-reshape [1 seq-len 1 half-dim])
-                    (uop/uop-expand half-shape))
-        ;; Reshape x to [b, seq-len, num-heads, head-dim] and split into x1, x2 halves via shrink
-        x-4d (uop/uop-reshape x-uop [b seq-len num-heads head-dim])
-        x1 (uop/uop-shrink x-4d [[0 b] [0 seq-len] [0 num-heads] [0 half-dim]])
-        x2 (uop/uop-shrink x-4d [[0 b] [0 seq-len] [0 num-heads] [half-dim head-dim]])
-        ;; y1 = x1 * cos - x2 * sin, y2 = x2 * cos + x1 * sin
-        y1 (uop/uop-alu :uop/sub
-                        (uop/uop-alu :uop/mul x1 cos-uop)
-                        (uop/uop-alu :uop/mul x2 sin-uop))
-        y2 (uop/uop-alu :uop/add
-                        (uop/uop-alu :uop/mul x2 cos-uop)
-                        (uop/uop-alu :uop/mul x1 sin-uop))
-        cat-4d (uop/uop-cat [y1 y2] 3)]
-    (uop/uop-reshape cat-4d sh)))
+  "Lowers Rotary Position Embeddings `[:rope head x {:head-dim dh :theta theta :rope-proportion prop :pos pos}]` into pure UOps."
+  ([x-uop attrs]
+   (lower-rope x-uop attrs {}))
+  ([x-uop attrs env]
+   (let [sh (:shape x-uop)
+         dt (:dtype x-uop)
+         b (first sh)
+         seq-len (second sh)
+         total-d (last sh)
+         head-dim (long (or (:head-dim attrs) 64))
+         half-dim (quot head-dim 2)
+         num-heads (quot total-d head-dim)
+         rope-prop (double (or (:rope-proportion attrs) (:partial-rotary-factor attrs) 1.0))
+         rope-angles (long (* rope-prop half-dim))
+         theta (double (or (:theta attrs) 10000.0))
+         freqs (vec (for [i (range half-dim)]
+                      (if (< i rope-angles)
+                        (/ 1.0 (Math/pow theta (/ (* 2.0 i) (double head-dim))))
+                        0.0)))
+         half-shape [b seq-len num-heads half-dim]
+         pos-attr (:pos attrs)
+         dynamic-pos-uop (when (and pos-attr (or (keyword? pos-attr) (symbol? pos-attr)))
+                           (get env (keyword pos-attr)))
+         [cos-uop sin-uop]
+         (cond
+           dynamic-pos-uop
+           (let [pos-f32 (uop/uop-cast dynamic-pos-uop :f32)
+                 pos-4d (uop/uop-reshape pos-f32 [1 1 1 1])
+                 eff-pos (if (== 1 seq-len)
+                           pos-4d
+                           (let [p-vals (vec (map float (range seq-len)))
+                                 p-uop (-> (uop/uop :uop/vconst :f32 [] p-vals [seq-len])
+                                           (uop/uop-reshape [1 seq-len 1 1]))]
+                             (uop/uop-alu :uop/add pos-4d p-uop)))
+                 freqs-uop (-> (uop/uop :uop/vconst :f32 [] freqs [half-dim])
+                               (uop/uop-reshape [1 1 1 half-dim]))
+                 angle (uop/uop-alu :uop/mul eff-pos freqs-uop)
+                 c (-> (uop/uop-alu :uop/cos angle)
+                       (uop/uop-expand half-shape))
+                 s (-> (uop/uop-alu :uop/sin angle)
+                       (uop/uop-expand half-shape))]
+             [c s])
+
+           :else
+           (let [p-start (if (number? pos-attr) (long pos-attr) 0)
+                 cos-vals (vec (for [pos (range p-start (+ p-start seq-len))
+                                     i (range half-dim)]
+                                 (Math/cos (* (double pos) (nth freqs i)))))
+                 sin-vals (vec (for [pos (range p-start (+ p-start seq-len))
+                                     i (range half-dim)]
+                                 (Math/sin (* (double pos) (nth freqs i)))))
+                 c (-> (uop/uop :uop/vconst dt [] cos-vals [(* seq-len half-dim)])
+                       (uop/uop-reshape [1 seq-len 1 half-dim])
+                       (uop/uop-expand half-shape))
+                 s (-> (uop/uop :uop/vconst dt [] sin-vals [(* seq-len half-dim)])
+                       (uop/uop-reshape [1 seq-len 1 half-dim])
+                       (uop/uop-expand half-shape))]
+             [c s]))
+         ;; Reshape x to [b, seq-len, num-heads, head-dim] and split into x1, x2 halves via shrink
+         x-4d (uop/uop-reshape x-uop [b seq-len num-heads head-dim])
+         x1 (uop/uop-shrink x-4d [[0 b] [0 seq-len] [0 num-heads] [0 half-dim]])
+         x2 (uop/uop-shrink x-4d [[0 b] [0 seq-len] [0 num-heads] [half-dim head-dim]])
+         ;; y1 = x1 * cos - x2 * sin, y2 = x2 * cos + x1 * sin
+         y1 (uop/uop-alu :uop/sub
+                         (uop/uop-alu :uop/mul x1 cos-uop)
+                         (uop/uop-alu :uop/mul x2 sin-uop))
+         y2 (uop/uop-alu :uop/add
+                         (uop/uop-alu :uop/mul x2 cos-uop)
+                         (uop/uop-alu :uop/mul x1 sin-uop))
+         cat-4d (uop/uop-cat [y1 y2] 3)]
+     (uop/uop-reshape cat-4d sh))))
 
 (defn- lower-gather
   "Lowers `[:gather head weight indices]` into an indexed gather UOp."
   [w-uop idx-uop out-shape]
   (uop/uop :uop/index (:dtype w-uop) [w-uop idx-uop] {:op :gather} (vec out-shape)))
+
+(defn- lower-dynamic-slice
+  "Lowers `[:dynamic-slice head in-tensor {:slice-sizes [...] :start-indices [...]}]`."
+  [in-uop attrs env out-shape]
+  (let [start-indices (or (:start-indices attrs) (:start_indices attrs) (:starts attrs))
+        slice-sizes (or (:slice-sizes attrs) (:slice_sizes attrs) out-shape (:shape in-uop))
+        starts-spec (mapv (fn [s]
+                            (cond
+                              (uop/uop? s) s
+                              (or (keyword? s) (symbol? s)) (get env (keyword s) s)
+                              (number? s) (long s)
+                              :else s))
+                          start-indices)
+        dyn-srcs (filterv uop/uop? starts-spec)
+        src (into [in-uop] dyn-srcs)
+        arg {:starts-spec starts-spec :slice-sizes (vec slice-sizes)}]
+    (uop/uop :uop/dynamic-slice (:dtype in-uop) src arg (vec slice-sizes))))
+
+(defn- lower-dynamic-update-slice
+  "Lowers `[:dynamic-update-slice head cache-in k-new {:start-indices [...] :window ... :k-sink ...}]`."
+  [cache-in k-new attrs env]
+  (let [start-indices (or (:start-indices attrs) (:start_indices attrs) [0 :pos 0 0])
+        pos-spec (or (:pos attrs)
+                     (some #(when (or (keyword? %) (symbol? %) (uop/uop? %)) %) start-indices)
+                     (nth start-indices 1 0))
+        pos-node (cond
+                   (uop/uop? pos-spec) pos-spec
+                   (or (keyword? pos-spec) (symbol? pos-spec)) (get env (keyword pos-spec))
+                   (number? pos-spec) (uop/uop-const :i32 (long pos-spec))
+                   :else (uop/uop-const :i32 0))
+        window (or (:window attrs) (:sliding-window attrs) (:sliding_window attrs))
+        k-sink (or (:k-sink attrs) (:k_sink attrs) 0)
+        src [cache-in k-new pos-node]
+        arg {:window window :k-sink k-sink}]
+    (uop/uop :uop/dynamic-update-slice (:dtype cache-in) src arg (:shape cache-in))))
+
+(defn- lower-chunked-attention
+  "Lowers chunked/decode attention `[:chunked-attention head q k v attrs]` into pure UOps."
+  [q-uop k-uop v-uop attrs _env out-shape]
+  (let [q-sh (:shape q-uop)
+        k-sh (:shape k-uop)
+        b (nth q-sh 0 1)
+        p (nth q-sh 1 1)
+        h (nth q-sh 2 8)
+        dh (nth q-sh 3 256)
+        kvs (nth k-sh 1 128)
+        kvh (nth k-sh 2 1)
+        ;; Repeat KV heads if MQA/GQA
+        k-rep (if (< kvh h)
+                (let [g (quot h kvh)]
+                  (-> (uop/uop-reshape k-uop [b kvs kvh 1 dh])
+                      (uop/uop-expand [b kvs kvh g dh])
+                      (uop/uop-reshape [b kvs h dh])))
+                k-uop)
+        v-rep (if (< kvh h)
+                (let [g (quot h kvh)]
+                  (-> (uop/uop-reshape v-uop [b kvs kvh 1 dh])
+                      (uop/uop-expand [b kvs kvh g dh])
+                      (uop/uop-reshape [b kvs h dh])))
+                v-uop)
+        ;; Q: [b, h, p, dh]
+        q-trans (uop/uop-permute q-uop [0 2 1 3])
+        ;; K: [b, h, dh, kvs]
+        k-trans (uop/uop-permute k-rep [0 2 3 1])
+        ;; Scores: [b, h, p, kvs] <- Q [b, h, p, dh] * K [b, h, dh, kvs]
+        q-exp (-> (uop/uop-reshape q-trans [b h p 1 dh])
+                  (uop/uop-expand [b h p kvs dh]))
+        k-exp (-> (uop/uop-reshape (uop/uop-permute k-trans [0 1 3 2]) [b h 1 kvs dh])
+                  (uop/uop-expand [b h p kvs dh]))
+        qk-prod (uop/uop-alu :uop/mul q-exp k-exp)
+        raw-scores (uop/uop-reduce :uop/add qk-prod [4])
+        scale (uop/uop-const :f32 (/ 1.0 (Math/sqrt (double dh))) [1 1 1 1])
+        scaled-scores (uop/uop-alu :uop/mul raw-scores (broadcast-shape-suffix scale [b h p kvs]))
+        masked-scores (lower-causal-softmax scaled-scores attrs)
+        ;; Attn output: [b, h, p, dh] <- masked-scores [b, h, p, kvs] * V [b, h, kvs, dh]
+        s-exp (-> (uop/uop-reshape masked-scores [b h p kvs 1])
+                  (uop/uop-expand [b h p kvs dh]))
+        v-trans (uop/uop-permute v-rep [0 2 1 3])
+        v-exp (-> (uop/uop-reshape v-trans [b h 1 kvs dh])
+                  (uop/uop-expand [b h p kvs dh]))
+        sv-prod (uop/uop-alu :uop/mul s-exp v-exp)
+        out-trans (uop/uop-reduce :uop/add sv-prod [3])
+        ;; Permute back to [b, p, h, dh]
+        out (uop/uop-permute out-trans [0 2 1 3])]
+    (if out-shape (uop/uop-reshape out (vec out-shape)) out)))
 
 ;; -----------------------------------------------------------------------------
 ;; 4. Public AST -> UOp Graph Compiler
@@ -496,9 +615,24 @@
                     (let [scores-uop (get env (first (first body)))]
                       (lower-causal-softmax scores-uop attrs))
 
+                    (= op :dynamic-slice)
+                    (let [in-uop (get env (first (first body)))]
+                      (lower-dynamic-slice in-uop attrs env out-shape))
+
+                    (= op :dynamic-update-slice)
+                    (let [cache-in (get env (first (first body)))
+                          k-new (get env (first (second body)))]
+                      (lower-dynamic-update-slice cache-in k-new attrs env))
+
+                    (= op :chunked-attention)
+                    (let [q-uop (get env (first (first body)))
+                          k-cache (get env (first (second body)))
+                          v-cache (get env (first (nth body 2)))]
+                      (lower-chunked-attention q-uop k-cache v-cache attrs env out-shape))
+
                     (= op :rope)
                     (let [x-uop (get env (first (first body)))]
-                      (lower-rope x-uop attrs))
+                      (lower-rope x-uop attrs env))
 
                     (or (= op :+) (= op :add))
                     (let [a (get env (first (first body)))

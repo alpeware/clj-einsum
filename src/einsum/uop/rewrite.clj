@@ -24,6 +24,7 @@
          :uop/exp2 (Math/pow 2.0 (double (first vals)))
          :uop/log2 (/ (Math/log (double (first vals))) (Math/log 2.0))
          :uop/sin (Math/sin (double (first vals)))
+         :uop/cos (Math/cos (double (first vals)))
          :uop/sqrt (Math/sqrt (double (first vals)))
          :uop/trunc (long (first vals))
          :uop/cast (let [v (first vals)]
