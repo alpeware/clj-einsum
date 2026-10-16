@@ -89,6 +89,8 @@
             [einsum.tools.fetch-pjrt-test]
             [einsum.uop.core-test]
             [einsum.uop.gemma4-ast-test]
+            [einsum.uop.opt-test]
+            [einsum.uop.beam-test]
             [einsum.uop.rangeify-test]
             [einsum.uop.render-test]
             [einsum.uop.runtime-test]
@@ -141,6 +143,8 @@
    'einsum.logic.gather-test
    'einsum.uop.core-test
    'einsum.uop.gemma4-ast-test
+   'einsum.uop.opt-test
+   'einsum.uop.beam-test
    'einsum.uop.rangeify-test
    'einsum.uop.render-test
    'einsum.uop.runtime-test])

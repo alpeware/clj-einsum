@@ -145,6 +145,9 @@
      ;; 3. Bind Output Loop Coordinates
      (if (= target :rocm)
        (do
+         (when (:has-group? kernel-entry)
+           (let [group-sz (long (or (:group-size kernel-entry) 64))]
+             (.append body-sb (format "  __shared__ float lds[%d];\n" group-sz))))
          (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.x);\n" local-threads))
          (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size))))
        (do
@@ -221,6 +224,16 @@
                          (doseq [depth (reverse (range (count r-uops)))]
                            (let [loop-indent (str cur-indent (apply str (repeat depth "  ")))]
                              (.append body-sb (format "%s}\n" loop-indent))))
+                         ;; If cooperative group reduction is enabled, perform tree reduction in LDS!
+                         (when (and (= target :rocm) (:has-group? kernel-entry))
+                           (let [group-sz (long (or (:group-size kernel-entry) 64))]
+                             (.append body-sb (format "%slds[threadIdx.x] = %s;\n" cur-indent acc-name))
+                             (.append body-sb (format "%s__syncthreads();\n" cur-indent))
+                             (.append body-sb (format "%sfor (int s = %d; s > 0; s >>= 1) {\n" cur-indent (quot group-sz 2)))
+                             (.append body-sb (format "%s  if (threadIdx.x < s) { lds[threadIdx.x] += lds[threadIdx.x + s]; }\n" cur-indent))
+                             (.append body-sb (format "%s  __syncthreads();\n" cur-indent))
+                             (.append body-sb (format "%s}\n" cur-indent))
+                             (.append body-sb (format "%s%s = lds[0];\n" cur-indent acc-name))))
                          (.put scoped-vars (:id node) acc-name)
                          acc-name)
 
@@ -275,10 +288,17 @@
                          (.put scoped-vars (:id node) v-name)
                          v-name)))))]
          (let [out-idx-var (emit-expr out-lin-idx-uop indent var-names)
-               final-val-var (emit-expr val-expr indent var-names)]
+               final-val-var (emit-expr val-expr indent var-names)
+               store-indent (if (and (= target :rocm) (:has-group? kernel-entry))
+                              (str indent "  ")
+                              indent)]
+           (when (and (= target :rocm) (:has-group? kernel-entry))
+             (.append body-sb (format "%sif (threadIdx.x == 0) {\n" indent)))
            (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
-             (.append body-sb (format "%sbuf_0[%s] = f32_to_bf16(%s);\n" indent out-idx-var final-val-var))
-             (.append body-sb (format "%sbuf_0[%s] = %s;\n" indent out-idx-var final-val-var))))))
+             (.append body-sb (format "%sbuf_0[%s] = f32_to_bf16(%s);\n" store-indent out-idx-var final-val-var))
+             (.append body-sb (format "%sbuf_0[%s] = %s;\n" store-indent out-idx-var final-val-var)))
+           (when (and (= target :rocm) (:has-group? kernel-entry))
+             (.append body-sb (format "%s}\n" indent))))))
 
      ;; 5. Close loop / function body and emit uniform void** entry wrapper for CPU
      (if (= target :rocm)

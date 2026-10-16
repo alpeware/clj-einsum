@@ -84,7 +84,7 @@
       (throw (ex-info (str "Native symbol not found: " sym-name) {:symbol sym-name})))
     (.downcallHandle linker ^MemorySegment (.get opt) desc (make-array Linker$Option 0))))
 
-(defn- init-hip-bindings!
+(defn init-hip-bindings!
   "Loads `libamdhip64.so` and `libhiprtc.so` via Project Panama FFM and initializes HIP device 0.
    Returns the HIP bindings map or nil if ROCm libraries / GPU hardware are unavailable."
   []
@@ -193,7 +193,7 @@
       (reset! hip-runtime-state state)
       (when (:available? state) state))))
 
-(defn- check-hip! [^long rc ^String op-name]
+(defn check-hip! [^long rc ^String op-name]
   (when-not (zero? rc)
     (throw (ex-info (format "HIP runtime error in %s: error code %d" op-name rc)
                     {:op op-name :hip-error rc}))))
@@ -544,7 +544,7 @@
             (.put compiled-module-cache mod-hash mod-entry)
             mod-entry)))))
 
-(defn- compile-rocm-module!
+(defn compile-rocm-module!
   "Compiles a batched HIP C++ translation unit containing all unique kernels for a schedule
    into an HSACO code object via `libhiprtc.so` (cached on disk in `~/.cache/clj_einsum/uop/`),
    loads it via `hipModuleLoadData`, and resolves `hipFunction_t` handles."
