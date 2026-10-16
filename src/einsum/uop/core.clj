@@ -82,24 +82,28 @@
   ([op dtype src arg]
    (uop op dtype src arg nil))
   ([op dtype src arg shape]
+   (when (nil? op)
+     (throw (ex-info "Cannot construct UOp with nil :op" {:dtype dtype :src src :arg arg :shape shape})))
    (let [src-vec (vec src)
          src-ids (mapv :id src-vec)
          shape-vec (when shape (mapv long shape))
-         intern-key [op dtype src-ids arg shape-vec]]
-     (or (get @uop-intern-table intern-key)
-         (let [new-id (swap! uop-id-counter inc)
-               node {:id new-id
-                     :op op
-                     :dtype dtype
-                     :src src-vec
-                     :arg arg
-                     :shape shape-vec}]
-           (swap! uop-intern-table
-                  (fn [tbl]
-                    (if (contains? tbl intern-key)
-                      tbl
-                      (assoc tbl intern-key node))))
-           (get @uop-intern-table intern-key))))))
+         intern-key [op dtype src-ids arg shape-vec]
+         existing (get @uop-intern-table intern-key)]
+     (if existing
+       existing
+       (let [new-id (swap! uop-id-counter inc)
+             node {:id new-id
+                   :op op
+                   :dtype dtype
+                   :src src-vec
+                   :arg arg
+                   :shape shape-vec}
+             tbl (swap! uop-intern-table
+                        (fn [m]
+                          (if (contains? m intern-key)
+                            m
+                            (assoc m intern-key node))))]
+         (get tbl intern-key))))))
 
 (defn valid-uop?
   "Returns true if `node` and all of its transitive `:src` dependencies satisfy UOpSchema."
@@ -237,15 +241,17 @@
 (defn uop-alu
   "Constructs an elementwise ALU UOp (:uop/add, :uop/mul, :uop/where, etc.)."
   [op & srcs]
-  (let [src-vec (vec srcs)
-        first-src (first src-vec)
-        out-dtype (if (contains? #{:uop/cmplt :uop/cmple :uop/cmpeq :uop/cmpne :uop/cmpgt :uop/cmpge} op)
-                    :bool
-                    (if (= op :uop/where)
-                      (:dtype (second src-vec))
-                      (:dtype first-src)))
-        out-shape (some :shape src-vec)]
-    (uop op out-dtype src-vec nil out-shape)))
+  (let [src-vec (vec srcs)]
+    (when (some nil? src-vec)
+      (throw (ex-info "Nil source passed to uop-alu" {:op op :srcs src-vec})))
+    (let [first-src (first src-vec)
+          out-dtype (if (contains? #{:uop/cmplt :uop/cmple :uop/cmpeq :uop/cmpne :uop/cmpgt :uop/cmpge} op)
+                      :bool
+                      (if (= op :uop/where)
+                        (:dtype (second src-vec))
+                        (:dtype first-src)))
+          out-shape (some :shape src-vec)]
+      (uop op out-dtype src-vec nil out-shape))))
 
 (defn uop-reduce
   "Reduces `x` using `reduce-op` (:add, :max, :min) along `axes` (vector of axis indices).

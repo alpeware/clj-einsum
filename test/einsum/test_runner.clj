@@ -89,6 +89,7 @@
             [einsum.tools.fetch-pjrt-test]
             [einsum.uop.core-test]
             [einsum.uop.rangeify-test]
+            [einsum.uop.render-test]
             [experiments.gate1-compression.tiered-turbo-kv-test]
             [experiments.gate3-evals.clojure-bench-test]
             [experiments.gate3-evals.multipl-e-test]
@@ -137,7 +138,8 @@
    'experiments.gate1-compression.tiered-turbo-kv-test
    'einsum.logic.gather-test
    'einsum.uop.core-test
-   'einsum.uop.rangeify-test])
+   'einsum.uop.rangeify-test
+   'einsum.uop.render-test])
 
 (def logic-namespaces
   "Pedro Domingos' Declarative Tensor Logic, semirings, Horn-clause symbolic reasoning, memory relations, KB."

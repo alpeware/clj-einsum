@@ -324,8 +324,8 @@
   [root]
   (let [memo (java.util.HashMap.)]
     (letfn [(simplify-node [node]
-              (if-let [cached (.get memo (:id node))]
-                cached
+              (if (.containsKey memo (:id node))
+                (.get memo (:id node))
                 (let [new-src (mapv simplify-node (:src node))
                       rebuilt (if (= new-src (:src node))
                                 node

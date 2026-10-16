@@ -178,10 +178,10 @@
                                                           (uop/uop-alu :uop/and ge0 lt-d))))
                                                     (map vector shifted-coords padding in-shape))
                                  clamped-coords (mapv (fn [sc in-d]
-                                                        (-> sc
-                                                            (uop/uop-alu :uop/max (uop/uop-const :i32 0))
-                                                            (uop/uop-alu :uop/min (uop/uop-const :i32 (dec (long in-d))))
-                                                            rewrite/simplify-uop))
+                                                        (rewrite/simplify-uop
+                                                         (uop/uop-alu :uop/min
+                                                                      (uop/uop-alu :uop/max sc (uop/uop-const :i32 0))
+                                                                      (uop/uop-const :i32 (dec (long in-d))))))
                                                       shifted-coords in-shape)
                                  inner-val (lower-at in-node clamped-coords)]
                              (if (empty? valid-checks)
@@ -203,10 +203,10 @@
                                                       c-ax
                                                       (rewrite/simplify-uop
                                                        (uop/uop-alu :uop/sub c-ax (uop/uop-const :i32 offset))))
-                                          clamped-c (-> shifted-c
-                                                        (uop/uop-alu :uop/max (uop/uop-const :i32 0))
-                                                        (uop/uop-alu :uop/min (uop/uop-const :i32 (dec child-dim)))
-                                                        rewrite/simplify-uop)
+                                          clamped-c (rewrite/simplify-uop
+                                                     (uop/uop-alu :uop/min
+                                                                  (uop/uop-alu :uop/max shifted-c (uop/uop-const :i32 0))
+                                                                  (uop/uop-const :i32 (dec child-dim))))
                                           child-coords (assoc coords cat-axis clamped-c)
                                           child-val (lower-at child-uop child-coords)]
                                       (if (nil? acc-expr)
