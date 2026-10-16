@@ -170,7 +170,7 @@
           :cache-dir cache-dir})))))
 
 (defn init-backend!
-  "Initializes PJRT C API client runtime for specified target (:cpu, :sycl, :rocm, :cuda12, :interpreter, :interp, or a custom string path).
+  "Initializes PJRT C API client runtime, UOp backend (:uop, :uop-cpu, :uop-rocm), or pure-JVM interpreter (:interpreter, :interp).
    Accepts optional `client-opts` map (defaults to `{:allocator \"platform\"}`).
    Sets and returns the thread-root default context *default-context*."
   ([] (init-backend! :cpu))
@@ -186,6 +186,14 @@
        (alter-var-root #'*default-context* (constantly ctx))
        (when-not (or (Boolean/getBoolean "clj-xla.quiet") (:quiet? client-opts))
          (println "clj-xla initialized Pure-JVM Interpreter Backend: [interpreter] (no native PJRT required)"))
+       ctx)
+
+     (contains? #{:uop :uop-cpu :uop-rocm} target)
+     (let [init-uop (requiring-resolve 'einsum.uop.runtime/init-uop-context!)
+           ctx (init-uop target client-opts)]
+       (alter-var-root #'*default-context* (constantly ctx))
+       (when-not (or (Boolean/getBoolean "clj-xla.quiet") (:quiet? client-opts))
+         (println (format "clj-xla initialized Native UOp Backend: [%s] (zero OpenXLA PJRT required)" (:platform ctx))))
        ctx)
 
      :else
@@ -228,6 +236,10 @@
 (defn init-sycl! [] (init-backend! :sycl))
 (defn init-rocm! [] (init-backend! :rocm))
 (defn init-cuda! [] (init-backend! :cuda12))
+(defn init-uop!
+  "Initializes the native UOp backend (:uop, :uop-cpu, or :uop-rocm)."
+  ([] (init-backend! :uop))
+  ([opts] (init-backend! :uop opts)))
 (defn init-interpreter!
   "Initializes the pure-JVM StableHLO interpreter backend (zero native PJRT required).
    Sets and returns the thread-root default context *default-context*."
@@ -313,7 +325,7 @@
 (def ^:private ^Class SHORT-ARRAY-CLASS (Class/forName "[S"))
 
 (defn to-host-slice
-  "Transfers a slice of PJRT output device buffer or interpreter tensor back to host float array.
+  "Transfers a slice of PJRT output device buffer, UOp device buffer, or interpreter tensor back to host float array.
    Supports optional `dtype` parameter (:f32 or :bf16), converting bfloat16 to float32 on transfer."
   ([out-buf]
    (to-host-slice out-buf 0 256000 (* 128 256000) :f32))
@@ -331,7 +343,12 @@
                       (instance? FLOAT-ARRAY-CLASS out-buf)
                       ^floats out-buf
 
-                      ;; 2. Interpreter tensor map {:dtype ... :shape ... :data ...}
+                      ;; 2. UOp device buffer map {:uop-buffer? true ...}
+                      (and (map? out-buf) (true? (:uop-buffer? out-buf)))
+                      (let [dev->floats (requiring-resolve 'einsum.uop.runtime/device->host-floats)]
+                        ^floats (dev->floats ctx out-buf n-elements))
+
+                      ;; 3. Interpreter tensor map {:dtype ... :shape ... :data ...}
                       (and (map? out-buf) (contains? out-buf :data))
                       (let [data (:data out-buf)
                             dt (or (:dtype out-buf) dtype :f32)]
@@ -363,7 +380,7 @@
                           :else
                           (float-array (map float data))))
 
-                      ;; 3. MemorySegment in interpreter mode
+                      ;; 4. MemorySegment in interpreter mode
                       (and (instance? MemorySegment out-buf) (= (:backend ctx) :interpreter))
                       (let [^MemorySegment seg out-buf
                             len (long (min (quot (.byteSize seg) 4) n-elements))
@@ -372,7 +389,7 @@
                           (aset f-arr i (.getAtIndex seg ValueLayout/JAVA_FLOAT (long i))))
                         f-arr)
 
-                      ;; 4. PJRT native device buffer
+                      ;; 5. PJRT native device buffer
                       :else
                       (pjrt/buffer-to-host-buffer ctx out-buf n-elements (or dtype :f32)))
          offset (* (long slice-idx) (long vocab-size))]
@@ -383,11 +400,14 @@
        all-floats))))
 
 (defn destroy-buffer!
-  "Frees native device PJRT_Buffer `buffer-handle`."
+  "Frees native device PJRT_Buffer or UOpBuffer `buffer-handle`."
   ([buffer-handle]
-   (pjrt/destroy-buffer! (get-context) buffer-handle))
+   (destroy-buffer! (get-context) buffer-handle))
   ([ctx buffer-handle]
-   (pjrt/destroy-buffer! ctx buffer-handle)))
+   (if (and (map? buffer-handle) (true? (:uop-buffer? buffer-handle)))
+     (let [destroy-fn (requiring-resolve 'einsum.uop.runtime/destroy-buffer!)]
+       (destroy-fn ctx buffer-handle))
+     (pjrt/destroy-buffer! ctx buffer-handle))))
 
 ;; -----------------------------------------------------------------------------
 ;; Scoped Device Arenas & Memory Management (Proposal 1)

@@ -143,12 +143,21 @@
                  (when-let [v (resolve 'einsum.core/*default-context*)] @v)
                  (when-let [f (resolve 'einsum.core/get-context)] (f))
                  {})]
-     (if (= (:backend ctx) :interpreter)
+     (cond
+       (= (:backend ctx) :interpreter)
        (let [buf {:dtype (or dtype :f32)
                   :shape (vec shape)
                   :data host-data}]
          (when arena (track! arena buf))
          buf)
+
+       (= (:backend ctx) :uop)
+       (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)
+             buf (host->dev ctx host-data shape dtype)]
+         (when arena (track! arena buf))
+         buf)
+
+       :else
        (let [cli (or (:client ctx) (:client arena))
              dt-enum (dtype->enum dtype)
              buf (pjrt/buffer-from-host-buffer ctx cli host-data shape dt-enum)]

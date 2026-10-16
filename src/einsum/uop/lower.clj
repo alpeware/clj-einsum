@@ -425,13 +425,16 @@
          expanded (expand/expand-ast {} ast)
          pruned (dce/prune-ast expanded targets)
          in-shapes (into {} (map (fn [[v [_ sh _]]] [v (vec sh)]) invars))
-         in-dtypes (into {} (map (fn [[v [_ _ dt]]] [v dt]) invars))
+         normalize-compute-dt (fn [dt]
+                                (let [d (or dt :f32)]
+                                  (if (contains? #{:bf16 :f16} d) :f32 d)))
+         in-dtypes (into {} (map (fn [[v [_ _ dt]]] [v (normalize-compute-dt dt)]) invars))
          known-shapes (shape/unify-shapes in-shapes pruned)
          ;; Initialize environment with `:uop/param` nodes for each invar
          initial-env (into {}
                            (map-indexed
                             (fn [slot [var-kw [_ sh dt]]]
-                              [var-kw (uop/uop-param slot (or dt :f32) sh var-kw)])
+                              [var-kw (uop/uop-param slot (normalize-compute-dt dt) sh var-kw)])
                             invars))
          ;; Step through pruned equations in topological order, accumulating repeated heads
          final-env

@@ -41,7 +41,12 @@
 
   java.lang.AutoCloseable
   (close [_this]
-    (when-not (= (:backend ctx) :interpreter)
+    (cond
+      (= (:backend ctx) :interpreter) nil
+      (= (:backend ctx) :uop)
+      (when-let [destroy-fn (requiring-resolve 'einsum.uop.runtime/destroy-uop-executable!)]
+        (try (destroy-fn ctx exec) (catch Exception _ nil)))
+      :else
       (when-let [handle (or (:handle exec) exec)]
         (try
           (pjrt/destroy-loaded-executable! ctx handle)
@@ -65,6 +70,20 @@
       (when arena/*active-arena*
         (arena/track! arena/*active-arena* buf))
       buf)
+
+    (= (:backend ctx) :uop)
+    (let [uop-buf? (requiring-resolve 'einsum.uop.runtime/uop-buffer?)]
+      (if (uop-buf? val)
+        val
+        (let [tensor-spec (if (and (vector? spec) (= (count spec) 2) (keyword? (first spec)) (vector? (second spec)))
+                            (second spec)
+                            spec)
+              [_tag shape dtype] tensor-spec
+              host->dev (requiring-resolve 'einsum.uop.runtime/host->device)
+              buf (host->dev ctx val (vec (or shape [])) (or dtype :f32))]
+          (when arena/*active-arena*
+            (arena/track! arena/*active-arena* buf))
+          buf)))
 
     (instance? MemorySegment val)
     val
@@ -90,6 +109,7 @@
         spec-map (into {} in-spec)
         weights-store (or (:weights opts) (:weight-store opts))
         interpreter? (= (:backend ctx) :interpreter)
+        uop? (= (:backend ctx) :uop)
 
         ;; 1. Collect inputs in the exact canonical invars order
         input-buffers (if (= call-style :map)
@@ -108,12 +128,12 @@
                               (range (count inputs))
                               inputs))]
 
-    (if interpreter?
+    (cond
+      interpreter?
       ;; 2a. Execute on pure-JVM StableHLO interpreter
       (let [bindings (zipmap in-keys input-buffers)
             out-map (interpret/execute (:graph exec) bindings)
             outs-vec (mapv #(get out-map %) out-spec)]
-        ;; Register outputs in active arena if bound
         (when arena/*active-arena*
           (doseq [b outs-vec]
             (arena/track! arena/*active-arena* b)))
@@ -127,7 +147,26 @@
           :else
           outs-vec))
 
-      ;; 2b. Execute on PJRT device
+      uop?
+      ;; 2b. Execute on native UOp backend (:uop-cpu or :uop-rocm)
+      (let [exec-fn (requiring-resolve 'einsum.uop.runtime/execute-uop-executable)
+            out-map (exec-fn ctx exec input-buffers)
+            outs-vec (mapv #(get out-map %) out-spec)]
+        (when arena/*active-arena*
+          (doseq [b outs-vec]
+            (arena/track! arena/*active-arena* b)))
+        (cond
+          (= call-style :map)
+          (into {} (map vector out-spec outs-vec))
+
+          (= 1 (count out-spec))
+          (first outs-vec)
+
+          :else
+          outs-vec))
+
+      :else
+      ;; 2c. Execute on PJRT device
       (let [exec-handle (or (:handle exec) exec)
             num-outs (max 1 (count out-spec))
             raw-outs (pjrt/execute-executable ctx exec-handle input-buffers num-outs)
@@ -183,19 +222,27 @@
 
          in-keys (mapv first in-spec)
 
-         ;; Lower AST to validated StableHLO graph
-         graph (lower/ast->graph name-str in-spec ast out-spec)
+         ;; Lower AST to validated StableHLO graph (or UOp executable when :backend is :uop)
+         graph (when-not (= (:backend ctx) :uop)
+                 (lower/ast->graph name-str in-spec ast out-spec))
 
-         ;; Compile graph to native PJRT executable or pure-JVM interpreter executable
-         exec (if (= (:backend ctx) :interpreter)
+         ;; Compile graph to native PJRT executable, UOp executable, or pure-JVM interpreter executable
+         exec (cond
+                (= (:backend ctx) :interpreter)
                 (let [fused (fuse/fuse-graph graph)]
                   {:handle fused
                    :graph fused
                    :backend :interpreter
                    :ctx ctx})
+
+                (= (:backend ctx) :uop)
+                (let [comp-fn (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
+                  (comp-fn ctx name-str in-spec ast out-spec))
+
+                :else
                 (let [cli (or (:client ctx) ctx)]
                   (compile/compile-graph ctx cli graph)))]
-     (->CompiledKernel name-str ast graph exec in-spec in-keys out-spec ctx opts))))
+     (->CompiledKernel name-str ast (or graph (:uop-graph exec)) exec in-spec in-keys out-spec ctx opts))))
 
 (defmacro defkernel
   "Defines a var bound to a compiled kernel function."

@@ -137,8 +137,17 @@
 
                     ;; 1. MemorySegment already in source map (caller-owned buffer or host segment, never auto-tracked)
                     (and (map? source) (contains? source k) (instance? MemorySegment (get source k)))
-                    (if (= (:backend ctx) :interpreter)
+                    (cond
+                      (= (:backend ctx) :interpreter)
                       {:dtype dtype :shape shape :data (iw/align-slice (get source k) dtype shape) :name (str canonical-name)}
+
+                      (= (:backend ctx) :uop)
+                      (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)
+                            b (host->dev ctx (get source k) shape dtype)]
+                        (when arena (arena/track! arena b))
+                        b)
+
+                      :else
                       (get source k))
 
                     ;; 2. Safetensors mapped weights
@@ -153,6 +162,10 @@
 
                         arena
                         (arena/device-buffer arena slice shape dtype)
+
+                        (= (:backend ctx) :uop)
+                        (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)]
+                          (host->dev ctx slice shape dtype))
 
                         :else
                         (let [dt-enum (arena/dtype->enum dtype)]
@@ -169,6 +182,10 @@
 
                         arena
                         (arena/device-buffer arena arr shape dtype)
+
+                        (= (:backend ctx) :uop)
+                        (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)]
+                          (host->dev ctx arr shape dtype))
 
                         :else
                         (let [dt-enum (arena/dtype->enum dtype)]
