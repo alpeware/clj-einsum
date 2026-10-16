@@ -137,6 +137,15 @@
                       ;; hipDeviceSynchronize() -> hipError_t
                       hipDeviceSynchronize (make-downcall linker hip-lookup "hipDeviceSynchronize"
                                                           (FunctionDescriptor/of jint (into-array MemoryLayout [])))
+                      ;; hipHostRegister(void* hostPtr, size_t sizeBytes, unsigned int flags) -> hipError_t
+                      hipHostRegister (make-downcall linker hip-lookup "hipHostRegister"
+                                                     (FunctionDescriptor/of jint (into-array MemoryLayout [addr jlong jint])))
+                      ;; hipHostUnregister(void* hostPtr) -> hipError_t
+                      hipHostUnregister (make-downcall linker hip-lookup "hipHostUnregister"
+                                                       (FunctionDescriptor/of jint (into-array MemoryLayout [addr])))
+                      ;; hipHostGetDevicePointer(void** devPtr, void* hostPtr, unsigned int flags) -> hipError_t
+                      hipHostGetDevicePointer (make-downcall linker hip-lookup "hipHostGetDevicePointer"
+                                                             (FunctionDescriptor/of jint (into-array MemoryLayout [addr addr jint])))
 
                       ;; HIPRTC bindings
                       ;; hiprtcCreateProgram(hiprtcProgram* prog, const char* src, const char* name, int numHeaders, const char* const* headers, const char* const* includeNames)
@@ -179,6 +188,9 @@
                          :hipModuleGetFunction hipModuleGetFunction
                          :hipModuleLaunchKernel hipModuleLaunchKernel
                          :hipDeviceSynchronize hipDeviceSynchronize
+                         :hipHostRegister hipHostRegister
+                         :hipHostUnregister hipHostUnregister
+                         :hipHostGetDevicePointer hipHostGetDevicePointer
                          :hiprtcCreateProgram hiprtcCreateProgram
                          :hiprtcCompileProgram hiprtcCompileProgram
                          :hiprtcGetProgramLogSize hiprtcGetProgramLogSize
@@ -219,18 +231,39 @@
             ^MethodHandle hipMalloc (:hipMalloc hip)]
         (with-open [tmp (Arena/ofConfined)]
           (let [ptr-slot (.allocate tmp ValueLayout/ADDRESS)
-                rc (int (.invokeWithArguments hipMalloc (into-array Object [ptr-slot (long byte-size)])))
-                _ (check-hip! rc "hipMalloc")
-                dptr (.get ptr-slot ValueLayout/ADDRESS 0)]
-            {:uop-buffer? true
-             :target :rocm
-             :dtype storage-dt
-             :orig-dtype storage-dt
-             :shape (vec shape)
-             :size elem-count
-             :byte-size byte-size
-             :ptr dptr
-             :owned? true})))
+                rc (int (.invokeWithArguments hipMalloc (into-array Object [ptr-slot (long byte-size)])))]
+            (if (zero? rc)
+              (let [dptr (.get ptr-slot ValueLayout/ADDRESS 0)]
+                {:uop-buffer? true
+                 :target :rocm
+                 :dtype storage-dt
+                 :orig-dtype storage-dt
+                 :shape (vec shape)
+                 :size elem-count
+                 :byte-size byte-size
+                 :ptr dptr
+                 :owned? true})
+              ;; Fallback for large allocations (e.g. rc=2 hipErrorOutOfMemory): host-pinned mapped memory
+              (let [buf-arena (Arena/ofShared)
+                    seg (.allocate buf-arena (long byte-size) 64)
+                    ^MethodHandle hip-host-reg (:hipHostRegister hip)
+                    ^MethodHandle hip-host-get-dev (:hipHostGetDevicePointer hip)
+                    rc-reg (int (.invokeWithArguments hip-host-reg (into-array Object [seg (long byte-size) (int 2)])))
+                    _ (check-hip! rc-reg "hipHostRegister fallback")
+                    rc-get (int (.invokeWithArguments hip-host-get-dev (into-array Object [ptr-slot seg (int 0)])))
+                    _ (check-hip! rc-get "hipHostGetDevicePointer fallback")
+                    dptr (.get ptr-slot ValueLayout/ADDRESS 0)]
+                {:uop-buffer? true
+                 :target :rocm
+                 :dtype storage-dt
+                 :orig-dtype storage-dt
+                 :shape (vec shape)
+                 :size elem-count
+                 :byte-size byte-size
+                 :ptr dptr
+                 :arena buf-arena
+                 :host-registered-seg seg
+                 :owned? true})))))
       (let [buf-arena (Arena/ofShared)
             seg (.allocate buf-arena (long byte-size) 64)]
         {:uop-buffer? true
@@ -251,15 +284,20 @@
     (try
       (if (= :rocm (:target buf))
         (when-let [hip (or (:hip ctx) @hip-runtime-state)]
-          (let [^MethodHandle hipFree (:hipFree hip)
-                ^MemorySegment dptr (:ptr buf)]
-            (when (and dptr (not= dptr MemorySegment/NULL))
-              (.invokeWithArguments hipFree (into-array Object [dptr])))))
+          (if-let [host-seg (:host-registered-seg buf)]
+            (let [^MethodHandle hip-host-unreg (:hipHostUnregister hip)
+                  rc (int (.invokeWithArguments hip-host-unreg (into-array Object [host-seg])))]
+              (when-let [^Arena a (:arena buf)]
+                (.close a))
+              (check-hip! rc "hipHostUnregister"))
+            (let [^MethodHandle hipFree (:hipFree hip)
+                  ^MemorySegment dptr (:ptr buf)]
+              (when (and dptr (not (.equals MemorySegment/NULL dptr)))
+                (let [rc (int (.invokeWithArguments hipFree (into-array Object [dptr])))]
+                  (check-hip! rc "hipFree"))))))
         (when-let [^Arena a (:arena buf)]
-          (when (.isAlive (.scope a))
-            (.close a))))
-      (catch Throwable _ nil)))
-  nil)
+          (.close a)))
+      (catch Throwable _ nil))))
 
 (defn- populate-host-segment!
   "Writes `host-data` into off-heap `MemorySegment` `dst-seg` of `storage-dt` (`:f32`, `:bf16`, `:i32`, `:i8`, `:f64`).
@@ -400,31 +438,58 @@
          :byte-size (.byteSize ^MemorySegment host-data)
          :ptr ^MemorySegment host-data
          :owned? false}
-        (let [dev-buf (allocate-device-buffer ctx shape storage-dt)]
-          (if (= target :rocm)
-            (let [hip (or (:hip ctx) (init-hip-bindings!))
-                  ^MethodHandle hipMemcpy (:hipMemcpy hip)]
-              ;; If host-data is already a MemorySegment of matching dtype, copy directly HtoD without staging!
-              (if (and (instance? MemorySegment host-data)
-                       (= (or dtype :f32) storage-dt)
-                       (>= (.byteSize ^MemorySegment host-data) (* elem-count (dtype-byte-size storage-dt))))
-                (let [rc (int (.invokeWithArguments hipMemcpy
-                                                    (into-array Object [(:ptr dev-buf)
-                                                                        ^MemorySegment host-data
-                                                                        (long (* elem-count (dtype-byte-size storage-dt)))
-                                                                        (int 1)])))]
-                  (check-hip! rc "hipMemcpy(HtoD direct)"))
-                (with-open [staging (Arena/ofConfined)]
-                  (let [stage-seg (.allocate staging (long byte-size) 64)
-                        _ (populate-host-segment! stage-seg host-data elem-count (or dtype :f32) storage-dt)
-                        rc (int (.invokeWithArguments hipMemcpy
-                                                      (into-array Object [(:ptr dev-buf)
-                                                                          stage-seg
-                                                                          (long (* elem-count (dtype-byte-size storage-dt)))
-                                                                          (int 1)])))]
-                    (check-hip! rc "hipMemcpy(HtoD staged)")))))
-            (populate-host-segment! (:ptr dev-buf) host-data elem-count (or dtype :f32) storage-dt))
-          dev-buf)))))
+        ;; Fast zero-copy path on ROCm if host-data is a MemorySegment >= 1 GiB: register with hipHostRegister!
+        (if (and (= target :rocm)
+                 (instance? MemorySegment host-data)
+                 (= (or dtype :f32) storage-dt)
+                 (>= (.byteSize ^MemorySegment host-data) (* elem-count (dtype-byte-size storage-dt)))
+                 (>= byte-size 1073741824))
+          (let [hip (or (:hip ctx) (init-hip-bindings!))
+                ^MethodHandle hip-host-reg (:hipHostRegister hip)
+                ^MethodHandle hip-host-get-dev (:hipHostGetDevicePointer hip)]
+            (with-open [tmp (Arena/ofConfined)]
+              (let [rc-reg (int (.invokeWithArguments hip-host-reg (into-array Object [host-data (long byte-size) (int 2)])))
+                    _ (check-hip! rc-reg "hipHostRegister (direct)")
+                    dev-ptr-slot (.allocate tmp ValueLayout/ADDRESS)
+                    rc-get (int (.invokeWithArguments hip-host-get-dev (into-array Object [dev-ptr-slot host-data (int 0)])))
+                    _ (check-hip! rc-get "hipHostGetDevicePointer (direct)")
+                    dptr (.get dev-ptr-slot ValueLayout/ADDRESS 0)]
+                {:uop-buffer? true
+                 :target :rocm
+                 :dtype storage-dt
+                 :orig-dtype storage-dt
+                 :shape (vec shape)
+                 :size elem-count
+                 :byte-size byte-size
+                 :ptr dptr
+                 :host-registered-seg host-data
+                 :owned? true})))
+          (let [dev-buf (allocate-device-buffer ctx shape storage-dt)]
+            (if (= target :rocm)
+              (let [hip (or (:hip ctx) (init-hip-bindings!))
+                    ^MethodHandle hipMemcpy (:hipMemcpy hip)]
+                (if (:host-registered-seg dev-buf)
+                  (populate-host-segment! (:host-registered-seg dev-buf) host-data elem-count (or dtype :f32) storage-dt)
+                  (if (and (instance? MemorySegment host-data)
+                           (= (or dtype :f32) storage-dt)
+                           (>= (.byteSize ^MemorySegment host-data) (* elem-count (dtype-byte-size storage-dt))))
+                    (let [rc (int (.invokeWithArguments hipMemcpy
+                                                        (into-array Object [(:ptr dev-buf)
+                                                                            ^MemorySegment host-data
+                                                                            (long (* elem-count (dtype-byte-size storage-dt)))
+                                                                            (int 1)])))]
+                      (check-hip! rc "hipMemcpy(HtoD direct)"))
+                    (with-open [staging (Arena/ofConfined)]
+                      (let [stage-seg (.allocate staging (long byte-size) 64)
+                            _ (populate-host-segment! stage-seg host-data elem-count (or dtype :f32) storage-dt)
+                            rc (int (.invokeWithArguments hipMemcpy
+                                                          (into-array Object [(:ptr dev-buf)
+                                                                              stage-seg
+                                                                              (long (* elem-count (dtype-byte-size storage-dt)))
+                                                                              (int 1)])))]
+                        (check-hip! rc "hipMemcpy(HtoD staged)"))))))
+              (populate-host-segment! (:ptr dev-buf) host-data elem-count (or dtype :f32) storage-dt))
+            dev-buf))))))
 
 (defn device->host-floats
   "Transfers `n-elements` from `uop-buf` back to a host `float[]` array."
@@ -514,7 +579,7 @@
             (let [tmp-c (io/file cache-dir (str "tmp_" mod-hash "_" (System/nanoTime) ".c"))
                   tmp-so (io/file cache-dir (str "tmp_" mod-hash "_" (System/nanoTime) ".so"))]
               (spit tmp-c full-src)
-              (let [res (sh/sh "gcc" "-O3" "-march=native" "-ffast-math" "-shared" "-fPIC"
+              (let [res (sh/sh "gcc" "-O3" "-march=native" "-fno-math-errno" "-fno-trapping-math" "-shared" "-fPIC"
                                (.getAbsolutePath tmp-c) "-lm" "-o" (.getAbsolutePath tmp-so))]
                 (.delete tmp-c)
                 (when-not (zero? (:exit res))
@@ -583,7 +648,7 @@
                                                                                  MemorySegment/NULL MemorySegment/NULL])))
                         _ (check-hip! rc-create "hiprtcCreateProgram")
                         prog (.get prog-slot ValueLayout/ADDRESS 0)
-                        opts [(str "--offload-arch=" arch) "-O3" "-ffast-math"]
+                        opts [(str "--offload-arch=" arch) "-O3" "-fno-math-errno" "-fno-trapping-math"]
                         opts-seg (.allocate arena ValueLayout/ADDRESS (count opts))]
                     (doseq [[idx opt-str] (map-indexed vector opts)]
                       (.setAtIndex opts-seg ValueLayout/ADDRESS (long idx) (.allocateFrom arena ^String opt-str)))
@@ -775,10 +840,14 @@
           (let [hip (or (:hip ctx) (init-hip-bindings!))
                 ^MethodHandle launch-mh (:hipModuleLaunchKernel hip)
                 ^MethodHandle sync-mh (:hipDeviceSynchronize hip)]
-            (doseq [{:keys [fn-handle buffer-slots arg-vals-seg kernel-params-seg global-size local-size]} (:prepared-kernels uop-exec)]
+            (doseq [[k-idx {:keys [fn-handle buffer-slots arg-vals-seg kernel-params-seg global-size local-size canonical-fn-name]}] (map-indexed vector (:prepared-kernels uop-exec))]
               (dotimes [i (count buffer-slots)]
                 (let [slot (long (nth buffer-slots i))
                       ^MemorySegment ptr (.get slot->ptr slot)]
+                  (when (nil? ptr)
+                    (throw (ex-info (format "UOp kernel %d (%s) arg %d (slot %d) has NIL pointer in slot->ptr!"
+                                            (int k-idx) (str canonical-fn-name) (int i) slot)
+                                    {:kernel-idx k-idx :canonical-fn-name canonical-fn-name :slot slot})))
                   (.setAtIndex ^MemorySegment arg-vals-seg ValueLayout/ADDRESS (long i) ptr)))
               (let [[gx gy gz] global-size
                     [lx ly lz] local-size
@@ -790,9 +859,10 @@
                                                                       MemorySegment/NULL
                                                                       kernel-params-seg
                                                                       MemorySegment/NULL])))]
-                (check-hip! rc "hipModuleLaunchKernel")))
-            (let [rc-sync (int (.invokeWithArguments sync-mh (into-array Object [])))]
-              (check-hip! rc-sync "hipDeviceSynchronize")))
+                (check-hip! rc (format "hipModuleLaunchKernel for kernel %d (%s) grid=[%d %d %d] block=[%d %d %d]"
+                                       k-idx canonical-fn-name (int gx) (int gy) (int gz) (int lx) (int ly) (int lz))))
+              (let [rc-sync (int (.invokeWithArguments sync-mh (into-array Object [])))]
+                (check-hip! rc-sync (format "hipDeviceSynchronize after kernel %d (%s)" k-idx canonical-fn-name)))))
           ;; CPU execution
           (doseq [{:keys [fn-handle buffer-slots arg-vals-seg]} (:prepared-kernels uop-exec)]
             (dotimes [i (count buffer-slots)]

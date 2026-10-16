@@ -3,6 +3,7 @@
    Translates Einsum contractions, activations, norms, RoPE, causal-softmax, gather, and slice
    into pure compositions of tinyspec Movement Ops + ALU Ops + Reduce Ops."
   (:require [clojure.set :as set]
+            [clojure.string :as str]
             [einsum.logic.ast :as ast]
             [einsum.logic.dce :as dce]
             [einsum.logic.expand :as expand]
@@ -141,8 +142,11 @@
   [x]
   (let [dt (:dtype x)
         sh (:shape x)
+        c-min (broadcast-scalar dt -80.0 sh)
+        c-max (broadcast-scalar dt 80.0 sh)
+        x-clamped (uop/uop-alu :uop/max (uop/uop-alu :uop/min x c-max) c-min)
         one (broadcast-scalar dt 1.0 sh)
-        neg-x (uop/uop-alu :uop/neg x)
+        neg-x (uop/uop-alu :uop/neg x-clamped)
         exp-neg (uop-exp neg-x)
         denom (uop/uop-alu :uop/add one exp-neg)]
     (uop/uop-alu :uop/recip denom)))
@@ -334,14 +338,17 @@
         ms (uop/uop-alu :uop/mul (uop/uop-expand sum-sq sh) inv-d)
         ms-eps (uop/uop-alu :uop/add ms (broadcast-scalar dt eps sh))
         rstd (uop/uop-alu :uop/recip (uop/uop-alu :uop/sqrt ms-eps))
-        normed (uop/uop-alu :uop/mul x-uop rstd)]
-    (if w-uop
-      (let [w-bcast (broadcast-shape-suffix w-uop sh)
-            w-eff (if gemma?
-                    (uop/uop-alu :uop/add w-bcast (broadcast-scalar dt 1.0 sh))
-                    w-bcast)]
-        (uop/uop-alu :uop/mul normed w-eff))
-      normed)))
+        normed (uop/uop-alu :uop/mul x-uop rstd)
+        res (if w-uop
+              (let [w-bcast (broadcast-shape-suffix w-uop sh)
+                    w-eff (if gemma?
+                            (uop/uop-alu :uop/add w-bcast (broadcast-scalar dt 1.0 sh))
+                            w-bcast)]
+                (uop/uop-alu :uop/mul normed w-eff))
+              normed)]
+    (if (not= dt :f32)
+      (uop/uop-cast res dt)
+      res)))
 
 (defn- lower-softmax-core
   "Lowers numerically stable softmax along `axis` (default -1) in pure UOps."
@@ -411,9 +418,11 @@
                                  p-uop (-> (uop/uop :uop/vconst :f32 [] p-vals [seq-len])
                                            (uop/uop-reshape [1 seq-len 1 1]))]
                              (uop/uop-alu :uop/add pos-4d p-uop)))
+                 eff-pos-bc (broadcast-shape-suffix eff-pos [1 seq-len 1 half-dim])
                  freqs-uop (-> (uop/uop :uop/vconst :f32 [] freqs [half-dim])
                                (uop/uop-reshape [1 1 1 half-dim]))
-                 angle (uop/uop-alu :uop/mul eff-pos freqs-uop)
+                 freqs-bc (broadcast-shape-suffix freqs-uop [1 seq-len 1 half-dim])
+                 angle (uop/uop-alu :uop/mul eff-pos-bc freqs-bc)
                  c (-> (uop/uop-alu :uop/cos angle)
                        (uop/uop-expand half-shape))
                  s (-> (uop/uop-alu :uop/sin angle)
@@ -446,8 +455,11 @@
          y2 (uop/uop-alu :uop/add
                          (uop/uop-alu :uop/mul x2 cos-uop)
                          (uop/uop-alu :uop/mul x1 sin-uop))
-         cat-4d (uop/uop-cat [y1 y2] 3)]
-     (uop/uop-reshape cat-4d sh))))
+         cat-4d (uop/uop-cat [y1 y2] 3)
+         out (uop/uop-reshape cat-4d sh)]
+     (if (not= dt :f32)
+       (uop/uop-cast out dt)
+       out))))
 
 (defn- lower-gather
   "Lowers `[:gather head weight indices]` into an indexed gather UOp."
@@ -485,13 +497,17 @@
                    :else (uop/uop-const :i32 0))
         window (or (:window attrs) (:sliding-window attrs) (:sliding_window attrs))
         k-sink (or (:k-sink attrs) (:k_sink attrs) 0)
-        src [cache-in k-new pos-node]
+        target-dt (:dtype cache-in)
+        k-new-cast (if (= (:dtype k-new) target-dt)
+                     k-new
+                     (uop/uop-cast k-new target-dt))
+        src [cache-in k-new-cast pos-node]
         arg {:window window :k-sink k-sink}]
-    (uop/uop :uop/dynamic-update-slice (:dtype cache-in) src arg (:shape cache-in))))
+    (uop/uop :uop/dynamic-update-slice target-dt src arg (:shape cache-in))))
 
 (defn- lower-chunked-attention
   "Lowers chunked/decode attention `[:chunked-attention head q k v attrs]` into pure UOps."
-  [q-uop k-uop v-uop attrs _env out-shape]
+  [q-uop k-uop v-uop attrs env out-shape]
   (let [q-sh (:shape q-uop)
         k-sh (:shape k-uop)
         b (nth q-sh 0 1)
@@ -523,10 +539,41 @@
         k-exp (-> (uop/uop-reshape (uop/uop-permute k-trans [0 1 3 2]) [b h 1 kvs dh])
                   (uop/uop-expand [b h p kvs dh]))
         qk-prod (uop/uop-alu :uop/mul q-exp k-exp)
-        raw-scores (uop/uop-reduce qk-prod :add [4])
-        scale (uop/uop-const :f32 (/ 1.0 (Math/sqrt (double dh))) [1 1 1 1])
+        raw-scores (uop/uop-reduce qk-prod :add [4] false)
+        scale-val (double (or (:scale attrs) 1.0))
+        scale (uop/uop-const :f32 scale-val [1 1 1 1])
         scaled-scores (uop/uop-alu :uop/mul raw-scores (broadcast-shape-suffix scale [b h p kvs]))
-        masked-scores (lower-causal-softmax scaled-scores attrs)
+        pos-attr (or (:pos attrs) (:start-indices attrs))
+        pos-uop (cond
+                  (uop/uop? pos-attr) pos-attr
+                  (or (keyword? pos-attr) (symbol? pos-attr)) (get env (keyword pos-attr))
+                  (number? pos-attr) (uop/uop-const :i32 (long pos-attr) [1 1 1 1])
+                  :else nil)
+        window (or (:sliding-window attrs) (:sliding_window attrs) (:window attrs))
+        masked-scores
+        (if (or pos-uop (not= p kvs))
+          (let [pos-node (if pos-uop
+                           (-> (if (= (:dtype pos-uop) :i32) pos-uop (uop/uop-cast pos-uop :i32))
+                               (uop/uop-reshape [1 1 1 1]))
+                           (uop/uop-const :i32 0 [1 1 1 1]))
+                r-uop (-> (uop/uop :uop/vconst :i32 [] (vec (range p)) [p])
+                          (uop/uop-reshape [1 1 p 1]))
+                q-pos (uop/uop-alu :uop/add pos-node (broadcast-shape-suffix r-uop [1 1 p 1]))
+                c-uop (-> (uop/uop :uop/vconst :i32 [] (vec (range kvs)) [kvs])
+                          (uop/uop-reshape [1 1 1 kvs]))
+                c-bc (broadcast-shape-suffix c-uop [b h p kvs])
+                q-pos-bc (broadcast-shape-suffix q-pos [b h p kvs])
+                causal-cond (uop/uop-alu :uop/cmple c-bc q-pos-bc)
+                valid-cond (if window
+                             (let [win-const (broadcast-shape-suffix (uop/uop-const :i32 (long window) [1 1 1 1]) [b h p kvs])
+                                   diff (uop/uop-alu :uop/sub q-pos-bc c-bc)
+                                   win-cond (uop/uop-alu :uop/cmplt diff win-const)]
+                               (uop/uop-alu :uop/and causal-cond win-cond))
+                             causal-cond)
+                neg-inf (broadcast-shape-suffix (uop/uop-const :f32 -1.0e9 [1 1 1 1]) [b h p kvs])
+                masked (uop/uop-alu :uop/where valid-cond scaled-scores neg-inf)]
+            (lower-softmax-core masked -1))
+          (lower-causal-softmax scaled-scores attrs))
         ;; Attn output: [b, h, p, dh] <- masked-scores [b, h, p, kvs] * V [b, h, kvs, dh]
         s-exp (-> (uop/uop-reshape masked-scores [b h p kvs 1])
                   (uop/uop-expand [b h p kvs dh]))
@@ -534,7 +581,7 @@
         v-exp (-> (uop/uop-reshape v-trans [b h 1 kvs dh])
                   (uop/uop-expand [b h p kvs dh]))
         sv-prod (uop/uop-alu :uop/mul s-exp v-exp)
-        out-trans (uop/uop-reduce sv-prod :add [3])
+        out-trans (uop/uop-reduce sv-prod :add [3] false)
         ;; Permute back to [b, p, h, dh]
         out (uop/uop-permute out-trans [0 2 1 3])]
     (if out-shape (uop/uop-reshape out (vec out-shape)) out)))
@@ -690,10 +737,34 @@
           initial-env
           pruned)
          out-vec (if (sequential? target-heads) (vec target-heads) (vec targets))
-         outputs (into {} (map (fn [k] [k (get final-env k)]) out-vec))]
+         target-entries (mapv (fn [t]
+                                (if (vector? t) [(first t) (second t)] [t nil]))
+                              out-vec)
+         outvars (mapv first target-entries)
+         outputs
+         (into {}
+               (map (fn [[k explicit-dt]]
+                      (let [node (get final-env k)
+                            target-dt (or explicit-dt
+                                          ;; If target corresponds to a cache_out, match cache_in
+                                          (when-let [in-k (some #(when (and (str/includes? (name %) "cache_in")
+                                                                            (= (str/replace (name %) "cache_in" "cache_out") (name k))) %)
+                                                                (keys in-dtypes))]
+                                            (get in-dtypes in-k))
+                                          ;; If target is prefill KV output (k_ro / v_heads), match embed_tokens
+                                          (when (or (str/starts-with? (name k) "k_ro")
+                                                    (str/starts-with? (name k) "v_heads"))
+                                            (get in-dtypes :embed_tokens))
+                                          ;; If target is logits, match embed_tokens
+                                          (when (= k :logits)
+                                            (get in-dtypes :embed_tokens)))]
+                        [k (if (and target-dt node (not= (:dtype node) target-dt))
+                             (uop/uop-cast node target-dt)
+                             node)]))
+                    target-entries))]
      {:name graph-name
       :invars invars
       :in-dtypes in-dtypes
       :known-shapes known-shapes
-      :outvars out-vec
+      :outvars outvars
       :outputs outputs})))

@@ -1,7 +1,6 @@
 (ns einsum.models.gemma4.weights
   "Gemma 4 device weight allocation, format conversion, and quantization unpacking."
   (:require [clojure.string :as str]
-            [einsum.compiler.pjrt :as pjrt]
             [einsum.core :as xla]
             [einsum.logic.exl3 :as exl3]
             [einsum.models.gemma :as gemma-logic]
@@ -331,8 +330,8 @@
                        (let [sa (if (instance? (Class/forName "[S") data)
                                   ^shorts data
                                   (floats->bf16-shorts ^floats data))]
-                         (pjrt/buffer-from-host-buffer ctx (:client ctx) sa shape 13))
-                       (pjrt/buffer-from-host-buffer ctx (:client ctx) data shape (or norm-enum 11))))
+                         (xla/buffer-from-host-buffer ctx (:client ctx) sa shape 13))
+                       (xla/buffer-from-host-buffer ctx (:client ctx) data shape (or norm-enum 11))))
         rel-cfg (or (:relational-memory config) {})
         hidden-dim (long (or (:hidden-dim config) 1536))
         mem-dim (long (or (:dim rel-cfg) (:memory-dim rel-cfg) 256))

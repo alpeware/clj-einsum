@@ -199,9 +199,18 @@
                                                        (uop/uop-alu :uop/cmpge time-coord eff-slot)
                                                        (uop/uop-alu :uop/cmplt time-coord (uop/uop-alu :uop/add eff-slot (uop/uop-const :i32 q-len)))))
                                  val-cache (lower-at cache-in-node coords)
-                                 k-coords (assoc coords 1 (uop/uop-alu :uop/sub time-coord eff-slot))
-                                 val-new (lower-at k-new-node k-coords)]
-                             (uop/uop-alu :uop/where match? val-new val-cache))
+                                 safe-time-offset (if (== 1 q-len)
+                                                    (uop/uop-const :i32 0)
+                                                    (uop/uop-alu :uop/where match?
+                                                                 (uop/uop-alu :uop/sub time-coord eff-slot)
+                                                                 (uop/uop-const :i32 0)))
+                                 k-coords (assoc coords 1 safe-time-offset)
+                                 val-new (lower-at k-new-node k-coords)
+                                 target-dt (:dtype val-cache)
+                                 val-new-cast (if (= (:dtype val-new) target-dt)
+                                                val-new
+                                                (uop/uop-cast val-new target-dt))]
+                             (uop/uop-alu :uop/where match? val-new-cast val-cache))
 
                            :uop/flip
                            (let [in-node (first src)
@@ -293,9 +302,9 @@
                                    w-dt (or (:dtype w-leaf) (:dtype w-uop))
                                    w-shape (or (:shape w-leaf) (:shape w-uop))
                                    hidden-dim (long (last w-shape))
-                                   ;; Compute w[tok_id * hidden_dim + d_coord]
-                                   row-offset (uop/uop-alu :uop/mul tok-id (uop/uop-const :i32 hidden-dim))
-                                   w-lin-idx (rewrite/simplify-uop (uop/uop-alu :uop/add row-offset d-coord))
+                                   ;; Compute w[tok_id * hidden_dim + d_coord] in 64-bit to prevent integer overflow
+                                   row-offset (uop/uop-alu :uop/mul (uop/uop-cast tok-id :i64) (uop/uop-const :i64 hidden-dim))
+                                   w-lin-idx (rewrite/simplify-uop (uop/uop-alu :uop/add row-offset (uop/uop-cast d-coord :i64)))
                                    w-size (long (reduce * 1 w-shape))
                                    w-name (or (:name (:arg w-leaf)) (:name (:arg w-uop)))
                                    w-buf (uop/uop-buffer w-slot w-dt w-size w-name)

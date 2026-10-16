@@ -64,14 +64,40 @@
 
 (deftest test-determine-optimal-xla-flags-rocm-env-vars
   (testing "determine-optimal-xla-flags sets ROCm environment variables including HSA_OVERRIDE_GFX_VERSION"
-    (let [res (xla/determine-optimal-xla-flags :rocm {} {:gfx-version "11.0.0" :rocr-visible-devices "0" :hip-visible-devices "0"})
-          {:keys [env-vars]} res]
-      (is (= "11.0.0" (get env-vars "HSA_OVERRIDE_GFX_VERSION")))
-      (is (= "0" (get env-vars "ROCR_VISIBLE_DEVICES")))
-      (is (= "0" (get env-vars "HIP_VISIBLE_DEVICES")))
-      (is (= "11.0.0" (System/getProperty "HSA_OVERRIDE_GFX_VERSION")))
-      (is (= "0" (System/getProperty "ROCR_VISIBLE_DEVICES")))
-      (is (= "0" (System/getProperty "HIP_VISIBLE_DEVICES"))))))
+    (let [orig-gfx (System/getProperty "HSA_OVERRIDE_GFX_VERSION")
+          orig-rocr (System/getProperty "ROCR_VISIBLE_DEVICES")
+          orig-hip (System/getProperty "HIP_VISIBLE_DEVICES")
+          orig-gfx-nat (xla/getenv-native "HSA_OVERRIDE_GFX_VERSION")
+          orig-rocr-nat (xla/getenv-native "ROCR_VISIBLE_DEVICES")
+          orig-hip-nat (xla/getenv-native "HIP_VISIBLE_DEVICES")]
+      (try
+        (let [res (xla/determine-optimal-xla-flags :rocm {} {:gfx-version "11.0.0" :rocr-visible-devices "0" :hip-visible-devices "0"})
+              {:keys [env-vars]} res]
+          (is (= "11.0.0" (get env-vars "HSA_OVERRIDE_GFX_VERSION")))
+          (is (= "0" (get env-vars "ROCR_VISIBLE_DEVICES")))
+          (is (= "0" (get env-vars "HIP_VISIBLE_DEVICES")))
+          (is (= "11.0.0" (System/getProperty "HSA_OVERRIDE_GFX_VERSION")))
+          (is (= "0" (System/getProperty "ROCR_VISIBLE_DEVICES")))
+          (is (= "0" (System/getProperty "HIP_VISIBLE_DEVICES"))))
+        (finally
+          (if orig-gfx
+            (System/setProperty "HSA_OVERRIDE_GFX_VERSION" orig-gfx)
+            (System/clearProperty "HSA_OVERRIDE_GFX_VERSION"))
+          (if orig-gfx-nat
+            (xla/setenv-native "HSA_OVERRIDE_GFX_VERSION" orig-gfx-nat)
+            (xla/unsetenv-native "HSA_OVERRIDE_GFX_VERSION"))
+          (if orig-rocr
+            (System/setProperty "ROCR_VISIBLE_DEVICES" orig-rocr)
+            (System/clearProperty "ROCR_VISIBLE_DEVICES"))
+          (if orig-rocr-nat
+            (xla/setenv-native "ROCR_VISIBLE_DEVICES" orig-rocr-nat)
+            (xla/unsetenv-native "ROCR_VISIBLE_DEVICES"))
+          (if orig-hip
+            (System/setProperty "HIP_VISIBLE_DEVICES" orig-hip)
+            (System/clearProperty "HIP_VISIBLE_DEVICES"))
+          (if orig-hip-nat
+            (xla/setenv-native "HIP_VISIBLE_DEVICES" orig-hip-nat)
+            (xla/unsetenv-native "HIP_VISIBLE_DEVICES")))))))
 
 (deftest test-init-interpreter-backend
   (testing "init-backend! with :interpreter or :interp initializes pure-JVM backend without PJRT plugin"

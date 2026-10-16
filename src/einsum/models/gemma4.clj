@@ -20,6 +20,7 @@
    :norm-eps 1e-6
    :final-logit-softcap 30.0
    :num-kv-shared-layers 20
+   :weight-dtype :bf16
    :layer-types ["sliding_attention" "sliding_attention" "sliding_attention" "sliding_attention" "full_attention"
                  "sliding_attention" "sliding_attention" "sliding_attention" "sliding_attention" "full_attention"
                  "sliding_attention" "sliding_attention" "sliding_attention" "sliding_attention" "full_attention"
@@ -42,6 +43,7 @@
    :norm-eps 1e-6
    :final-logit-softcap 30.0
    :num-kv-shared-layers 18
+   :weight-dtype :bf16
    :layer-types (vec (take 42 (cycle ["sliding_attention" "sliding_attention" "sliding_attention"
                                       "sliding_attention" "sliding_attention" "full_attention"])))})
 
@@ -61,6 +63,7 @@
    :final-logit-softcap 30.0
    :num-kv-shared-layers 0
    :sliding-window 1024
+   :weight-dtype :bf16
    :layer-types (vec (take 48 (cycle ["sliding_attention" "sliding_attention" "sliding_attention"
                                       "sliding_attention" "sliding_attention" "full_attention"])))})
 
@@ -80,6 +83,7 @@
    :final-logit-softcap 30.0
    :num-kv-shared-layers 0
    :sliding-window 1024
+   :weight-dtype :bf16
    :layer-types (vec (take 60 (cycle ["sliding_attention" "sliding_attention" "sliding_attention"
                                       "sliding_attention" "sliding_attention" "full_attention"])))})
 
@@ -452,7 +456,7 @@
            mem-dim (long (or (:dim rel-cfg) (:memory-dim rel-cfg) 256))
            entity-count (long (or (:entity-count rel-cfg) 1000))
            vocab-size (long (or (:vocab-size cfg) 262144))
-           norm-dtype (if (or (:is-int8 cfg) (:is-int4 cfg) (:is-ternary cfg) (= (:weight-dtype cfg) :ternary)) :bf16 (or (:weight-dtype cfg) :f32))]
+           norm-dtype (if (or (:is-int8 cfg) (:is-int4 cfg) (:is-ternary cfg) (= (:weight-dtype cfg) :ternary)) :bf16 (or (:weight-dtype cfg) :bf16))]
        (if (:last-token-only? cfg)
          [:block {:name :last_token_head}
           [:dynamic-slice [:normed_last :b :one :d] [:normed :b :p :d]
@@ -824,7 +828,7 @@
   (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size backend target]} config
         int4? (boolean (or is-int4 (= weight-dtype :int4)))
         is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
-        norm-dtype (if (or is-int8 int4? is-ternary) :bf16 weight-dtype)
+        norm-dtype (if (or is-int8 int4? is-ternary) :bf16 (or weight-dtype :bf16))
         has-ple? (pos? total-pl-dim)
         use-w4a16? (and int4?
                         (if (some? (:use-w4a16-gemv config))
@@ -975,7 +979,7 @@
   [config max-seq-len]
   (let [{:keys [num-layers num-kv-shared-layers weight-dtype is-int8 is-int4 is-ternary layer-configs layer-types]} config
         is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
-        norm-dtype (if (or is-int8 is-int4 is-ternary) :bf16 weight-dtype)
+        norm-dtype (if (or is-int8 is-int4 is-ternary) :bf16 (or weight-dtype :bf16))
         turboquant? (boolean (or (:turboquant-kv? config)
                                  (= (:kv-quant config) :turboquant)
                                  (= (:kv-quant config) :turbo-kv)))

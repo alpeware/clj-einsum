@@ -1,7 +1,6 @@
 (ns einsum.models.gemma4.kernels
   "Gemma 4 StableHLO MLIR executable compilation for prefill, KV-cache step, and in-VRAM while loop."
-  (:require [einsum.compiler.pjrt :as pjrt]
-            [einsum.core :as xla]
+  (:require [einsum.core :as xla]
             [einsum.logic.lower :as lower]
             [einsum.models.gemma :as gemma-logic]
             [einsum.runtime.arena :as arena]))
@@ -19,7 +18,7 @@
   (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size backend target]} config
         int4? (boolean (or is-int4 (= weight-dtype :int4)))
         is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
-        norm-dtype (if (or is-int8 int4? is-ternary) :bf16 (or weight-dtype :f32))
+        norm-dtype (if (or is-int8 int4? is-ternary) :bf16 (or weight-dtype :bf16))
         has-ple? (pos? (long (or total-pl-dim 0)))
         use-w4a16? (and int4?
                         (if (some? (:use-w4a16-gemv config))
@@ -262,11 +261,11 @@
                           [k-buf v-buf] (if turboquant?
                                           (let [packed-dim (quot h-dim 4)
                                                 zeros (byte-array (* seq-l n-kv packed-dim))]
-                                            [(pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)
-                                             (pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)])
+                                            [(xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)
+                                             (xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)])
                                           (let [zeros (float-array (* seq-l n-kv h-dim))]
-                                            [(pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)
-                                             (pjrt/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)]))]
+                                            [(xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)
+                                             (xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)]))]
                       (when target-arena
                         (xla/track! target-arena k-buf)
                         (xla/track! target-arena v-buf))

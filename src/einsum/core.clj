@@ -21,7 +21,7 @@
    :rocm   {:default "bin/libpjrt_rocm.so" :env "PJRT_ROCM_LIBRARY_PATH"}
    :cuda12 {:default "bin/libpjrt_cuda.so" :env "PJRT_CUDA_LIBRARY_PATH"}})
 
-(defn- setenv-native [^String k ^String v]
+(defn setenv-native [^String k ^String v]
   (try
     (let [linker (java.lang.foreign.Linker/nativeLinker)
           default-lookup (.defaultLookup linker)
@@ -40,7 +40,7 @@
               (.invokeWithArguments handle [k-seg v-seg (int 1)]))))))
     (catch Exception _ nil)))
 
-(defn- getenv-native [^String k]
+(defn getenv-native [^String k]
   (try
     (let [linker (java.lang.foreign.Linker/nativeLinker)
           default-lookup (.defaultLookup linker)
@@ -56,6 +56,22 @@
                   res-ptr ^java.lang.foreign.MemorySegment (.invokeWithArguments handle [k-seg])]
               (when (and res-ptr (not (.equals res-ptr java.lang.foreign.MemorySegment/NULL)))
                 (.getString (.reinterpret res-ptr Long/MAX_VALUE) 0)))))))
+    (catch Exception _ nil)))
+
+(defn unsetenv-native [^String k]
+  (try
+    (let [linker (java.lang.foreign.Linker/nativeLinker)
+          default-lookup (.defaultLookup linker)
+          unsetenv-opt (.find default-lookup "unsetenv")]
+      (when (.isPresent unsetenv-opt)
+        (let [unsetenv-ptr ^java.lang.foreign.MemorySegment (.get unsetenv-opt)
+              fd (java.lang.foreign.FunctionDescriptor/of java.lang.foreign.ValueLayout/JAVA_INT
+                                                          (into-array java.lang.foreign.MemoryLayout
+                                                                      [java.lang.foreign.ValueLayout/ADDRESS]))
+              handle (.downcallHandle linker unsetenv-ptr fd (make-array java.lang.foreign.Linker$Option 0))]
+          (with-open [arena (java.lang.foreign.Arena/ofConfined)]
+            (let [k-seg (.allocateFrom arena k)]
+              (.invokeWithArguments handle [k-seg]))))))
     (catch Exception _ nil)))
 
 (defn determine-optimal-xla-flags

@@ -148,48 +148,7 @@
                       {:op :upcast :axis 1 :amount 4}
                       {:op :unroll :axis 0 :amount 4}]))
 
-      ;; Pattern 2: GEMV / Matvec (M <= 4, large N, large K)
-      (and has-red?
-           (>= (count out-shape) 2)
-           (<= (first out-shape) 4)
-           (>= (last out-shape) 16)
-           (>= (long (or (first red-shape) 0)) 64))
-      (let [m (first out-shape)
-            n (last out-shape)
-            group-sz 64
-            cols-per-block 4
-            grid-y (long (quot (+ n cols-per-block -1) cols-per-block))]
-        (assoc ke
-               :target :rocm
-               :has-group? true
-               :group-size group-sz
-               :unroll-factor 4
-               :global-size [m grid-y 1]
-               :local-size [group-sz cols-per-block 1]
-               :opts [{:op :group :axis 0 :amount group-sz}
-                      {:op :local :axis 1 :amount cols-per-block}
-                      {:op :unroll :axis 0 :amount 4}]))
-
-      ;; Pattern 3: Fused RMSNorm / LayerNorm / Softmax (reduction over last axis D)
-      (or (= (:reduction-kind rk) :norm)
-          (and has-red?
-               (== 1 (count red-shape))
-               (or (<= (count out-shape) 1)
-                   (== 1 (last out-shape)))))
-      (let [k-dim (long (or (first red-shape) 256))
-            group-sz (cond (>= k-dim 256) 256 (>= k-dim 64) 64 :else 32)
-            grid-rows (long (quot (+ out-size (if (== 1 (last out-shape)) 1 1) -1) 1))]
-        (assoc ke
-               :target :rocm
-               :has-group? true
-               :group-size group-sz
-               :unroll-factor 4
-               :global-size [grid-rows 1 1]
-               :local-size [group-sz 1 1]
-               :opts [{:op :group :axis 0 :amount group-sz}
-                      {:op :unroll :axis 0 :amount 4}]))
-
-      ;; Pattern 4: General Reduction or Elementwise Fallback
+;; Pattern 4: General Reduction or Elementwise Fallback
       :else
       (let [local-threads (cond
                             (<= out-size 32) (max 1 out-size)

@@ -253,6 +253,7 @@
                       selected-nses
                       ;; If user passed a specific namespace symbol directly
                       (let [sym (symbol group-arg)]
+                        (try (require sym) (catch Throwable _ nil))
                         (if (find-ns sym)
                           [sym]
                           (do
