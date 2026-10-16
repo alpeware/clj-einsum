@@ -63,6 +63,16 @@
 ;; 2. Backward Coordinate Propagation (`rangeify`)
 ;; -----------------------------------------------------------------------------
 
+(defn- find-leaf-param
+  "Traverses node ancestors (e.g. through :uop/cast, :uop/bitcast) to find the underlying
+   `:uop/param` or `:uop/buffer` node containing the buffer slot metadata."
+  [node]
+  (cond
+    (nil? node) nil
+    (contains? #{:uop/param :uop/buffer} (:op node)) node
+    (seq (:src node)) (some find-leaf-param (:src node))
+    :else nil))
+
 (defn rangeify-kernel
   "Transforms a high-level kernel root UOp (containing at most one `:uop/reduce` and arbitrary
    Movement + ALU UOps) into a shape-free, loop-explicit UOp DAG rooted at `:uop/sink` -> `:uop/store`.
@@ -278,14 +288,21 @@
                                    idx-coords (subvec coords 0 (dec (count coords)))
                                    d-coord (last coords)
                                    tok-id (lower-at idx-uop idx-coords)
-                                   hidden-dim (long (last (:shape w-uop)))
+                                   w-leaf (or (find-leaf-param w-uop) w-uop)
+                                   w-slot (or (:slot (:arg w-leaf)) (:slot (:arg w-uop)) 0)
+                                   w-dt (or (:dtype w-leaf) (:dtype w-uop))
+                                   w-shape (or (:shape w-leaf) (:shape w-uop))
+                                   hidden-dim (long (last w-shape))
                                    ;; Compute w[tok_id * hidden_dim + d_coord]
                                    row-offset (uop/uop-alu :uop/mul tok-id (uop/uop-const :i32 hidden-dim))
                                    w-lin-idx (rewrite/simplify-uop (uop/uop-alu :uop/add row-offset d-coord))
-                                   w-slot (:slot (:arg w-uop))
-                                   w-size (long (reduce * 1 (:shape w-uop)))
-                                   w-buf (uop/uop-buffer w-slot (:dtype w-uop) w-size (:name (:arg w-uop)))]
-                               (uop/uop-load (uop/uop-index w-buf w-lin-idx)))
+                                   w-size (long (reduce * 1 w-shape))
+                                   w-name (or (:name (:arg w-leaf)) (:name (:arg w-uop)))
+                                   w-buf (uop/uop-buffer w-slot w-dt w-size w-name)
+                                   loaded (uop/uop-load (uop/uop-index w-buf w-lin-idx))]
+                               (if (and w-dt (:dtype w-uop) (not= w-dt (:dtype w-uop)))
+                                 (uop/uop-cast loaded (:dtype w-uop))
+                                 loaded))
                              node)
 
                            ;; 6. Reduction (:uop/reduce) -> introduces `:reduce` RANGE loops!

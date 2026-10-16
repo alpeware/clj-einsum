@@ -116,6 +116,28 @@
           ;; Row 0 should remain untouched (zero)
           (is (every? zero? (subvec (vec k-out-data) 0 head-dim))))))))
 
+(deftest test-uop-gemma4-e2b-bf16-kv-step-compilation-and-execution
+  (testing "Gemma 4 E2B single-token KV-step with :weight-dtype :bf16 compiles and executes via UOp backend"
+    (let [max-seq 8
+          cfg (assoc (make-compact-e2b-config max-seq) :weight-dtype :bf16)
+          ctx (xla/init-backend! :uop-cpu {:quiet? true})
+          session {:ctx ctx :config cfg :opts {:quiet true}}
+          exec (kernels/compile-gemma4-kv-executable session max-seq)
+          _ (is (some? exec))
+          _ (is (true? (or (:uop-executable? exec) (= (:backend ctx) :uop))))
+          invars (kernels/build-gemma4-kv-invars cfg max-seq)
+          step-inputs (allocate-dummy-invars invars {:x (int-array [5]) :pos (int-array [2])})
+          num-outs 3 ;; logits, k_cache_out, v_cache_out
+          exec-step (requiring-resolve 'einsum.models.gemma4.runtime/execute-step-executable)
+          outs (exec-step ctx exec step-inputs num-outs)]
+      (is (vector? outs))
+      (is (= 3 (count outs)))
+      (let [[logits-buf _ _] outs
+            vocab-sz (:vocab-size cfg)
+            logits-data (xla/to-host-slice logits-buf 0 vocab-sz vocab-sz)]
+        (is (= vocab-sz (alength ^floats logits-data)))
+        (is (some #(not (zero? %)) (seq logits-data)))))))
+
 ;; -----------------------------------------------------------------------------
 ;; 4. Prefill Compilation & Execution
 ;; -----------------------------------------------------------------------------

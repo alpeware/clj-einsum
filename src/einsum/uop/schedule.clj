@@ -25,25 +25,37 @@
      {}
      nodes)))
 
+(defn- param-leaf?
+  "Returns true if `node` is an underlying parameter leaf or a pure cast/view directly wrapping a parameter leaf."
+  [node]
+  (cond
+    (nil? node) false
+    (contains? #{:uop/param :uop/buffer :uop/vconst} (:op node)) true
+    (contains? #{:uop/cast :uop/bitcast} (:op node)) (param-leaf? (first (:src node)))
+    (contains? uop/MOVEMENT_OPS (:op node)) (param-leaf? (first (:src node)))
+    :else false))
+
 (defn- should-realize?
   "Determines whether `node` must be materialized into an intermediate `STAGE` buffer:
    1. Any `:uop/reduce` node (so reductions never nest or duplicate across consumers).
    2. Any `:uop/index` gather node (so embedding lookups materialize once).
    3. Any non-trivial ALU node with > 1 consumer that sits above a reduction or large fan-out,
       preventing exponential recomputation across residual branches (e.g., `res1` or `x_norm1` in Transformers).
-   4. Any explicit output target root."
+   4. Any explicit output target root.
+   Note: parameter leaves or pure casts/views on parameters are never materialized as intermediate buffers."
   [node consumer-counts output-ids]
   (let [id (:id node)
         op (:op node)
         n-consumers (get consumer-counts id 0)]
-    (or (contains? output-ids id)
-        (= op :uop/reduce)
-        (and (= op :uop/index) (= :gather (:op (:arg node))))
-        ;; Realize multi-consumer ALU nodes that are not trivial scalar broadcasts
-        (and (contains? uop/ALU_OPS op)
-             (> n-consumers 1)
-             (seq (:shape node))
-             (> (long (reduce * 1 (:shape node))) 1)))))
+    (and (not (and (param-leaf? node) (not (contains? output-ids id))))
+         (or (contains? output-ids id)
+             (= op :uop/reduce)
+             (and (= op :uop/index) (= :gather (:op (:arg node))))
+             ;; Realize multi-consumer ALU nodes that are not trivial scalar broadcasts
+             (and (contains? uop/ALU_OPS op)
+                  (> n-consumers 1)
+                  (seq (:shape node))
+                  (> (long (reduce * 1 (:shape node))) 1))))))
 
 ;; -----------------------------------------------------------------------------
 ;; 2. Graph Cutter & Kernel Schedule Builder
