@@ -50,7 +50,10 @@
 ;; -----------------------------------------------------------------------------
 
 (defn non-singleton-dims
-  "Filters out unit dimensions of size 1 across all axes (squeezing any dimension equal to 1),\n   returning the effective non-singleton dimensions `[dim1 dim2 ...]`.\n   If all dimensions are 1 (scalar tensor), returns `[1]`." \n  [shape]
+  "Filters out unit dimensions of size 1 across all axes (squeezing any dimension equal to 1),
+   returning the effective non-singleton dimensions `[dim1 dim2 ...]`.
+   If all dimensions are 1 (scalar tensor), returns `[1]`."
+  [shape]
   (let [non-ones (vec (remove #(= (long %) 1) shape))]
     (if (empty? non-ones)
       [1]
