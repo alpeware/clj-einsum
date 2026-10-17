@@ -141,3 +141,25 @@
                       f-back (Float/intBitsToFloat (unchecked-int (bit-shift-left (bit-and (int bf16-short) 0xffff) 16)))]
                   (or (zero? (Float/compare f f-back))
                       (< (Math/abs (- (double f) (double f-back))) (* (Math/abs (double f)) 0.01))))))
+
+(deftest test-render-2d-prefill-gemm
+  (testing "2D prefill GEMM kernel renders 2D grid and token/channel coordinate bindings"
+    (let [invars [[:A [:tensor [1 16 128] :f32]]
+                  [:B [:tensor [256 128] :f32]]]
+          ast [:= [:C :b :p :d] [:A :b :p :k] [:B :d :k]]
+          uop-graph (uop-lower/ast->uop-graph "prefill_gemm" invars ast [:C])
+          sched (schedule/schedule-graph uop-graph)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:target :rocm})
+          hip-prog (render/render-kernel opt-k0 {:target :rocm})]
+      (is (string? (:source hip-prog)))
+      (is (true? (:has-group? opt-k0)))
+      (is (vector? (:global-size hip-prog)))
+      (is (vector? (:local-size hip-prog)))
+      ;; When 2D prefill GEMM is active, local-size has group-size along K and local-rows along N
+      (is (= 64 (first (:local-size hip-prog))))
+      (is (= 4 (second (:local-size hip-prog))))
+      ;; Source must contain shared memory LDS declaration and synchronization
+      (is (str/includes? (:source hip-prog) "__shared__"))
+      (is (str/includes? (:source hip-prog) "__syncthreads()")))))
+

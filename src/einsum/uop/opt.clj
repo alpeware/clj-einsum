@@ -66,8 +66,9 @@
   [ke]
   (let [rk (or (:rangeified ke) ke)
         out-shape (vec (or (:out-shape rk) (:axes ke) [(:out-size rk 1)]))
-        red-shape (vec (or (:red-shape rk) (:red-axes ke) []))
-        has-red? (or (true? (:has-reduce? ke)) (seq red-shape))
+        red-shape (vec (let [rs (or (:red-shape rk) (:red-axes ke))]
+                         (if (seq rs) rs (extract-reduction-shape rk))))
+        has-red? (or (true? (:has-reduce? ke)) (seq red-shape) (has-reduce-axis? rk))
         eff-out (non-singleton-dims out-shape)
         eff-red (non-singleton-dims red-shape)]
     {:has-reduce? (boolean has-red?)
@@ -104,13 +105,6 @@
                    m-dim (if (> num-out 1) (first eff-out) 1)
                    n-dim (last eff-out)]
                (cond
-                 ;; RMSNorm / 1-row reduction
-                 (and (:has-reduce? sig)
-                      (or (= [1] eff-out)
-                          (and (map? ke) (= 1 (last (or (:out-shape ke) [])))))
-                      (>= k-dim 64))
-                 (get catalog :gemma4-rmsnorm)
-
                  ;; Prefill GEMM (M >= 2, N >= 16, K >= 64)
                  (and (:has-reduce? sig)
                       (>= num-out 2)
@@ -119,6 +113,13 @@
                       (>= k-dim 64))
                  (or (get catalog :gemma4-prefill-gemm)
                      (get catalog :gemma4-gemm))
+
+                 ;; RMSNorm / 1-row reduction
+                 (and (:has-reduce? sig)
+                      (or (= [1] eff-out)
+                          (== 1 (long (or (:out-size ke) (:out-size sig) 1))))
+                      (>= k-dim 64))
+                 (get catalog :gemma4-rmsnorm)
 
                  ;; 2D GEMM (M >= 16, N >= 16)
                  (and (:has-reduce? sig)
@@ -262,7 +263,8 @@
       (and has-red?
            (>= (long (or (last red-shape) (first red-shape) 0)) 64))
       (let [k (long (or (last red-shape) (first red-shape) 64))
-            single-row? (or (== out-size 1) (<= out-size 2) (= 1 (last out-shape)))
+            eff-out (non-singleton-dims out-shape)
+            single-row? (or (== out-size 1) (<= out-size 2) (= 1 (long (last eff-out))))
             group-size (if single-row?
                          (cond (>= k 256) 256 (>= k 128) 128 :else 64)
                          64)

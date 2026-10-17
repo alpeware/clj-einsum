@@ -118,11 +118,34 @@
                               1))
          group-sz (long (or (:group-size kernel-entry) 64))
          unroll-factor (long (or (:unroll-factor kernel-entry) 4))
+         is-2d-prefill? (and (= target :rocm)
+                             (:has-group? kernel-entry)
+                             (or (and (== (count out-shape) 3)
+                                      (== 1 (long (first out-shape)))
+                                      (>= (long (nth out-shape 1)) 2)
+                                      (>= (long (nth out-shape 2)) 16))
+                                 (and (== (count out-shape) 2)
+                                      (>= (long (first out-shape)) 2)
+                                      (>= (long (second out-shape)) 16))))
+         s-dim (when is-2d-prefill?
+                 (long (if (== (count out-shape) 3) (nth out-shape 1) (first out-shape))))
+         n-dim (when is-2d-prefill?
+                 (long (last out-shape)))
+         grid-n (when is-2d-prefill?
+                  (long (quot (+ n-dim local-rows -1) local-rows)))
          grid-blocks (if (= target :cpu)
                        1
-                       (if (:has-group? kernel-entry)
-                         (long (quot (+ (long out-size) local-rows -1) local-rows))
-                         (long (quot (+ (long out-size) local-threads -1) local-threads))))
+                       (if is-2d-prefill?
+                         grid-n
+                         (if (:has-group? kernel-entry)
+                           (long (quot (+ (long out-size) local-rows -1) local-rows))
+                           (long (quot (+ (long out-size) local-threads -1) local-threads)))))
+         global-sz (if is-2d-prefill?
+                     [grid-n s-dim 1]
+                     (or (:global-size kernel-entry) [grid-blocks 1 1]))
+         local-sz (if (:has-group? kernel-entry)
+                    [group-sz local-rows 1]
+                    [local-threads 1 1])
 
          body-sb (StringBuilder.)
          var-names (java.util.HashMap.)
@@ -151,39 +174,58 @@
 
      ;; 3. Bind Output Loop Coordinates
      (if (= target :rocm)
-       (if (:has-group? kernel-entry)
+       (if is-2d-prefill?
          (let [lds-size (* local-rows group-sz)]
            (.append body-sb (format "  __shared__ float lds[%d];\n" (long lds-size)))
-           (if (> local-rows 1)
-             (do
-               (.append body-sb (format "  if ((int)(blockIdx.x * %d) >= %d) return;\n" local-rows (long out-size)))
-               (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.y);\n" local-rows))
-               (.append body-sb (format "  bool valid_gidx = (gidx < %d);\n" (long out-size)))
-               (.append body-sb (format "  int lds_offset = (int)threadIdx.y * %d;\n" group-sz)))
-             (do
-               (.append body-sb "  int gidx = (int)blockIdx.x;\n")
-               (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size)))
-               (.append body-sb "  bool valid_gidx = true;\n")
-               (.append body-sb "  int lds_offset = 0;\n"))))
-         (do
-           (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.x);\n" local-threads))
-           (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size)))))
+           (.append body-sb "  int r_token = (int)blockIdx.y;
+")
+           (.append body-sb (format "  if (r_token >= %d) return;\n" s-dim))
+           (.append body-sb (format "  int r_channel = (int)(blockIdx.x * %d + threadIdx.y);\n" local-rows))
+           (.append body-sb (format "  bool valid_gidx = (r_channel < %d);\n" n-dim))
+           (.append body-sb (format "  int lds_offset = (int)threadIdx.y * %d;\n" group-sz))
+           (.append body-sb (format "  int gidx = r_token * %d + r_channel;\n" n-dim)))
+         (if (:has-group? kernel-entry)
+           (let [lds-size (* local-rows group-sz)]
+             (.append body-sb (format "  __shared__ float lds[%d];\n" (long lds-size)))
+             (if (> local-rows 1)
+               (do
+                 (.append body-sb (format "  if ((int)(blockIdx.x * %d) >= %d) return;\n" local-rows (long out-size)))
+                 (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.y);\n" local-rows))
+                 (.append body-sb (format "  bool valid_gidx = (gidx < %d);\n" (long out-size)))
+                 (.append body-sb (format "  int lds_offset = (int)threadIdx.y * %d;\n" group-sz)))
+               (do
+                 (.append body-sb "  int gidx = (int)blockIdx.x;\n")
+                 (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size)))
+                 (.append body-sb "  bool valid_gidx = true;\n")
+                 (.append body-sb "  int lds_offset = 0;\n"))))
+           (do
+             (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.x);\n" local-threads))
+             (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size))))))
        (do
          (when (>= (long out-size) 256)
            (.append body-sb "  #pragma omp parallel for schedule(static)\n"))
          (.append body-sb (format "  for (int gidx = 0; gidx < %d; ++gidx) {\n" (long out-size)))))
 
-     (let [indent (if (= target :rocm) "  " "    ")
-           strides (rangeify/row-major-strides out-shape)]
-       (doseq [[idx [r dim stride]] (map-indexed vector (map vector out-ranges out-shape strides))]
-         (when (= :uop/range (:op r))
-           (let [r-var (str "r_" idx)
-                 d (long dim)
-                 s (long stride)]
-             (.put var-names (:id r) r-var)
-             (if (== 1 s)
-               (.append body-sb (format "%sint %s = (gidx %% %d);\n" indent r-var d))
-               (.append body-sb (format "%sint %s = ((gidx / %d) %% %d);\n" indent r-var s d))))))
+     (let [indent (if (= target :rocm) "  " "    ")]
+       (if is-2d-prefill?
+         (if (== (count out-shape) 3)
+           (do
+             (.put var-names (:id (nth out-ranges 0)) "0")
+             (.put var-names (:id (nth out-ranges 1)) "r_token")
+             (.put var-names (:id (nth out-ranges 2)) "r_channel"))
+           (do
+             (.put var-names (:id (nth out-ranges 0)) "r_token")
+             (.put var-names (:id (nth out-ranges 1)) "r_channel")))
+         (let [strides (rangeify/row-major-strides out-shape)]
+           (doseq [[idx [r dim stride]] (map-indexed vector (map vector out-ranges out-shape strides))]
+             (when (= :uop/range (:op r))
+               (let [r-var (str "r_" idx)
+                     d (long dim)
+                     s (long stride)]
+                 (.put var-names (:id r) r-var)
+                 (if (== 1 s)
+                   (.append body-sb (format "%sint %s = (gidx %% %d);\n" indent r-var d))
+                   (.append body-sb (format "%sint %s = ((gidx / %d) %% %d);\n" indent r-var s d))))))))
 
        ;; 4. Recursive SSA Emitter for `out-lin-idx-uop` and `val-expr` with lexical loop scoping
        (letfn [(emit-expr [node cur-indent ^java.util.HashMap scoped-vars]
@@ -403,7 +445,5 @@
         :canonical-body canonical-body
         :buffer-slots buffer-slots
         :buffer-dtypes buffer-dtypes
-        :global-size [grid-blocks 1 1]
-        :local-size [(if (:has-group? kernel-entry) group-sz local-threads)
-                     (if (:has-group? kernel-entry) local-rows 1)
-                     1]}))))
+        :global-size global-sz
+        :local-size local-sz}))))
