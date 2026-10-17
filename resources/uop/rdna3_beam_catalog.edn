@@ -13,4 +13,59 @@
  :gemma4-rmsnorm {:opts [{:op :group :axis 0 :amount 256}
                          {:op :unroll :axis 0 :amount 4}]
                   :local-size [256 1 1]
-                  :description "256-thread cooperative row reduction in shared memory LDS on gfx1100"}}
+                  :description "256-thread cooperative row reduction in shared memory LDS on gfx1100"}
+
+ ;; Gemma 4 E2B Structural Layer Signatures (M=1 decode on gfx1100)
+ {:has-reduce? true :out-shape [2048] :red-shape [2048]}
+ {:opts [{:op :group :axis 0 :amount 64}
+         {:op :local :axis 1 :amount 4}
+         {:op :unroll :axis 0 :amount 4}]
+  :local-size [64 4 1]
+  :description "Q/O projection GEMV [1 2048] x [2048 2048] on gfx1100"}
+
+ {:has-reduce? true :out-shape [512] :red-shape [2048]}
+ {:opts [{:op :group :axis 0 :amount 64}
+         {:op :local :axis 1 :amount 4}
+         {:op :unroll :axis 0 :amount 4}]
+  :local-size [64 4 1]
+  :description "K/V projection GEMV [1 2048] x [2048 512] on gfx1100"}
+
+ {:has-reduce? true :out-shape [8192] :red-shape [2048]}
+ {:opts [{:op :group :axis 0 :amount 64}
+         {:op :local :axis 1 :amount 4}
+         {:op :unroll :axis 0 :amount 4}]
+  :local-size [64 4 1]
+  :description "MLP Gate/Up projection GEMV [1 2048] x [2048 8192] on gfx1100"}
+
+ {:has-reduce? true :out-shape [2048] :red-shape [8192]}
+ {:opts [{:op :group :axis 0 :amount 64}
+         {:op :local :axis 1 :amount 4}
+         {:op :unroll :axis 0 :amount 4}]
+  :local-size [64 4 1]
+  :description "MLP Down projection GEMV [1 8192] x [8192 2048] on gfx1100"}
+
+ {:has-reduce? true :out-shape [262144] :red-shape [2048]}
+ {:opts [{:op :group :axis 0 :amount 64}
+         {:op :local :axis 1 :amount 4}
+         {:op :unroll :axis 0 :amount 4}]
+  :local-size [64 4 1]
+  :description "Final LM Head projection GEMV [1 2048] x [2048 262144] on gfx1100"}
+
+ {:has-reduce? true :out-shape [256000] :red-shape [2048]}
+ {:opts [{:op :group :axis 0 :amount 64}
+         {:op :local :axis 1 :amount 4}
+         {:op :unroll :axis 0 :amount 4}]
+  :local-size [64 4 1]
+  :description "Alternative LM Head projection GEMV on gfx1100"}
+
+ {:has-reduce? true :out-shape [1] :red-shape [2048]}
+ {:opts [{:op :group :axis 0 :amount 256}
+         {:op :unroll :axis 0 :amount 4}]
+  :local-size [256 1 1]
+  :description "RMSNorm / row reduction [1 2048] on gfx1100"}
+
+ {:has-reduce? true :out-shape [1] :red-shape [256]}
+ {:opts [{:op :group :axis 0 :amount 256}
+         {:op :unroll :axis 0 :amount 4}]
+  :local-size [256 1 1]
+  :description "Softmax row reduction [1 256] on gfx1100"}}

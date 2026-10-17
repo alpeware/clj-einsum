@@ -4,7 +4,9 @@
    and `hand_coded_optimizations` (`tinygrad/codegen/opt/heuristic.py`).
    Transforms rangeified loop axes into GPU grid (`:global`), threadblock (`:local`),
    vectorized register (`:upcast`), and cooperative reduction (`:group`, `:unroll`) configurations."
-  (:require [einsum.uop.core :as uop]))
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [einsum.uop.core :as uop]))
 
 ;; -----------------------------------------------------------------------------
 ;; 1. Declarative Opt Recipe Representation & RDNA3 TensorCore Spec
@@ -44,7 +46,65 @@
     (vec (or (:red-shape rk) (:red-axes rk) []))))
 
 ;; -----------------------------------------------------------------------------
-;; 2. Real OptOps Range-Splitting & Axis Manipulation (`apply-opt` / `shift-to`)
+;; 2. RDNA3 Beam Catalog & Structural Signature
+;; -----------------------------------------------------------------------------
+
+(defn kernel-signature
+  "Returns a persistent structural signature for `ke` independent of ephemeral kernel name."
+  [ke]
+  (let [rk (or (:rangeified ke) ke)
+        out-shape (vec (or (:out-shape rk) (:axes ke) [(:out-size rk 1)]))
+        red-shape (vec (or (:red-shape rk) (:red-axes ke) []))
+        has-red? (or (true? (:has-reduce? ke)) (seq red-shape))]
+    {:has-reduce? (boolean has-red?)
+     :out-shape out-shape
+     :red-shape red-shape}))
+
+(defn load-rdna3-catalog
+  "Loads the pre-populated RDNA3 beam catalog `resources/uop/rdna3_beam_catalog.edn`."
+  []
+  (if-let [res (io/resource "uop/rdna3_beam_catalog.edn")]
+    (edn/read-string (slurp res))
+    (let [f (io/file "resources/uop/rdna3_beam_catalog.edn")]
+      (if (.exists f)
+        (edn/read-string (slurp f))
+        {}))))
+
+(defn lookup-catalog
+  "Looks up an optimization recipe in `resources/uop/rdna3_beam_catalog.edn`
+   first by exact structural signature `{:has-reduce? ... :out-shape ... :red-shape ...}`,
+   then by generic category keyword (`:gemma4-gemv`, `:gemma4-gemm`, `:gemma4-rmsnorm`)."
+  ([ke]
+   (lookup-catalog (load-rdna3-catalog) ke))
+  ([catalog ke]
+   (when (map? catalog)
+     (let [sig (if (and (map? ke) (or (contains? ke :rangeified) (contains? ke :axes) (contains? ke :out-shape)))
+                 (kernel-signature ke)
+                 ke)]
+       (or (get catalog sig)
+           (when (map? sig)
+             (cond
+               ;; RMSNorm / 1-row reduction
+               (and (:has-reduce? sig)
+                    (= [1] (:out-shape sig))
+                    (>= (long (or (first (:red-shape sig)) 0)) 64))
+               (get catalog :gemma4-rmsnorm)
+
+               ;; 2D GEMM
+               (and (:has-reduce? sig)
+                    (>= (count (:out-shape sig)) 2)
+                    (>= (first (:out-shape sig)) 16)
+                    (>= (last (:out-shape sig)) 16))
+               (get catalog :gemma4-gemm)
+
+               ;; GEMV
+               (and (:has-reduce? sig)
+                    (or (empty? (:out-shape sig)) (= (count (:out-shape sig)) 1))
+                    (>= (long (or (first (:red-shape sig)) 0)) 64))
+               (get catalog :gemma4-gemv))))))))
+
+;; -----------------------------------------------------------------------------
+;; 3. Real OptOps Range-Splitting & Axis Manipulation (`apply-opt` / `shift-to`)
 ;; -----------------------------------------------------------------------------
 
 (defn normalize-opt
@@ -209,8 +269,29 @@
                        [{:op :local :axis 0 :amount local-threads}]))))))
 
 (defn optimize-kernel
-  "Applies declarative `OptOps` and launch geometry to a scheduled kernel map `kernel-entry`."
+  "Applies declarative `OptOps` and launch geometry to a scheduled kernel map `kernel-entry`.
+   Checks the persistent RDNA3 beam catalog before falling back to hand-coded heuristics."
   ([kernel-entry]
    (optimize-kernel kernel-entry {:target :rocm}))
   ([kernel-entry opts]
-   (hand-coded-optimizations kernel-entry opts)))
+   (let [target (:target opts :rocm)]
+     (if (and (= target :rocm) (not (:disable-catalog? opts)))
+       (if-let [recipe (lookup-catalog kernel-entry)]
+         (let [base-ke (assoc kernel-entry :target :rocm)]
+           (if (and (:local-size recipe) (:opts recipe))
+             (let [group-sz (or (:amount (first (filter #(= (:op %) :group) (:opts recipe)))) 64)
+                   local-rows (or (:amount (first (filter #(= (:op %) :local) (:opts recipe)))) 1)
+                   unroll-factor (or (:amount (first (filter #(= (:op %) :unroll) (:opts recipe)))) 4)
+                   out-size (long (or (:out-size base-ke) 1))
+                   grid-blocks (max 1 (quot (+ out-size local-rows -1) local-rows))]
+               (assoc base-ke
+                      :has-group? (boolean (some #(= (:op %) :group) (:opts recipe)))
+                      :group-size group-sz
+                      :local-rows local-rows
+                      :unroll-factor unroll-factor
+                      :local-size (:local-size recipe)
+                      :global-size [grid-blocks 1 1]
+                      :opts (:opts recipe)))
+             (hand-coded-optimizations kernel-entry opts)))
+         (hand-coded-optimizations kernel-entry opts))
+       (hand-coded-optimizations kernel-entry opts)))))

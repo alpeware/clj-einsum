@@ -167,8 +167,10 @@
          user-home (System/getProperty "user.home")
          cache-file (or (:cache-file opts)
                         (str user-home "/.cache/clj_einsum/uop/beam_cache.edn"))
-         arch-key (str "gfx1100:" (:name ke) ":" (:axes ke) ":" (:red-axes ke))
-         cached (when use-cache? (lookup-cache-entry cache-file arch-key))]
+         arch-key (str "gfx1100:" (pr-str (opt/kernel-signature ke)))
+         cached (when use-cache?
+                  (or (lookup-cache-entry cache-file arch-key)
+                      (opt/lookup-catalog ke)))]
      (if (and cached (:opts cached))
        cached
        (let [init-cost (double (cost-fn ke))
