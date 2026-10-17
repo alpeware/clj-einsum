@@ -496,7 +496,7 @@
   ^floats [ctx uop-buf ^long n-elements]
   (let [elem-count (min (long (:size uop-buf n-elements)) n-elements)
         dt (:dtype uop-buf :f32)
-        out (float-array elem-count)]
+        ^floats out (float-array elem-count)]
     (if (= :rocm (:target uop-buf))
       (let [hip (or (:hip ctx) (init-hip-bindings!))
             ^MethodHandle hipMemcpy (:hipMemcpy hip)
@@ -512,20 +512,24 @@
             (cond
               (= dt :i32)
               (dotimes [i elem-count]
-                (aset out i (float (.getAtIndex stage-seg ValueLayout/JAVA_INT (long i)))))
+                (aset out (int i) (float (.getAtIndex stage-seg ValueLayout/JAVA_INT (long i)))))
               (= dt :bf16)
               (dotimes [i elem-count]
-                (aset out i (interpret/bf16->f32 (.getAtIndex stage-seg ValueLayout/JAVA_SHORT (long i)))))
+                (let [s (.getAtIndex stage-seg ValueLayout/JAVA_SHORT (long i))
+                      f (Float/intBitsToFloat (bit-shift-left (bit-and (int s) 0xFFFF) 16))]
+                  (aset out (int i) (float f))))
               :else
               (MemorySegment/copy stage-seg ValueLayout/JAVA_FLOAT 0 out 0 (int elem-count))))))
       (let [^MemorySegment seg (:ptr uop-buf)]
         (cond
           (= dt :i32)
           (dotimes [i elem-count]
-            (aset out i (float (.getAtIndex seg ValueLayout/JAVA_INT (long i)))))
+            (aset out (int i) (float (.getAtIndex seg ValueLayout/JAVA_INT (long i)))))
           (= dt :bf16)
           (dotimes [i elem-count]
-            (aset out i (interpret/bf16->f32 (.getAtIndex seg ValueLayout/JAVA_SHORT (long i)))))
+            (let [s (.getAtIndex seg ValueLayout/JAVA_SHORT (long i))
+                  f (Float/intBitsToFloat (bit-shift-left (bit-and (int s) 0xFFFF) 16))]
+              (aset out (int i) (float f))))
           :else
           (MemorySegment/copy seg ValueLayout/JAVA_FLOAT 0 out 0 (int elem-count)))))
     out))
