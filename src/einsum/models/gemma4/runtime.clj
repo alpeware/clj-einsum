@@ -823,7 +823,7 @@
                          (vec raw-ids)
                          (vec (cons (bos-id tokenizer) raw-ids)))))
         prompt-len (count prompt-ids)
-        max-seq-len (long (or (:max-seq-len session) (:max-seq-len opts) (min 2048 (+ prompt-len max-new-tokens 16))))]
+        max-seq-len (long (or (:max-seq-len session) (:max-seq-len opts) (min 2048 (+ prompt-len max-new-tokens))))]
     (when-not quiet
       (let [prompt-str (if (> (count clean-prompt) 200)
                          (str (subs clean-prompt 0 100) " ... [truncated " (count clean-prompt) " chars] ... " (subs clean-prompt (- (count clean-prompt) 100)))
