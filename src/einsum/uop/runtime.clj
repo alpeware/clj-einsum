@@ -516,7 +516,7 @@
               (= dt :bf16)
               (dotimes [i elem-count]
                 (let [s (.getAtIndex stage-seg ValueLayout/JAVA_SHORT (long i))
-                      f (Float/intBitsToFloat (bit-shift-left (bit-and (int s) 0xFFFF) 16))]
+                      f (Float/intBitsToFloat (unchecked-int (bit-shift-left s 16)))]
                   (aset out (int i) (float f))))
               :else
               (MemorySegment/copy stage-seg ValueLayout/JAVA_FLOAT 0 out 0 (int elem-count))))))
@@ -528,7 +528,7 @@
           (= dt :bf16)
           (dotimes [i elem-count]
             (let [s (.getAtIndex seg ValueLayout/JAVA_SHORT (long i))
-                  f (Float/intBitsToFloat (bit-shift-left (bit-and (int s) 0xFFFF) 16))]
+                  f (Float/intBitsToFloat (unchecked-int (bit-shift-left s 16)))]
               (aset out (int i) (float f))))
           :else
           (MemorySegment/copy seg ValueLayout/JAVA_FLOAT 0 out 0 (int elem-count)))))
