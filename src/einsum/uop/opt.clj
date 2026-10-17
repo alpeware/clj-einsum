@@ -49,16 +49,30 @@
 ;; 2. RDNA3 Beam Catalog & Structural Signature
 ;; -----------------------------------------------------------------------------
 
+(defn non-singleton-dims
+  "Filters out leading or singleton dimensions of size 1 (like batch size 1)
+   returning the effective non-singleton dimensions `[dim1 dim2 ...]`.
+   If all dimensions are 1 (scalar tensor), returns `[1]`."
+  [shape]
+  (let [non-ones (vec (remove #(= (long %) 1) shape))]
+    (if (empty? non-ones)
+      [1]
+      non-ones)))
+
 (defn kernel-signature
-  "Returns a persistent structural signature for `ke` independent of ephemeral kernel name."
+  "Returns a persistent structural signature for `ke` independent of ephemeral kernel name.
+   Normalizes leading singleton batch dimensions so that [1 N] and [N] match, and [1 S N]
+   exposes [S N]."
   [ke]
   (let [rk (or (:rangeified ke) ke)
         out-shape (vec (or (:out-shape rk) (:axes ke) [(:out-size rk 1)]))
         red-shape (vec (or (:red-shape rk) (:red-axes ke) []))
-        has-red? (or (true? (:has-reduce? ke)) (seq red-shape))]
+        has-red? (or (true? (:has-reduce? ke)) (seq red-shape))
+        eff-out (non-singleton-dims out-shape)
+        eff-red (non-singleton-dims red-shape)]
     {:has-reduce? (boolean has-red?)
-     :out-shape out-shape
-     :red-shape red-shape}))
+     :out-shape eff-out
+     :red-shape eff-red}))
 
 (defn load-rdna3-catalog
   "Loads the pre-populated RDNA3 beam catalog `resources/uop/rdna3_beam_catalog.edn`."
@@ -73,35 +87,51 @@
 (defn lookup-catalog
   "Looks up an optimization recipe in `resources/uop/rdna3_beam_catalog.edn`
    first by exact structural signature `{:has-reduce? ... :out-shape ... :red-shape ...}`,
-   then by generic category keyword (`:gemma4-gemv`, `:gemma4-gemm`, `:gemma4-rmsnorm`)."
+   then by generic category keyword (`:gemma4-gemv`, `:gemma4-prefill-gemm`, `:gemma4-gemm`, `:gemma4-rmsnorm`)."
   ([ke]
    (lookup-catalog (load-rdna3-catalog) ke))
   ([catalog ke]
    (when (map? catalog)
      (let [sig (if (and (map? ke) (or (contains? ke :rangeified) (contains? ke :axes) (contains? ke :out-shape)))
                  (kernel-signature ke)
-                 ke)]
+                 ke)
+           eff-out (if (map? sig) (:out-shape sig) (non-singleton-dims (or (:out-shape ke) [])))
+           eff-red (if (map? sig) (:red-shape sig) (non-singleton-dims (or (:red-shape ke) [])))]
        (or (get catalog sig)
            (when (map? sig)
-             (cond
-               ;; RMSNorm / 1-row reduction
-               (and (:has-reduce? sig)
-                    (= [1] (:out-shape sig))
-                    (>= (long (or (first (:red-shape sig)) 0)) 64))
-               (get catalog :gemma4-rmsnorm)
+             (let [k-dim (long (or (first eff-red) 0))
+                   num-out (count eff-out)
+                   m-dim (if (> num-out 1) (first eff-out) 1)
+                   n-dim (last eff-out)]
+               (cond
+                 ;; RMSNorm / 1-row reduction
+                 (and (:has-reduce? sig)
+                      (or (= [1] eff-out)
+                          (and (map? ke) (= 1 (last (or (:out-shape ke) [])))))
+                      (>= k-dim 64))
+                 (get catalog :gemma4-rmsnorm)
 
-               ;; 2D GEMM
-               (and (:has-reduce? sig)
-                    (>= (count (:out-shape sig)) 2)
-                    (>= (first (:out-shape sig)) 16)
-                    (>= (last (:out-shape sig)) 16))
-               (get catalog :gemma4-gemm)
+                 ;; Prefill GEMM (M >= 2, N >= 16, K >= 64)
+                 (and (:has-reduce? sig)
+                      (>= num-out 2)
+                      (>= m-dim 2)
+                      (>= n-dim 16)
+                      (>= k-dim 64))
+                 (or (get catalog :gemma4-prefill-gemm)
+                     (get catalog :gemma4-gemm))
 
-               ;; GEMV
-               (and (:has-reduce? sig)
-                    (or (empty? (:out-shape sig)) (= (count (:out-shape sig)) 1))
-                    (>= (long (or (first (:red-shape sig)) 0)) 64))
-               (get catalog :gemma4-gemv))))))))
+                 ;; 2D GEMM (M >= 16, N >= 16)
+                 (and (:has-reduce? sig)
+                      (>= num-out 2)
+                      (>= m-dim 16)
+                      (>= n-dim 16))
+                 (get catalog :gemma4-gemm)
+
+                 ;; GEMV (M == 1, N >= 64, K >= 64)
+                 (and (:has-reduce? sig)
+                      (or (= num-out 1) (== m-dim 1))
+                      (>= k-dim 64))
+                 (get catalog :gemma4-gemv)))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; 3. Real OptOps Range-Splitting & Axis Manipulation (`apply-opt` / `shift-to`)
@@ -228,15 +258,15 @@
                       {:op :upcast :axis 1 :amount 4}
                       {:op :unroll :axis 0 :amount 4}]))
 
-      ;; Pattern 2: Cooperative Reduction (GEMV, RMSNorm, Softmax) when has-red? and innermost K >= 64
+      ;; Pattern 2: Cooperative Reduction (GEMV, Prefill GEMM, RMSNorm, Softmax) when has-red? and innermost K >= 64
       (and has-red?
            (>= (long (or (last red-shape) (first red-shape) 0)) 64))
       (let [k (long (or (last red-shape) (first red-shape) 64))
-            group-size (cond
-                         (>= k 256) 256
-                         (>= k 128) 128
-                         :else 64)
-            local-rows (if (and (>= out-size 4) (<= group-size 64)) 4 1)
+            single-row? (or (== out-size 1) (<= out-size 2) (= 1 (last out-shape)))
+            group-size (if single-row?
+                         (cond (>= k 256) 256 (>= k 128) 128 :else 64)
+                         64)
+            local-rows (if (and (not single-row?) (>= out-size 4)) 4 1)
             grid-blocks (max 1 (quot (+ out-size local-rows -1) local-rows))
             opts (cond-> [{:op :group :axis 0 :amount group-size}]
                    (> local-rows 1) (conj {:op :local :axis 0 :amount local-rows})

@@ -3,6 +3,11 @@
                       {:op :unroll :axis 0 :amount 4}]
                :local-size [64 4 1]
                :description "64-thread cooperative reduction along K + 4 output channels per block on gfx1100"}
+ :gemma4-prefill-gemm {:opts [{:op :group :axis 0 :amount 64}
+                              {:op :local :axis 1 :amount 4}
+                              {:op :unroll :axis 0 :amount 4}]
+                       :local-size [64 4 1]
+                       :description "Batched prefill cooperative reduction (64 threads along K, 4 output rows per block on gfx1100)"}
  :gemma4-gemm {:opts [{:op :local :axis 0 :amount 16}
                       {:op :local :axis 1 :amount 16}
                       {:op :upcast :axis 0 :amount 4}

@@ -112,3 +112,51 @@
       ;; Must contain shared memory LDS declaration and synchronization
       (is (str/includes? (:source hip-prog) "__shared__"))
       (is (str/includes? (:source hip-prog) "__syncthreads()")))))
+
+;; -----------------------------------------------------------------------------
+;; 4. Prefill GEMM & Non-Singleton Squeezing (Phase 1)
+;; -----------------------------------------------------------------------------
+
+(defspec prop-non-singleton-dims-preserves-product 50
+  (prop/for-all [dims (gen/vector (gen/elements [1 2 4 8 16 32 64]) 1 5)]
+                (let [orig-prod (reduce * 1 dims)
+                      eff-dims (opt/non-singleton-dims dims)
+                      eff-prod (reduce * 1 eff-dims)]
+                  (and (= orig-prod eff-prod)
+                       (or (= eff-dims [1])
+                           (not-any? #(= (long %) 1) eff-dims))))))
+
+(deftest test-prefill-gemm-detection-and-squeezing
+  (testing "non-singleton-dims squeezes leading/inner 1s correctly"
+    (is (= [2048] (opt/non-singleton-dims [1 2048])))
+    (is (= [39 2048] (opt/non-singleton-dims [1 39 2048])))
+    (is (= [16 6144] (opt/non-singleton-dims [1 16 6144])))
+    (is (= [39] (opt/non-singleton-dims [1 39 1])))
+    (is (= [1] (opt/non-singleton-dims [1 1 1]))))
+
+  (testing "kernel-signature uses non-singleton dimensions for prefill"
+    (let [rk {:out-shape [1 39 2048] :out-size (* 39 2048) :red-shape [1536]}
+          sig (opt/kernel-signature {:rangeified rk})]
+      (is (true? (:has-reduce? sig)))
+      (is (= [39 2048] (:out-shape sig)))
+      (is (= [1536] (:red-shape sig)))))
+
+  (testing "hand-coded-optimizations detects prefill GEMM for [1 S N] with K >= 64"
+    (let [s 16 n 2048 k 1536
+          rk {:out-shape [1 s n] :out-size (* s n) :red-shape [k]}
+          ke {:name "prefill_q_proj" :rangeified rk :axes [1 s n] :red-axes [k]}
+          opt-ke (opt/hand-coded-optimizations ke {:target :rocm})]
+      (is (true? (:has-group? opt-ke)))
+      (is (= 64 (:group-size opt-ke)))
+      (is (= 4 (:local-rows opt-ke)))
+      (is (= [64 4 1] (:local-size opt-ke)))
+      (is (some #(= (:op %) :group) (:opts opt-ke)))
+      (is (some #(= (:op %) :local) (:opts opt-ke)))))
+
+  (testing "lookup-catalog recognizes prefill GEMM category"
+    (let [rk {:out-shape [1 16 2048] :out-size (* 16 2048) :red-shape [1536]}
+          ke {:name "prefill_proj" :rangeified rk :axes [1 16 2048] :red-axes [1536]}
+          recipe (opt/lookup-catalog ke)]
+      (is (some? recipe))
+      (is (vector? (:local-size recipe)))
+      (is (seq (:opts recipe))))))
