@@ -64,12 +64,12 @@
 
 (deftest test-determine-optimal-xla-flags-rocm-env-vars
   (testing "determine-optimal-xla-flags sets ROCm environment variables including HSA_OVERRIDE_GFX_VERSION"
-    (let [orig-gfx (System/getProperty "HSA_OVERRIDE_GFX_VERSION")
-          orig-rocr (System/getProperty "ROCR_VISIBLE_DEVICES")
-          orig-hip (System/getProperty "HIP_VISIBLE_DEVICES")
-          orig-gfx-nat (xla/getenv-native "HSA_OVERRIDE_GFX_VERSION")
-          orig-rocr-nat (xla/getenv-native "ROCR_VISIBLE_DEVICES")
-          orig-hip-nat (xla/getenv-native "HIP_VISIBLE_DEVICES")]
+    (let [orig-gfx (or (System/getProperty "HSA_OVERRIDE_GFX_VERSION") (System/getenv "HSA_OVERRIDE_GFX_VERSION"))
+          orig-rocr (or (System/getProperty "ROCR_VISIBLE_DEVICES") (System/getenv "ROCR_VISIBLE_DEVICES"))
+          orig-hip (or (System/getProperty "HIP_VISIBLE_DEVICES") (System/getenv "HIP_VISIBLE_DEVICES"))
+          orig-gfx-nat (or (xla/getenv-native "HSA_OVERRIDE_GFX_VERSION") (System/getenv "HSA_OVERRIDE_GFX_VERSION"))
+          orig-rocr-nat (or (xla/getenv-native "ROCR_VISIBLE_DEVICES") (System/getenv "ROCR_VISIBLE_DEVICES"))
+          orig-hip-nat (or (xla/getenv-native "HIP_VISIBLE_DEVICES") (System/getenv "HIP_VISIBLE_DEVICES"))]
       (try
         (let [res (xla/determine-optimal-xla-flags :rocm {} {:gfx-version "11.0.0" :rocr-visible-devices "0" :hip-visible-devices "0"})
               {:keys [env-vars]} res]

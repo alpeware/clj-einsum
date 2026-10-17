@@ -438,12 +438,12 @@
          :byte-size (.byteSize ^MemorySegment host-data)
          :ptr ^MemorySegment host-data
          :owned? false}
-        ;; Fast zero-copy path on ROCm if host-data is a MemorySegment >= 1 GiB: register with hipHostRegister!
+        ;; Fast zero-copy path on ROCm if host-data is a MemorySegment >= 4 GiB: register with hipHostRegister!
         (if (and (= target :rocm)
                  (instance? MemorySegment host-data)
                  (= (or dtype :f32) storage-dt)
                  (>= (.byteSize ^MemorySegment host-data) (* elem-count (dtype-byte-size storage-dt)))
-                 (>= byte-size 1073741824))
+                 (>= byte-size 4294967296))
           (let [hip (or (:hip ctx) (init-hip-bindings!))
                 ^MethodHandle hip-host-reg (:hipHostRegister hip)
                 ^MethodHandle hip-host-get-dev (:hipHostGetDevicePointer hip)]
@@ -763,6 +763,20 @@
                                            (when (= :intermediate (:role buf-info))
                                              [slot (allocate-device-buffer ctx (:shape buf-info) (:dtype buf-info))]))
                                          (:buffers sched)))
+        ;; Pre-allocate 2 sets of output buffers (ping-pong) for zero-allocation step execution
+        output-pool [(into {}
+                           (map (fn [[_out-kw slot]]
+                                  (let [b-info (get (:buffers sched) slot)]
+                                    [slot (assoc (allocate-device-buffer ctx (:shape b-info) (:dtype b-info))
+                                                 :owned? false)]))
+                                (:output-slots sched)))
+                     (into {}
+                           (map (fn [[_out-kw slot]]
+                                  (let [b-info (get (:buffers sched) slot)]
+                                    [slot (assoc (allocate-device-buffer ctx (:shape b-info) (:dtype b-info))
+                                                 :owned? false)]))
+                                (:output-slots sched)))]
+        exec-turn (atom 0)
         ;; Pre-allocate native argument pointer tables per kernel in a shared arena
         exec-arena (Arena/ofShared)
         prepared-kernels (mapv (fn [rk]
@@ -790,15 +804,20 @@
      :module compiled-mod
      :prepared-kernels prepared-kernels
      :intermediate-buffers intermediate-buffers
+     :output-pool output-pool
+     :exec-turn exec-turn
      :exec-arena exec-arena
      :lock (ReentrantLock.)}))
 
 (defn destroy-uop-executable!
-  "Frees pre-allocated intermediate stage buffers and parameter pointer segments for `uop-exec`."
+  "Frees pre-allocated intermediate stage buffers, ping-pong output buffers, and parameter pointer segments for `uop-exec`."
   [ctx uop-exec]
   (when (:uop-executable? uop-exec)
     (doseq [[_ buf] (:intermediate-buffers uop-exec)]
       (destroy-buffer! ctx buf))
+    (doseq [pool (:output-pool uop-exec)]
+      (doseq [[_ buf] pool]
+        (destroy-buffer! ctx (assoc buf :owned? true))))
     (when-let [^Arena a (:exec-arena uop-exec)]
       (when (.isAlive (.scope a))
         (try (.close a) (catch Throwable _ nil)))))
@@ -816,12 +835,16 @@
             buffers-meta (:buffers sched)
             output-slots (:output-slots sched)
             inter-bufs (:intermediate-buffers uop-exec)
-            ;; 1. Allocate fresh output buffers (owned by caller / active DeviceArena)
-            out-bufs (into {}
-                           (map (fn [[_out-kw slot]]
-                                  (let [b-info (get buffers-meta slot)]
-                                    [slot (allocate-device-buffer ctx (:shape b-info) (:dtype b-info))]))
-                                output-slots))
+            ;; 1. Acquire pre-allocated ping-pong output buffer set (or allocate fresh if pool absent)
+            pool (:output-pool uop-exec)
+            out-bufs (if (and (seq pool) (pos? (count output-slots)))
+                       (let [idx (mod (swap! (:exec-turn uop-exec) inc) (count pool))]
+                         (nth pool idx))
+                       (into {}
+                             (map (fn [[_out-kw slot]]
+                                    (let [b-info (get buffers-meta slot)]
+                                      [slot (allocate-device-buffer ctx (:shape b-info) (:dtype b-info))]))
+                                  output-slots)))
             ;; 2. Build slot -> MemorySegment pointer lookup table
             slot->ptr (java.util.HashMap.)]
         (doseq [[slot u-buf] (map-indexed vector input-buffers)]
@@ -839,7 +862,8 @@
         (if (= uop-target :rocm)
           (let [hip (or (:hip ctx) (init-hip-bindings!))
                 ^MethodHandle launch-mh (:hipModuleLaunchKernel hip)
-                ^MethodHandle sync-mh (:hipDeviceSynchronize hip)]
+                ^MethodHandle sync-mh (:hipDeviceSynchronize hip)
+                sync-every? (boolean (System/getenv "UOP_SYNC_EVERY_KERNEL"))]
             (doseq [[k-idx {:keys [fn-handle buffer-slots arg-vals-seg kernel-params-seg global-size local-size canonical-fn-name]}] (map-indexed vector (:prepared-kernels uop-exec))]
               (dotimes [i (count buffer-slots)]
                 (let [slot (long (nth buffer-slots i))
@@ -861,8 +885,12 @@
                                                                       MemorySegment/NULL])))]
                 (check-hip! rc (format "hipModuleLaunchKernel for kernel %d (%s) grid=[%d %d %d] block=[%d %d %d]"
                                        k-idx canonical-fn-name (int gx) (int gy) (int gz) (int lx) (int ly) (int lz))))
+              (when sync-every?
+                (let [rc-sync (int (.invokeWithArguments sync-mh (into-array Object [])))]
+                  (check-hip! rc-sync (format "hipDeviceSynchronize after kernel %d (%s)" k-idx canonical-fn-name)))))
+            (when-not sync-every?
               (let [rc-sync (int (.invokeWithArguments sync-mh (into-array Object [])))]
-                (check-hip! rc-sync (format "hipDeviceSynchronize after kernel %d (%s)" k-idx canonical-fn-name)))))
+                (check-hip! rc-sync "hipDeviceSynchronize after enqueuing uop kernel graph"))))
           ;; CPU execution
           (doseq [{:keys [fn-handle buffer-slots arg-vals-seg]} (:prepared-kernels uop-exec)]
             (dotimes [i (count buffer-slots)]

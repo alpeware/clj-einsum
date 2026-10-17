@@ -113,9 +113,16 @@
          out-lin-idx-uop (rangeify/coords->linear-index out-ranges out-shape)
          local-threads (long (first (or (:local-size kernel-entry)
                                         (if (= target :cpu) [1 1 1] [256 1 1]))))
+         local-rows (long (or (:local-rows kernel-entry)
+                              (second (or (:local-size kernel-entry) [1 1 1]))
+                              1))
+         group-sz (long (or (:group-size kernel-entry) 64))
+         unroll-factor (long (or (:unroll-factor kernel-entry) 4))
          grid-blocks (if (= target :cpu)
                        1
-                       (long (quot (+ (long out-size) local-threads -1) local-threads)))
+                       (if (:has-group? kernel-entry)
+                         (long (quot (+ (long out-size) local-rows -1) local-rows))
+                         (long (quot (+ (long out-size) local-threads -1) local-threads))))
 
          body-sb (StringBuilder.)
          var-names (java.util.HashMap.)
@@ -144,12 +151,23 @@
 
      ;; 3. Bind Output Loop Coordinates
      (if (= target :rocm)
-       (do
-         (when (:has-group? kernel-entry)
-           (let [group-sz (long (or (:group-size kernel-entry) 64))]
-             (.append body-sb (format "  __shared__ float lds[%d];\n" group-sz))))
-         (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.x);\n" local-threads))
-         (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size))))
+       (if (:has-group? kernel-entry)
+         (let [lds-size (* local-rows group-sz)]
+           (.append body-sb (format "  __shared__ float lds[%d];\n" (long lds-size)))
+           (if (> local-rows 1)
+             (do
+               (.append body-sb (format "  if ((int)(blockIdx.x * %d) >= %d) return;\n" local-rows (long out-size)))
+               (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.y);\n" local-rows))
+               (.append body-sb (format "  bool valid_gidx = (gidx < %d);\n" (long out-size)))
+               (.append body-sb (format "  int lds_offset = (int)threadIdx.y * %d;\n" group-sz)))
+             (do
+               (.append body-sb "  int gidx = (int)blockIdx.x;\n")
+               (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size)))
+               (.append body-sb "  bool valid_gidx = true;\n")
+               (.append body-sb "  int lds_offset = 0;\n"))))
+         (do
+           (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.x);\n" local-threads))
+           (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size)))))
        (do
          (when (>= (long out-size) 256)
            (.append body-sb "  #pragma omp parallel for schedule(static)\n"))
@@ -189,9 +207,7 @@
                              v-name (str "v_" (swap! ssa-counter inc))]
                          (.append body-sb (format "%s%s %s = %s[%s];\n" cur-indent c-type v-name buf-name idx-expr))
                          (.put scoped-vars (:id node) v-name)
-                         v-name)
-
-                       :uop/reduce-axis
+                         v-name)                        :uop/reduce-axis
                        (let [body-uop (first src)
                              r-uops (rest src)
                              red-op (:op arg)
@@ -200,44 +216,79 @@
                                         :max "(-1.0e30f)"
                                         :min "(1.0e30f)"
                                         (format-const-literal dtype 0))
-                             inner-vars (java.util.HashMap. scoped-vars)]
-                         (.append body-sb (format "%s%s %s = %s;\n" cur-indent c-type acc-name init-lit))
-                         ;; Open nested reduction loops
+                             inner-vars (java.util.HashMap. scoped-vars)
+                             has-guard? (and (= target :rocm) (:has-group? kernel-entry) (> local-rows 1))]
+                         (.append body-sb (format "%s%s %s = %s;
+" cur-indent c-type acc-name init-lit))
+                         (when has-guard?
+                           (.append body-sb (format "%sif (valid_gidx) {
+" cur-indent)))
+                          ;; Open nested reduction loops
                          (doseq [[depth r] (map-indexed vector r-uops)]
-                           (let [loop-indent (str cur-indent (apply str (repeat depth "  ")))
+                           (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
+                                                  (apply str (repeat depth "  ")))
                                  r-var (str "rk_" (swap! rk-counter inc))
                                  bound-expr (emit-expr (first (:src r)) loop-indent inner-vars)]
                              (.put inner-vars (:id r) r-var)
-                             (.append body-sb (format "%s#pragma unroll 4\n" loop-indent))
-                             (.append body-sb (format "%sfor (int %s = 0; %s < %s; ++%s) {\n"
-                                                      loop-indent r-var r-var bound-expr r-var))))
-                         ;; Emit reduction body inside innermost loop using lexical `inner-vars`
-                         (let [inner-indent (str cur-indent (apply str (repeat (count r-uops) "  ")))
+                             (when (pos? unroll-factor)
+                               (.append body-sb (format "%s#pragma unroll %d
+" loop-indent unroll-factor)))
+                             (if (and (= target :rocm) (:has-group? kernel-entry) (= depth (dec (count r-uops))))
+                               (let [group-sz (long (or (:group-size kernel-entry) 64))]
+                                 (.append body-sb (format "%sfor (int %s = (int)threadIdx.x; %s < %s; %s += %d) {
+"
+                                                          loop-indent r-var r-var bound-expr r-var group-sz)))
+                               (.append body-sb (format "%sfor (int %s = 0; %s < %s; ++%s) {
+"
+                                                        loop-indent r-var r-var bound-expr r-var)))))
+                          ;; Emit reduction body inside innermost loop using lexical `inner-vars`
+                         (let [inner-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
+                                                 (apply str (repeat (count r-uops) "  ")))
                                body-val (emit-expr body-uop inner-indent inner-vars)]
                            (case red-op
-                             :max (.append body-sb (format "%s%s = (%s > %s) ? %s : %s;\n"
+                             :max (.append body-sb (format "%s%s = (%s > %s) ? %s : %s;
+"
                                                            inner-indent acc-name body-val acc-name body-val acc-name))
-                             :min (.append body-sb (format "%s%s = (%s < %s) ? %s : %s;\n"
+                             :min (.append body-sb (format "%s%s = (%s < %s) ? %s : %s;
+"
                                                            inner-indent acc-name body-val acc-name body-val acc-name))
-                             (.append body-sb (format "%s%s += %s;\n" inner-indent acc-name body-val))))
-                         ;; Close reduction loops
+                             (.append body-sb (format "%s%s += %s;
+" inner-indent acc-name body-val))))
+                          ;; Close reduction loops
                          (doseq [depth (reverse (range (count r-uops)))]
-                           (let [loop-indent (str cur-indent (apply str (repeat depth "  ")))]
-                             (.append body-sb (format "%s}\n" loop-indent))))
-                         ;; If cooperative group reduction is enabled, perform tree reduction in LDS!
+                           (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
+                                                  (apply str (repeat depth "  ")))]
+                             (.append body-sb (format "%s}
+" loop-indent))))
+                         (when has-guard?
+                           (.append body-sb (format "%s}
+" cur-indent)))
+                          ;; If cooperative group reduction is enabled, perform tree reduction in LDS!
                          (when (and (= target :rocm) (:has-group? kernel-entry))
                            (let [group-sz (long (or (:group-size kernel-entry) 64))]
-                             (.append body-sb (format "%slds[threadIdx.x] = %s;\n" cur-indent acc-name))
-                             (.append body-sb (format "%s__syncthreads();\n" cur-indent))
-                             (.append body-sb (format "%sfor (int s = %d; s > 0; s >>= 1) {\n" cur-indent (quot group-sz 2)))
-                             (.append body-sb (format "%s  if (threadIdx.x < s) { lds[threadIdx.x] += lds[threadIdx.x + s]; }\n" cur-indent))
-                             (.append body-sb (format "%s  __syncthreads();\n" cur-indent))
-                             (.append body-sb (format "%s}\n" cur-indent))
-                             (.append body-sb (format "%s%s = lds[0];\n" cur-indent acc-name))))
+                             (.append body-sb (format "%slds[lds_offset + threadIdx.x] = %s;
+" cur-indent acc-name))
+                             (.append body-sb (format "%s__syncthreads();
+" cur-indent))
+                             (.append body-sb (format "%sfor (int s = %d; s > 0; s >>= 1) {
+" cur-indent (quot group-sz 2)))
+                             (case red-op
+                               :max (.append body-sb (format "%s  if (threadIdx.x < s) { float b = lds[lds_offset + threadIdx.x + s]; if (b > lds[lds_offset + threadIdx.x]) lds[lds_offset + threadIdx.x] = b; }
+" cur-indent))
+                               :min (.append body-sb (format "%s  if (threadIdx.x < s) { float b = lds[lds_offset + threadIdx.x + s]; if (b < lds[lds_offset + threadIdx.x]) lds[lds_offset + threadIdx.x] = b; }
+" cur-indent))
+                               (.append body-sb (format "%s  if (threadIdx.x < s) { lds[lds_offset + threadIdx.x] += lds[lds_offset + threadIdx.x + s]; }
+" cur-indent)))
+                             (.append body-sb (format "%s  __syncthreads();
+" cur-indent))
+                             (.append body-sb (format "%s}
+" cur-indent))
+                             (.append body-sb (format "%s%s = lds[lds_offset];
+" cur-indent acc-name))))
                          (.put scoped-vars (:id node) acc-name)
                          acc-name)
 
-                       ;; Elementwise Unary / Binary / Ternary ALU Ops
+                        ;; Elementwise Unary / Binary / Ternary ALU Ops
                        (let [child-exprs (mapv #(emit-expr % cur-indent scoped-vars) src)
                              [e0 e1 e2] child-exprs
                              rhs-code (case op
@@ -353,4 +404,6 @@
         :buffer-slots buffer-slots
         :buffer-dtypes buffer-dtypes
         :global-size [grid-blocks 1 1]
-        :local-size [local-threads 1 1]}))))
+        :local-size [(if (:has-group? kernel-entry) group-sz local-threads)
+                     (if (:has-group? kernel-entry) local-rows 1)
+                     1]}))))

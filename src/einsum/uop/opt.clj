@@ -26,6 +26,23 @@
   [rk]
   (boolean (some #(= :uop/reduce-axis (:op %)) (uop/toposort (:sink rk)))))
 
+(defn extract-reduction-ranges
+  "Extracts the vector of reduction `:uop/range` nodes from the first `:uop/reduce-axis` node in `rk`."
+  [rk]
+  (let [sink (:sink rk)]
+    (when-let [red-node (some #(when (= :uop/reduce-axis (:op %)) %) (uop/toposort sink))]
+      (vec (rest (:src red-node))))))
+
+(defn extract-reduction-shape
+  "Extracts the reduction dimension bounds `[k0 k1 ...]` from `rk`."
+  [rk]
+  (if-let [r-uops (seq (extract-reduction-ranges rk))]
+    (mapv (fn [r]
+            (let [bound-node (first (:src r))]
+              (long (or (:arg bound-node) 1))))
+          r-uops)
+    (vec (or (:red-shape rk) (:red-axes rk) []))))
+
 ;; -----------------------------------------------------------------------------
 ;; 2. Real OptOps Range-Splitting & Axis Manipulation (`apply-opt` / `shift-to`)
 ;; -----------------------------------------------------------------------------
@@ -58,16 +75,20 @@
       :local
       (let [orig-dim (nth axes axis 1)
             outer-dim (max 1 (long (quot (+ orig-dim amount -1) amount)))
-            ;; If 1D, local-sz[0] becomes amount, global-sz[0] becomes outer-dim
-            ;; If multi-D, map axis 0 -> x (or 1 -> y if 2D)
-            new-local (if (== axis 0)
-                        (assoc local-sz 0 amount)
-                        (assoc local-sz 1 amount))
-            new-global (if (== axis 0)
+            has-grp? (true? (:has-group? ke))
+            new-local (if has-grp?
+                        (assoc local-sz 1 amount)
+                        (if (== axis 0)
+                          (assoc local-sz 0 amount)
+                          (assoc local-sz 1 amount)))
+            new-global (if has-grp?
                          (assoc global-sz 0 outer-dim)
-                         (assoc global-sz axis outer-dim))]
+                         (if (== axis 0)
+                           (assoc global-sz 0 outer-dim)
+                           (assoc global-sz axis outer-dim)))]
         (assoc ke
                :opts opts
+               :local-rows (if has-grp? amount (get ke :local-rows 1))
                :local-size new-local
                :global-size new-global))
 
@@ -81,9 +102,7 @@
                :upcast-factor amount))
 
       :group
-      (let [new-local (if (== (first local-sz) 1)
-                        (assoc local-sz 0 amount)
-                        local-sz)]
+      (let [new-local (assoc local-sz 0 amount)]
         (assoc ke
                :opts opts
                :has-group? true
@@ -113,7 +132,8 @@
   (let [rk (or (:rangeified ke) ke)
         out-size (long (or (:out-size rk) (:out-size ke) 1))
         out-shape (or (:out-shape rk) (:axes ke) [out-size])
-        red-shape (or (:red-shape rk) (:red-axes ke) [])
+        red-shape (let [rs (or (:red-shape rk) (:red-axes ke))]
+                    (if (seq rs) rs (extract-reduction-shape rk)))
         has-red? (or (true? (:has-reduce? ke)) (seq red-shape) (has-reduce-axis? rk))]
     (cond
       (= target :cpu)
@@ -148,7 +168,30 @@
                       {:op :upcast :axis 1 :amount 4}
                       {:op :unroll :axis 0 :amount 4}]))
 
-;; Pattern 4: General Reduction or Elementwise Fallback
+      ;; Pattern 2: Cooperative Reduction (GEMV, RMSNorm, Softmax) when has-red? and innermost K >= 64
+      (and has-red?
+           (>= (long (or (last red-shape) (first red-shape) 0)) 64))
+      (let [k (long (or (last red-shape) (first red-shape) 64))
+            group-size (cond
+                         (>= k 256) 256
+                         (>= k 128) 128
+                         :else 64)
+            local-rows (if (and (>= out-size 4) (<= group-size 64)) 4 1)
+            grid-blocks (max 1 (quot (+ out-size local-rows -1) local-rows))
+            opts (cond-> [{:op :group :axis 0 :amount group-size}]
+                   (> local-rows 1) (conj {:op :local :axis 0 :amount local-rows})
+                   true (conj {:op :unroll :axis 0 :amount 4}))]
+        (assoc ke
+               :target :rocm
+               :has-group? true
+               :group-size group-size
+               :local-rows local-rows
+               :unroll-factor 4
+               :global-size [grid-blocks 1 1]
+               :local-size [group-size local-rows 1]
+               :opts opts))
+
+      ;; Pattern 4: General Reduction or Elementwise Fallback
       :else
       (let [local-threads (cond
                             (<= out-size 32) (max 1 out-size)
