@@ -315,42 +315,74 @@
                            (.append body-sb (format "%sif (valid_gidx) {
 " cur-indent)))
                           ;; Open nested reduction loops
-                         (doseq [[depth r] (map-indexed vector r-uops)]
-                           (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
-                                                  (apply str (repeat depth "  ")))
-                                 r-var (str "rk_" (swap! rk-counter inc))
-                                 bound-expr (emit-expr (first (:src r)) loop-indent inner-vars)]
-                             (.put inner-vars (:id r) r-var)
-                             (when (pos? unroll-factor)
-                               (.append body-sb (format "%s#pragma unroll %d
-" loop-indent unroll-factor)))
-                             (if (and (= target :rocm) (:has-group? kernel-entry) (= depth (dec (count r-uops))))
-                               (let [group-sz (long (or (:group-size kernel-entry) 64))]
-                                 (.append body-sb (format "%sfor (int %s = (int)threadIdx.x; %s < %s; %s += %d) {
-"
-                                                          loop-indent r-var r-var bound-expr r-var group-sz)))
-                               (.append body-sb (format "%sfor (int %s = 0; %s < %s; ++%s) {
-"
-                                                        loop-indent r-var r-var bound-expr r-var)))))
-                          ;; Emit reduction body inside innermost loop using lexical `inner-vars`
-                         (let [inner-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
-                                                 (apply str (repeat (count r-uops) "  ")))
-                               body-val (emit-expr body-uop inner-indent inner-vars)]
-                           (case red-op
-                             :max (.append body-sb (format "%s%s = (%s > %s) ? %s : %s;
-"
-                                                           inner-indent acc-name body-val acc-name body-val acc-name))
-                             :min (.append body-sb (format "%s%s = (%s < %s) ? %s : %s;
-"
-                                                           inner-indent acc-name body-val acc-name body-val acc-name))
-                             (.append body-sb (format "%s%s += %s;
-" inner-indent acc-name body-val))))
-                          ;; Close reduction loops
-                         (doseq [depth (reverse (range (count r-uops)))]
-                           (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
-                                                  (apply str (repeat depth "  ")))]
-                             (.append body-sb (format "%s}
-" loop-indent))))
+                         (let [vectorized-depths (atom {})]
+                            ;; Open nested reduction loops
+                           (doseq [[depth r] (map-indexed vector r-uops)]
+                             (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
+                                                    (apply str (repeat depth "  ")))
+                                   r-var (str "rk_" (swap! rk-counter inc))
+                                   bound-node (first (:src r))
+                                   bound-expr (emit-expr bound-node loop-indent inner-vars)
+                                   k-const (when (= :uop/const (:op bound-node)) (:arg bound-node))
+                                   group-sz (long (or (:group-size kernel-entry) 64))
+                                   vec-sz (when (and (number? k-const)
+                                                     (= target :rocm)
+                                                     (:has-group? kernel-entry)
+                                                     (= depth (dec (count r-uops))))
+                                            (let [k (long k-const)]
+                                              (cond
+                                                (and (>= k (* group-sz 8)) (zero? (mod k (* group-sz 8)))) 8
+                                                (and (>= k (* group-sz 4)) (zero? (mod k (* group-sz 4)))) 4
+                                                (and (>= k (* group-sz 2)) (zero? (mod k (* group-sz 2)))) 2
+                                                :else nil)))]
+                               (.put inner-vars (:id r) r-var)
+                               (when (and (pos? unroll-factor) (not vec-sz))
+                                 (.append body-sb (format "%s#pragma unroll %d\n" loop-indent unroll-factor)))
+                               (cond
+                                 vec-sz
+                                 (let [step (* group-sz (long vec-sz))
+                                       chunk-var (str r-var "_chunk")
+                                       base-var (str r-var "_base")
+                                       lane-var (str r-var "_lane")]
+                                   (swap! vectorized-depths assoc depth vec-sz)
+                                   (.append body-sb (format "%sfor (int %s = 0; %s < %s; %s += %d) {\n"
+                                                            loop-indent chunk-var chunk-var bound-expr chunk-var step))
+                                   (.append body-sb (format "%s  int %s = %s + (int)threadIdx.x * %d;\n"
+                                                            loop-indent base-var chunk-var (long vec-sz)))
+                                   (.append body-sb (format "%s  #pragma unroll\n" loop-indent))
+                                   (.append body-sb (format "%s  for (int %s = 0; %s < %d; ++%s) {\n"
+                                                            loop-indent lane-var lane-var (long vec-sz) lane-var))
+                                   (.append body-sb (format "%s    int %s = %s + %s;\n"
+                                                            loop-indent r-var base-var lane-var)))
+
+                                 (and (= target :rocm) (:has-group? kernel-entry) (= depth (dec (count r-uops))))
+                                 (.append body-sb (format "%sfor (int %s = (int)threadIdx.x; %s < %s; %s += %d) {\n"
+                                                          loop-indent r-var r-var bound-expr r-var group-sz))
+
+                                 :else
+                                 (.append body-sb (format "%sfor (int %s = 0; %s < %s; ++%s) {\n"
+                                                          loop-indent r-var r-var bound-expr r-var)))))
+                            ;; Emit reduction body inside innermost loop using lexical `inner-vars`
+                           (let [extra-indent (if (get @vectorized-depths (dec (count r-uops))) "    " "")
+                                 inner-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
+                                                   (apply str (repeat (count r-uops) "  "))
+                                                   extra-indent)
+                                 body-val (emit-expr body-uop inner-indent inner-vars)]
+                             (case red-op
+                               :max (.append body-sb (format "%s%s = (%s > %s) ? %s : %s;\n"
+                                                             inner-indent acc-name body-val acc-name body-val acc-name))
+                               :min (.append body-sb (format "%s%s = (%s < %s) ? %s : %s;\n"
+                                                             inner-indent acc-name body-val acc-name body-val acc-name))
+                               (.append body-sb (format "%s%s += %s;\n" inner-indent acc-name body-val))))
+                            ;; Close reduction loops
+                           (doseq [depth (reverse (range (count r-uops)))]
+                             (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
+                                                    (apply str (repeat depth "  ")))]
+                               (if (get @vectorized-depths depth)
+                                 (do
+                                   (.append body-sb (format "%s  }\n" loop-indent))
+                                   (.append body-sb (format "%s}\n" loop-indent)))
+                                 (.append body-sb (format "%s}\n" loop-indent))))))
                          (when has-guard?
                            (.append body-sb (format "%s}
 " cur-indent)))
