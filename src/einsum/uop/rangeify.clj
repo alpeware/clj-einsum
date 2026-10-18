@@ -183,27 +183,39 @@
                                  pos-node (nth src 2)
                                  {:keys [window k-sink]} arg
                                  pos-val (lower-at pos-node [])
-                                 eff-slot (if (and window (pos? (long (or k-sink 0))))
-                                            (let [c-win (uop/uop-const :i32 (long window))
-                                                  c-sink (uop/uop-const :i32 (long k-sink))
-                                                  c-mod (uop/uop-const :i32 (long (- window k-sink)))
-                                                  rolled (uop/uop-alu :uop/add c-sink
-                                                                      (uop/uop-alu :uop/mod (uop/uop-alu :uop/sub pos-val c-sink) c-mod))]
-                                              (uop/uop-alu :uop/where (uop/uop-alu :uop/cmpge pos-val c-win) rolled pos-val))
+                                 eff-slot (if window
+                                            (let [c-win (uop/uop-const :i32 (long window))]
+                                              (if (pos? (long (or k-sink 0)))
+                                                (let [c-sink (uop/uop-const :i32 (long k-sink))
+                                                      c-mod (uop/uop-const :i32 (long (- window k-sink)))
+                                                      rolled (uop/uop-alu :uop/add c-sink
+                                                                          (uop/uop-alu :uop/mod (uop/uop-alu :uop/sub pos-val c-sink) c-mod))]
+                                                  (uop/uop-alu :uop/where (uop/uop-alu :uop/cmpge pos-val c-win) rolled pos-val))
+                                                (uop/uop-alu :uop/mod pos-val c-win)))
                                             pos-val)
                                  time-coord (nth coords 1)
                                  q-len (nth (:shape k-new-node) 1 1)
-                                 match? (if (== 1 q-len)
-                                          (uop/uop-alu :uop/cmpeq time-coord eff-slot)
-                                          (uop/uop-alu :uop/and
-                                                       (uop/uop-alu :uop/cmpge time-coord eff-slot)
-                                                       (uop/uop-alu :uop/cmplt time-coord (uop/uop-alu :uop/add eff-slot (uop/uop-const :i32 q-len)))))
+                                 [match? safe-time-offset]
+                                 (cond
+                                   (== 1 q-len)
+                                   [(uop/uop-alu :uop/cmpeq time-coord eff-slot)
+                                    (uop/uop-const :i32 0)]
+
+                                   (and window (zero? (long (or k-sink 0))))
+                                   (let [c-win (uop/uop-const :i32 (long window))
+                                         diff-raw (uop/uop-alu :uop/add (uop/uop-alu :uop/sub time-coord eff-slot) c-win)
+                                         diff (uop/uop-alu :uop/mod diff-raw c-win)
+                                         m? (uop/uop-alu :uop/cmplt diff (uop/uop-const :i32 q-len))]
+                                     [m? (uop/uop-alu :uop/where m? diff (uop/uop-const :i32 0))])
+
+                                   :else
+                                   (let [m? (uop/uop-alu :uop/and
+                                                         (uop/uop-alu :uop/cmpge time-coord eff-slot)
+                                                         (uop/uop-alu :uop/cmplt time-coord (uop/uop-alu :uop/add eff-slot (uop/uop-const :i32 q-len))))]
+                                     [m? (uop/uop-alu :uop/where m?
+                                                      (uop/uop-alu :uop/sub time-coord eff-slot)
+                                                      (uop/uop-const :i32 0))]))
                                  val-cache (lower-at cache-in-node coords)
-                                 safe-time-offset (if (== 1 q-len)
-                                                    (uop/uop-const :i32 0)
-                                                    (uop/uop-alu :uop/where match?
-                                                                 (uop/uop-alu :uop/sub time-coord eff-slot)
-                                                                 (uop/uop-const :i32 0)))
                                  k-coords (assoc coords 1 safe-time-offset)
                                  val-new (lower-at k-new-node k-coords)
                                  target-dt (:dtype val-cache)

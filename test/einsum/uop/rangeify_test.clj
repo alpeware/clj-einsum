@@ -173,3 +173,87 @@
       (is (pos? (count (:kernels smollm-sched))))
       (is (every? #(some? (:sink (:rangeified %))) (:kernels smollm-sched))))))
 
+(defspec prop-dynamic-update-slice-ring-buffer-wrapping
+  30
+  (prop/for-all [window (gen/choose 4 8)
+                 d (gen/choose 2 4)
+                 pos (gen/choose 0 20)]
+                (let [cache-in-data (float-array (* window d) 0.0)
+                      k-new-data (float-array (map float (range 1 (inc d))))
+                      pos-data (int-array [pos])
+                      invars [[:cache_in [:tensor [1 window d] :f32]]
+                              [:k_new [:tensor [1 1 d] :f32]]
+                              [:pos [:tensor [1] :i32]]]
+                      ast [:block {}
+                           [:dynamic-update-slice [:cache_out :b :s :d]
+                            [:cache_in :b :s :d]
+                            [:k_new :b :one :d]
+                            {:start-indices [0 :pos 0]
+                             :window window
+                             :k-sink 0}]]
+                      uop-graph (uop-lower/ast->uop-graph "dyn_update_wrap" invars ast [:cache_out])
+                      sched (schedule/schedule-graph uop-graph)
+                      out-map (schedule/eval-scheduled-graph sched {:cache_in cache-in-data
+                                                                    :k_new k-new-data
+                                                                    :pos pos-data})
+                      out ^floats (get out-map :cache_out)
+                      expected-slot (mod pos window)]
+                  (every? true?
+                          (for [slot (range window)
+                                col (range d)]
+                            (let [val (aget out (+ (* slot d) col))]
+                              (if (== slot expected-slot)
+                                (== val (float (inc col)))
+                                (zero? val))))))))
+
+(defspec prop-chunked-attention-online-softmax-parity
+  25
+  (prop/for-all [p (gen/elements [1 2 4])
+                 dh (gen/elements [16 32])]
+                (let [b 1
+                      h 2
+                      kvh 2
+                      kvs 128
+                      chunk-size 64
+                      q-data (float-array (repeatedly (* b p h dh) #(float (- (rand 2.0) 1.0))))
+                      k-data (float-array (repeatedly (* b kvs kvh dh) #(float (- (rand 2.0) 1.0))))
+                      v-data (float-array (repeatedly (* b kvs kvh dh) #(float (- (rand 2.0) 1.0))))
+                      pos-data (int-array [64])
+                      scale (/ 1.0 (Math/sqrt (double dh)))
+                      invars [[:Q [:tensor [b p h dh] :f32]]
+                              [:K [:tensor [b kvs kvh dh] :f32]]
+                              [:V [:tensor [b kvs kvh dh] :f32]]
+                              [:pos [:tensor [1] :i32]]]
+                      ast-chunked [:block {}
+                                   [:chunked-attention [:ctx :b :p :h :dh]
+                                    [:Q :b :p :h :dh]
+                                    [:K :b :kvs :kvh :dh]
+                                    [:V :b :kvs :kvh :dh]
+                                    {:pos :pos
+                                     :chunk-size chunk-size
+                                     :scale scale
+                                     :sliding-window 64}]]
+                      ast-unchunked [:block {}
+                                     [:chunked-attention [:ctx_ref :b :p :h :dh]
+                                      [:Q :b :p :h :dh]
+                                      [:K :b :kvs :kvh :dh]
+                                      [:V :b :kvs :kvh :dh]
+                                      {:pos :pos
+                                       :chunk-size 128
+                                       :scale scale
+                                       :sliding-window 64}]]
+                      g-chunked (uop-lower/ast->uop-graph "attn_chunked" invars ast-chunked [:ctx])
+                      s-chunked (schedule/schedule-graph g-chunked)
+                      out-chunked (schedule/eval-scheduled-graph s-chunked {:Q q-data :K k-data :V v-data :pos pos-data})
+                      res-chunked ^floats (get out-chunked :ctx)
+
+                      g-unchunked (uop-lower/ast->uop-graph "attn_unchunked" invars ast-unchunked [:ctx_ref])
+                      s-unchunked (schedule/schedule-graph g-unchunked)
+                      out-unchunked (schedule/eval-scheduled-graph s-unchunked {:Q q-data :K k-data :V v-data :pos pos-data})
+                      res-unchunked ^floats (get out-unchunked :ctx_ref)
+
+                      n-elems (* b p h dh)]
+                  (every? true?
+                          (for [i (range n-elems)]
+                            (< (Math/abs (- (aget res-chunked i) (aget res-unchunked i))) 1e-4))))))
+

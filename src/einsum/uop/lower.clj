@@ -529,20 +529,7 @@
                       (uop/uop-expand [b kvs kvh g dh])
                       (uop/uop-reshape [b kvs h dh])))
                 v-uop)
-        ;; Q: [b, h, p, dh]
-        q-trans (uop/uop-permute q-uop [0 2 1 3])
-        ;; K: [b, h, dh, kvs]
-        k-trans (uop/uop-permute k-rep [0 2 3 1])
-        ;; Scores: [b, h, p, kvs] <- Q [b, h, p, dh] * K [b, h, dh, kvs]
-        q-exp (-> (uop/uop-reshape q-trans [b h p 1 dh])
-                  (uop/uop-expand [b h p kvs dh]))
-        k-exp (-> (uop/uop-reshape (uop/uop-permute k-trans [0 1 3 2]) [b h 1 kvs dh])
-                  (uop/uop-expand [b h p kvs dh]))
-        qk-prod (uop/uop-alu :uop/mul q-exp k-exp)
-        raw-scores (uop/uop-reduce qk-prod :add [4] false)
         scale-val (double (or (:scale attrs) 1.0))
-        scale (uop/uop-const :f32 scale-val [1 1 1 1])
-        scaled-scores (uop/uop-alu :uop/mul raw-scores (broadcast-shape-suffix scale [b h p kvs]))
         pos-attr (or (:pos attrs) (:start-indices attrs))
         pos-uop (cond
                   (uop/uop? pos-attr) pos-attr
@@ -550,41 +537,132 @@
                   (number? pos-attr) (uop/uop-const :i32 (long pos-attr) [1 1 1 1])
                   :else nil)
         window (or (:sliding-window attrs) (:sliding_window attrs) (:window attrs))
-        masked-scores
-        (if (or pos-uop (not= p kvs))
-          (let [pos-node (if pos-uop
-                           (-> (if (= (:dtype pos-uop) :i32) pos-uop (uop/uop-cast pos-uop :i32))
-                               (uop/uop-reshape [1 1 1 1]))
-                           (uop/uop-const :i32 0 [1 1 1 1]))
-                r-uop (-> (uop/uop :uop/vconst :i32 [] (vec (range p)) [p])
-                          (uop/uop-reshape [1 1 p 1]))
-                q-pos (uop/uop-alu :uop/add pos-node (broadcast-shape-suffix r-uop [1 1 p 1]))
-                c-uop (-> (uop/uop :uop/vconst :i32 [] (vec (range kvs)) [kvs])
-                          (uop/uop-reshape [1 1 1 kvs]))
-                c-bc (broadcast-shape-suffix c-uop [b h p kvs])
-                q-pos-bc (broadcast-shape-suffix q-pos [b h p kvs])
-                causal-cond (uop/uop-alu :uop/cmple c-bc q-pos-bc)
-                valid-cond (if window
-                             (let [win-const (broadcast-shape-suffix (uop/uop-const :i32 (long window) [1 1 1 1]) [b h p kvs])
-                                   diff (uop/uop-alu :uop/sub q-pos-bc c-bc)
-                                   win-cond (uop/uop-alu :uop/cmplt diff win-const)]
-                               (uop/uop-alu :uop/and causal-cond win-cond))
-                             causal-cond)
-                neg-inf (broadcast-shape-suffix (uop/uop-const :f32 -1.0e9 [1 1 1 1]) [b h p kvs])
-                masked (uop/uop-alu :uop/where valid-cond scaled-scores neg-inf)]
-            (lower-softmax-core masked -1))
-          (lower-causal-softmax scaled-scores attrs))
-        ;; Attn output: [b, h, p, dh] <- masked-scores [b, h, p, kvs] * V [b, h, kvs, dh]
-        s-exp (-> (uop/uop-reshape masked-scores [b h p kvs 1])
-                  (uop/uop-expand [b h p kvs dh]))
-        v-trans (uop/uop-permute v-rep [0 2 1 3])
-        v-exp (-> (uop/uop-reshape v-trans [b h 1 kvs dh])
-                  (uop/uop-expand [b h p kvs dh]))
-        sv-prod (uop/uop-alu :uop/mul s-exp v-exp)
-        out-trans (uop/uop-reduce sv-prod :add [3] false)
-        ;; Permute back to [b, p, h, dh]
-        out (uop/uop-permute out-trans [0 2 1 3])]
-    (if out-shape (uop/uop-reshape out (vec out-shape)) out)))
+        ring-buffer? (boolean (or (:ring-buffer attrs) (:ring-buffer? attrs)))
+        chunk-size (long (or (:chunk-size attrs) 64))
+        chunked? (and (> kvs chunk-size) (zero? (mod kvs chunk-size)))]
+    (if chunked?
+      (let [nc (quot kvs chunk-size)
+            ;; Format Q: [b, h, p, dh] -> [b, 1, h, p, 1, dh] -> [b, nc, h, p, chunk-size, dh]
+            q-trans (uop/uop-permute q-uop [0 2 1 3])
+            q-exp (-> (uop/uop-reshape q-trans [b 1 h p 1 dh])
+                      (uop/uop-expand [b nc h p chunk-size dh]))
+            ;; Format K: [b, kvs, h, dh] -> [b, nc, chunk-size, h, dh] -> permute [0 1 3 2 4] [b, nc, h, chunk-size, dh]
+            ;;           -> reshape [b, nc, h, 1, chunk-size, dh] -> expand [b, nc, h, p, chunk-size, dh]
+            k-trans (-> (uop/uop-reshape k-rep [b nc chunk-size h dh])
+                        (uop/uop-permute [0 1 3 2 4]))
+            k-exp (-> (uop/uop-reshape k-trans [b nc h 1 chunk-size dh])
+                      (uop/uop-expand [b nc h p chunk-size dh]))
+            qk-prod (uop/uop-alu :uop/mul q-exp k-exp)
+            chunk-raw-scores (uop/uop-reduce qk-prod :add [5] false)
+            scale (uop/uop-const :f32 scale-val [1 1 1 1 1])
+            scaled-chunk-scores (uop/uop-alu :uop/mul chunk-raw-scores (broadcast-shape-suffix scale [b nc h p chunk-size]))
+            ;; Coordinates for causal/window mask
+            pos-node (if pos-uop
+                       (-> (if (= (:dtype pos-uop) :i32) pos-uop (uop/uop-cast pos-uop :i32))
+                           (uop/uop-reshape [1 1 1 1 1]))
+                       (uop/uop-const :i32 0 [1 1 1 1 1]))
+            r-uop (-> (uop/uop :uop/vconst :i32 [] (vec (range p)) [p])
+                      (uop/uop-reshape [1 1 1 p 1]))
+            q-pos (uop/uop-alu :uop/add pos-node (broadcast-shape-suffix r-uop [1 1 1 p 1]))
+            q-pos-bc (broadcast-shape-suffix q-pos [b nc h p chunk-size])
+            c-uop (-> (uop/uop :uop/vconst :i32 [] (vec (range nc)) [nc])
+                      (uop/uop-reshape [1 nc 1 1 1]))
+            c-scaled (uop/uop-alu :uop/mul (broadcast-shape-suffix c-uop [1 nc 1 1 1])
+                                  (uop/uop-const :i32 (long chunk-size) [1 1 1 1 1]))
+            t-uop (-> (uop/uop :uop/vconst :i32 [] (vec (range chunk-size)) [chunk-size])
+                      (uop/uop-reshape [1 1 1 1 chunk-size]))
+            k-idx (uop/uop-alu :uop/add (broadcast-shape-suffix c-scaled [1 nc 1 1 chunk-size])
+                               (broadcast-shape-suffix t-uop [1 nc 1 1 chunk-size]))
+            k-idx-bc (broadcast-shape-suffix k-idx [b nc h p chunk-size])
+            causal-cond (uop/uop-alu :uop/cmple k-idx-bc q-pos-bc)
+            valid-cond (if ring-buffer?
+                         (let [win-const (broadcast-shape-suffix (uop/uop-const :i32 (long (or window kvs)) [1 1 1 1 1]) [b nc h p chunk-size])
+                               full-buf-cond (uop/uop-alu :uop/cmpge q-pos-bc win-const)]
+                           (uop/uop-alu :uop/or full-buf-cond causal-cond))
+                         (if window
+                           (let [win-const (broadcast-shape-suffix (uop/uop-const :i32 (long window) [1 1 1 1 1]) [b nc h p chunk-size])
+                                 diff (uop/uop-alu :uop/sub q-pos-bc k-idx-bc)
+                                 win-cond (uop/uop-alu :uop/cmplt diff win-const)]
+                             (uop/uop-alu :uop/and causal-cond win-cond))
+                           causal-cond))
+            neg-inf (broadcast-shape-suffix (uop/uop-const :f32 -1.0e9 [1 1 1 1 1]) [b nc h p chunk-size])
+            masked-chunk-scores (uop/uop-alu :uop/where valid-cond scaled-chunk-scores neg-inf)
+            ;; Streaming online softmax reductions
+            m-chunk (uop/uop-reduce masked-chunk-scores :max [4] false)
+            m-global (uop/uop-reduce m-chunk :max [1] false)
+            m-global-bc (broadcast-shape-suffix (uop/uop-reshape m-global [b 1 h p 1]) [b nc h p chunk-size])
+            shifted-scores (uop/uop-alu :uop/sub masked-chunk-scores m-global-bc)
+            exp-scores (uop-exp shifted-scores)
+            l-chunk (uop/uop-reduce exp-scores :add [4] false)
+            l-global (uop/uop-reduce l-chunk :add [1] false)
+            eps-node (broadcast-shape-suffix (uop/uop-const :f32 1.0e-6 [1 1 1]) [b h p])
+            l-safe (uop/uop-alu :uop/where (uop/uop-alu :uop/cmpgt l-global eps-node) l-global eps-node)
+            ;; Format V and compute O_c = exp_scores @ V_c
+            v-trans (-> (uop/uop-reshape v-rep [b nc chunk-size h dh])
+                        (uop/uop-permute [0 1 3 2 4]))
+            v-exp (-> (uop/uop-reshape v-trans [b nc h 1 chunk-size dh])
+                      (uop/uop-expand [b nc h p chunk-size dh]))
+            exp-exp (-> (uop/uop-reshape exp-scores [b nc h p chunk-size 1])
+                        (uop/uop-expand [b nc h p chunk-size dh]))
+            pv-prod (uop/uop-alu :uop/mul exp-exp v-exp)
+            o-chunk (uop/uop-reduce pv-prod :add [4] false)
+            o-global (uop/uop-reduce o-chunk :add [1] false)
+            l-safe-bc (broadcast-shape-suffix (uop/uop-reshape l-safe [b h p 1]) [b h p dh])
+            ctx (uop/uop-alu :uop/div o-global l-safe-bc)
+            out (uop/uop-permute ctx [0 2 1 3])]
+        (if out-shape (uop/uop-reshape out (vec out-shape)) out))
+      (let [;; Q: [b, h, p, dh]
+            q-trans (uop/uop-permute q-uop [0 2 1 3])
+            ;; K: [b, h, dh, kvs]
+            k-trans (uop/uop-permute k-rep [0 2 3 1])
+            ;; Scores: [b, h, p, kvs] <- Q [b, h, p, dh] * K [b, h, dh, kvs]
+            q-exp (-> (uop/uop-reshape q-trans [b h p 1 dh])
+                      (uop/uop-expand [b h p kvs dh]))
+            k-exp (-> (uop/uop-reshape (uop/uop-permute k-trans [0 1 3 2]) [b h 1 kvs dh])
+                      (uop/uop-expand [b h p kvs dh]))
+            qk-prod (uop/uop-alu :uop/mul q-exp k-exp)
+            raw-scores (uop/uop-reduce qk-prod :add [4] false)
+            scale (uop/uop-const :f32 scale-val [1 1 1 1])
+            scaled-scores (uop/uop-alu :uop/mul raw-scores (broadcast-shape-suffix scale [b h p kvs]))
+            masked-scores
+            (if (or pos-uop (not= p kvs))
+              (let [pos-node (if pos-uop
+                               (-> (if (= (:dtype pos-uop) :i32) pos-uop (uop/uop-cast pos-uop :i32))
+                                   (uop/uop-reshape [1 1 1 1]))
+                               (uop/uop-const :i32 0 [1 1 1 1]))
+                    r-uop (-> (uop/uop :uop/vconst :i32 [] (vec (range p)) [p])
+                              (uop/uop-reshape [1 1 p 1]))
+                    q-pos (uop/uop-alu :uop/add pos-node (broadcast-shape-suffix r-uop [1 1 p 1]))
+                    c-uop (-> (uop/uop :uop/vconst :i32 [] (vec (range kvs)) [kvs])
+                              (uop/uop-reshape [1 1 1 kvs]))
+                    c-bc (broadcast-shape-suffix c-uop [b h p kvs])
+                    q-pos-bc (broadcast-shape-suffix q-pos [b h p kvs])
+                    causal-cond (uop/uop-alu :uop/cmple c-bc q-pos-bc)
+                    valid-cond (if ring-buffer?
+                                 (let [win-const (broadcast-shape-suffix (uop/uop-const :i32 (long (or window kvs)) [1 1 1 1]) [b h p kvs])
+                                       full-buf-cond (uop/uop-alu :uop/cmpge q-pos-bc win-const)]
+                                   (uop/uop-alu :uop/or full-buf-cond causal-cond))
+                                 (if window
+                                   (let [win-const (broadcast-shape-suffix (uop/uop-const :i32 (long window) [1 1 1 1]) [b h p kvs])
+                                         diff (uop/uop-alu :uop/sub q-pos-bc c-bc)
+                                         win-cond (uop/uop-alu :uop/cmplt diff win-const)]
+                                     (uop/uop-alu :uop/and causal-cond win-cond))
+                                   causal-cond))
+                    neg-inf (broadcast-shape-suffix (uop/uop-const :f32 -1.0e9 [1 1 1 1]) [b h p kvs])
+                    masked (uop/uop-alu :uop/where valid-cond scaled-scores neg-inf)]
+                (lower-softmax-core masked -1))
+              (lower-causal-softmax scaled-scores attrs))
+            ;; Attn output: [b, h, p, dh] <- masked-scores [b, h, p, kvs] * V [b, h, kvs, dh]
+            s-exp (-> (uop/uop-reshape masked-scores [b h p kvs 1])
+                      (uop/uop-expand [b h p kvs dh]))
+            v-trans (uop/uop-permute v-rep [0 2 1 3])
+            v-exp (-> (uop/uop-reshape v-trans [b h 1 kvs dh])
+                      (uop/uop-expand [b h p kvs dh]))
+            sv-prod (uop/uop-alu :uop/mul s-exp v-exp)
+            out-trans (uop/uop-reduce sv-prod :add [3] false)
+            ;; Permute back to [b, p, h, dh]
+            out (uop/uop-permute out-trans [0 2 1 3])]
+        (if out-shape (uop/uop-reshape out (vec out-shape)) out)))))
 
 ;; -----------------------------------------------------------------------------
 ;; 4. Public AST -> UOp Graph Compiler
