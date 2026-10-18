@@ -63,9 +63,17 @@
                 op (:op consumer)]
             (cond
               (= op :uop/reshape)
-              (if (contains? output-ids (:id consumer))
-                (conj chain consumer)
-                (recur consumer (conj chain consumer)))
+              (let [curr-sh (:shape curr)
+                    cons-sh (:shape consumer)
+                    splits-channel-axis? (and (seq curr-sh)
+                                              (seq cons-sh)
+                                              (> (long (last curr-sh)) 1)
+                                              (not= (long (last curr-sh)) (long (last cons-sh))))]
+                (if splits-channel-axis?
+                  (when (seq chain) chain)
+                  (if (contains? output-ids (:id consumer))
+                    (conj chain consumer)
+                    (recur consumer (conj chain consumer)))))
 
               (and (or (contains? uop/ALU_OPS op) (= op :uop/cast))
                    (= (:shape consumer) (:shape curr))

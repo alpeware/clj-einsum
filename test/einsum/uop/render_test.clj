@@ -281,4 +281,101 @@
                        (= [expected-grid-n expected-grid-m 1] (:global-size hip-prog))
                        (str/includes? (:source hip-prog) "r_token_base")))))
 
+(defn- reference-fused-rms-matmul
+  "Computes reference fused RMSNorm scale + matmul:
+   out[i, j] = (1 / sqrt(s[i] + 1e-5)) * sum_k (A[i, k] * B[k, j])"
+  [^floats a ^floats b ^floats s m k n]
+  (let [c (float-array (* m n))]
+    (dotimes [i m]
+      (let [rstd (float (/ 1.0 (Math/sqrt (+ (double (aget s i)) 1e-5))))]
+        (dotimes [j n]
+          (let [acc (atom 0.0)]
+            (dotimes [kk k]
+              (let [va (aget a (+ (* i k) kk))
+                    vb (aget b (+ (* kk n) j))]
+                (swap! acc + (* va rstd vb))))
+            (aset c (+ (* i n) j) (float @acc))))))
+    c))
+
+(deftest test-fused-rmsnorm-matmul-hoisting
+  (testing "Fused RMSNorm + matmul hoists sqrtf and (1.0f / before the reduction loop in HIP C++ source"
+    (let [m 32 k 64 n 32
+          p0 (uop/uop-param 0 :f32 [m k])
+          p1 (uop/uop-param 1 :f32 [k n])
+          p2 (uop/uop-param 2 :f32 [m 1])
+          e0 (uop/uop-expand (uop/uop-reshape p0 [m 1 k]) [m n k])
+          e1 (-> p1
+                 (uop/uop-permute [1 0])
+                 (uop/uop-reshape [1 n k])
+                 (uop/uop-expand [m n k]))
+          eps-const (uop/uop-const :f32 1e-5 [m 1])
+          var-eps (uop/uop-alu :uop/add p2 eps-const)
+          rstd (uop/uop-alu :uop/recip (uop/uop-alu :uop/sqrt var-eps))
+          rstd-bcast (uop/uop-expand (uop/uop-reshape rstd [m 1 1]) [m n k])
+          normed (uop/uop-alu :uop/mul e0 rstd-bcast)
+          prod (uop/uop-alu :uop/mul normed e1)
+          red (uop/uop-reshape (uop/uop-reduce prod :add [2] false) [m n])
+          rk (rangeify/rangeify-kernel red {:out-slot 3})
+          opt-k (opt/optimize-kernel {:name "k_fused_rmsnorm_matmul" :rangeified rk} {:target :rocm})
+          hip-prog (render/render-kernel opt-k {:target :rocm})
+          src (:source hip-prog)
+          loop-idx (.indexOf src "for (int rk_")
+          idx-sqrt (.indexOf src "sqrtf")
+          idx-recip (.indexOf src "(1.0f /")]
+      (is (pos? loop-idx))
+      (is (pos? idx-sqrt))
+      (is (pos? idx-recip))
+      (is (< idx-sqrt loop-idx))
+      (is (< idx-recip loop-idx)))))
+
+(defspec prop-fused-rmsnorm-matmul-evaluation-parity
+  25
+  (prop/for-all [m (gen/choose 1 16)
+                 k (gen/choose 2 32)
+                 n (gen/choose 1 16)]
+                (let [a-data (float-array (repeatedly (* m k) #(- (rand 2.0) 1.0)))
+                      b-data (float-array (repeatedly (* k n) #(- (rand 2.0) 1.0)))
+                      s-data (float-array (repeatedly m #(+ 0.1 (rand 2.0))))
+                      p0 (uop/uop-param 0 :f32 [m k])
+                      p1 (uop/uop-param 1 :f32 [k n])
+                      p2 (uop/uop-param 2 :f32 [m 1])
+                      e0 (uop/uop-expand (uop/uop-reshape p0 [m 1 k]) [m n k])
+                      e1 (-> p1
+                             (uop/uop-permute [1 0])
+                             (uop/uop-reshape [1 n k])
+                             (uop/uop-expand [m n k]))
+                      eps-const (uop/uop-const :f32 1e-5 [m 1])
+                      var-eps (uop/uop-alu :uop/add p2 eps-const)
+                      rstd (uop/uop-alu :uop/recip (uop/uop-alu :uop/sqrt var-eps))
+                      rstd-bcast (uop/uop-expand (uop/uop-reshape rstd [m 1 1]) [m n k])
+                      normed (uop/uop-alu :uop/mul e0 rstd-bcast)
+                      prod (uop/uop-alu :uop/mul normed e1)
+                      red (uop/uop-reshape (uop/uop-reduce prod :add [2] false) [m n])
+                      rk (rangeify/rangeify-kernel red {:out-slot 3})
+                      opt-k (opt/optimize-kernel {:name "k_fused_rmsnorm_matmul" :rangeified rk} {:target :rocm})
+                      opt-rk (:rangeified opt-k)
+                      hip-prog (render/render-kernel opt-k {:target :rocm})
+                      src (:source hip-prog)
+                      loop-idx (.indexOf src "for (int rk_")
+                      idx-sqrt (.indexOf src "sqrtf")
+                      idx-recip (.indexOf src "(1.0f /")
+                      ref-out (reference-fused-rms-matmul a-data b-data s-data m k n)
+                      raw-out ^floats (rangeify/eval-rangeified-kernel rk {0 a-data 1 b-data 2 s-data})
+                      opt-out ^floats (rangeify/eval-rangeified-kernel opt-rk {0 a-data 1 b-data 2 s-data})]
+                  (and (pos? loop-idx)
+                       (pos? idx-sqrt)
+                       (pos? idx-recip)
+                       (< idx-sqrt loop-idx)
+                       (< idx-recip loop-idx)
+                       (= (alength raw-out) (alength opt-out))
+                       (every? true?
+                               (map (fn [x y] (< (Math/abs (- (double x) (double y))) 1e-4))
+                                    (seq raw-out)
+                                    (seq opt-out)))
+                       (every? true?
+                               (map (fn [x y] (< (Math/abs (- (double x) (double y))) 1e-4))
+                                    (seq opt-out)
+                                    (seq ref-out)))))))
+
+
 

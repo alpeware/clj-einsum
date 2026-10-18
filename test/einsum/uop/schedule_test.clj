@@ -5,7 +5,9 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
+            [einsum.uop.core :as uop]
             [einsum.uop.lower :as lower]
+            [einsum.uop.rewrite :as rewrite]
             [einsum.uop.schedule :as schedule]))
 
 (defn- close-floats?
@@ -97,3 +99,31 @@
                       sched-out (get res :y)]
                   (and (= 1 (count (:kernels sched)))
                        (close-floats? ref-out sched-out 1e-3)))))
+
+(deftest test-channel-splitting-reshape-not-folded-into-reduction
+  (testing "Channel-splitting reshape [1 16 128] -> [1 16 4 32] is not folded into reduction kernel, and 0 extra kernels emitted when consumed"
+    (let [p0 (uop/uop-param 0 :f32 [1 16 64] :x)
+          p1 (uop/uop-param 1 :f32 [64 128] :w)
+          e0 (uop/uop-expand (uop/uop-reshape p0 [1 16 1 64]) [1 16 128 64])
+          e1 (-> p1
+                 (uop/uop-permute [1 0])
+                 (uop/uop-reshape [1 1 128 64])
+                 (uop/uop-expand [1 16 128 64]))
+          prod (uop/uop-alu :uop/mul e0 e1)
+          red (uop/uop-reshape (uop/uop-reduce prod :add [3] false) [1 16 128])
+          reshaped (uop/uop-reshape red [1 16 4 32])
+          out (rewrite/simplify-uop (uop/uop-alu :uop/neg reshaped))
+          uop-graph {:name "channel_split_test"
+                     :invars [[:x [:tensor [1 16 64] :f32]]
+                              [:w [:tensor [64 128] :f32]]]
+                     :outvars [:out]
+                     :outputs {:out out}}
+          sched (schedule/schedule-graph uop-graph)
+          kernels (:kernels sched)
+          k0 (first kernels)
+          k1 (second kernels)]
+      (is (= [1 16 128] (:out-shape k0)))
+      (is (= 2 (count kernels)))
+      (is (= [1 16 4 32] (:out-shape k1)))
+      (is (= :out (:out-var k1))))))
+

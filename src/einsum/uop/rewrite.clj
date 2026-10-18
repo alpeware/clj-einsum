@@ -284,10 +284,17 @@
 
       ;; 8. Movement Op Canonicalizations
       ;; reshape(reshape(x, s1), s2) -> reshape(x, s2)
+      ;; Preserve intermediate squeeze reshape on :uop/reduce when s2 splits the trailing channel axis
       (= op :uop/reshape)
       (cond
         (= (:shape s0) arg) s0
-        (= :uop/reshape (:op s0)) (uop/uop-reshape (first (:src s0)) arg)
+        (and (= :uop/reshape (:op s0))
+             (not (and (= :uop/reduce (:op (first (:src s0))))
+                       (seq (:shape s0))
+                       (seq arg)
+                       (> (long (last (:shape s0))) 1)
+                       (not= (long (last (:shape s0))) (long (last arg))))))
+        (uop/uop-reshape (first (:src s0)) arg)
         :else node)
 
       ;; permute(permute(x, p1), p2) -> permute(x, compose(p1, p2))
