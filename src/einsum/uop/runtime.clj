@@ -753,8 +753,8 @@
   (let [uop-target (or (:uop-target ctx) :cpu)
         uop-graph (uop-lower/ast->uop-graph name-str in-spec ast out-spec)
         sched (schedule/schedule-graph uop-graph)
-        opt-kernels (mapv #(opt/optimize-kernel % {:target uop-target}) (:kernels sched))
-        rendered-kernels (mapv #(render/render-kernel % {:target uop-target}) opt-kernels)
+        opt-kernels (vec (pmap #(opt/optimize-kernel % {:target uop-target}) (:kernels sched)))
+        rendered-kernels (vec (pmap #(render/render-kernel % {:target uop-target}) opt-kernels))
         unique-kernels (->> rendered-kernels
                             (reduce (fn [[seen acc] rk]
                                       (if (contains? seen (:canonical-fn-name rk))

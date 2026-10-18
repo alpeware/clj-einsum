@@ -877,8 +877,17 @@
                         (when (or (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
                           (profile/with-profile metrics-atom "graph_compilation"
                             (kernels/compile-gemma4-kv-executable session max-seq-len)))))
+          chunked-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
+                                 (if (:chunked-prefill-executable session)
+                                   (:chunked-prefill-executable session)
+                                   (let [prompt-count (count prompt-ids)
+                                         target-chunk-sz (min prompt-count (long (or (:chunk-size (:config session)) 128)))]
+                                     (when (pos? target-chunk-sz)
+                                       (profile/with-profile metrics-atom "graph_compilation"
+                                         (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len target-chunk-sz))))))
           active-session (assoc session
                                 :prefill-executable prefill-exec
+                                :chunked-prefill-executable chunked-prefill-exec
                                 :step-executable step-exec)
           device-weights (binding [profile/*active-trace-spans* trace-spans-atom]
                            (if reuse-weights?

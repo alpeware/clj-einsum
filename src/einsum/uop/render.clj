@@ -125,21 +125,20 @@
          is-2d-prefill? (and (= target :rocm)
                              (not is-2d-gemm?)
                              (:has-group? kernel-entry)
-                             (or (and (== (count out-shape) 3)
-                                      (== 1 (long (first out-shape)))
-                                      (>= (long (nth out-shape 1)) 2)
-                                      (>= (long (nth out-shape 2)) 16))
-                                 (and (== (count out-shape) 2)
-                                      (>= (long (first out-shape)) 2)
-                                      (>= (long (second out-shape)) 16))))
+                             (>= (count out-shape) 2)
+                             (>= (long (last out-shape)) 16)
+                             (let [n (long (last out-shape))
+                                   s (long (quot (long out-size) n))]
+                               (>= s 2)))
          s-dim (cond
                  is-2d-gemm? (long (or (:s-dim kernel-entry)
-                                       (if (== (count out-shape) 3) (nth out-shape 1) (first out-shape))))
-                 is-2d-prefill? (long (if (== (count out-shape) 3) (nth out-shape 1) (first out-shape)))
+                                       (let [n (long (last out-shape))]
+                                         (quot (long out-size) n))))
+                 is-2d-prefill? (long (let [n (long (last out-shape))]
+                                        (quot (long out-size) n)))
                  :else nil)
          n-dim (cond
-                 is-2d-gemm? (long (or (:n-dim kernel-entry) (last out-shape)))
-                 is-2d-prefill? (long (last out-shape))
+                 (or is-2d-gemm? is-2d-prefill?) (long (last out-shape))
                  :else nil)
          grid-n (cond
                   is-2d-gemm? (long (quot (+ n-dim 16 -1) 16))
@@ -243,11 +242,27 @@
                (.put var-names (:id (nth out-ranges 1)) "r_channel"))
 
              (>= n-ranges 3)
-             (do
-               (dotimes [i (- n-ranges 2)]
-                 (.put var-names (:id (nth out-ranges i)) "0"))
-               (.put var-names (:id (nth out-ranges (- n-ranges 2))) "r_token")
-               (.put var-names (:id (nth out-ranges (dec n-ranges))) "r_channel"))))
+             (let [leading-shape (subvec (vec out-shape) 0 (dec n-ranges))
+                   leading-ranges (subvec (vec out-ranges) 0 (dec n-ranges))
+                   strides (rangeify/row-major-strides leading-shape)
+                   total-rows (long (or s-dim (reduce * 1 leading-shape)))]
+               (doseq [[r dim stride] (map vector leading-ranges leading-shape strides)]
+                 (let [d (long dim)
+                       s (long stride)]
+                   (cond
+                     (== 1 d)
+                     (.put var-names (:id r) "0")
+
+                     (== 1 s)
+                     (.put var-names (:id r) (if (== d total-rows)
+                                               "r_token"
+                                               (format "(r_token %% %d)" d)))
+
+                     :else
+                     (.put var-names (:id r) (if (== (* d s) total-rows)
+                                               (format "(r_token / %d)" s)
+                                               (format "((r_token / %d) %% %d)" s d))))))
+               (.put var-names (:id (last out-ranges)) "r_channel"))))
 
          :else
          (let [strides (rangeify/row-major-strides out-shape)]
@@ -420,7 +435,7 @@
                               (str indent "  ")
                               indent)]
            (when (and (= target :rocm) (:has-group? kernel-entry))
-             (.append body-sb (format "%sif (threadIdx.x == 0) {\n" indent)))
+             (.append body-sb (format "%sif (threadIdx.x == 0 && valid_gidx) {\n" indent)))
            (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
              (.append body-sb (format "%sbuf_0[%s] = f32_to_bf16(%s);\n" store-indent out-idx-var final-val-var))
              (.append body-sb (format "%sbuf_0[%s] = %s;\n" store-indent out-idx-var final-val-var)))

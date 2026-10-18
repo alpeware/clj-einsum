@@ -244,6 +244,30 @@
     x
     (uop :uop/cast target-dtype [x] target-dtype (:shape x))))
 
+(defn- broadcast-shapes
+  "Computes broadcasted shape of two shape vectors."
+  [sh1 sh2]
+  (cond
+    (nil? sh1) sh2
+    (nil? sh2) sh1
+    (empty? sh1) sh2
+    (empty? sh2) sh1
+    (= sh1 sh2) sh1
+    :else
+    (let [r1 (count sh1)
+          r2 (count sh2)
+          max-r (max r1 r2)
+          pad1 (into (vec (repeat (- max-r r1) 1)) sh1)
+          pad2 (into (vec (repeat (- max-r r2) 1)) sh2)]
+      (mapv (fn [d1 d2]
+              (let [ld1 (long d1) ld2 (long d2)]
+                (cond
+                  (== ld1 ld2) ld1
+                  (== ld1 1) ld2
+                  (== ld2 1) ld1
+                  :else (max ld1 ld2))))
+            pad1 pad2))))
+
 (defn uop-alu
   "Constructs an elementwise ALU UOp (:uop/add, :uop/mul, :uop/where, etc.)."
   [op & srcs]
@@ -256,7 +280,10 @@
                       (if (= op :uop/where)
                         (:dtype (second src-vec))
                         (:dtype first-src)))
-          out-shape (some :shape src-vec)]
+          non-empty-shapes (keep :shape src-vec)
+          out-shape (if (seq non-empty-shapes)
+                      (reduce broadcast-shapes non-empty-shapes)
+                      [])]
       (uop op out-dtype src-vec nil out-shape))))
 
 (defn uop-reduce
