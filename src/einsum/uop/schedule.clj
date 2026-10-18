@@ -39,24 +39,6 @@
      {}
      nodes)))
 
-(defn- find-foldable-reshape-chain
-  "Given a `:uop/reduce` node, checks if its consumer is a chain of contiguous `:uop/reshape` movement ops
-   that can be folded directly into the reduction kernel's store and output buffer.
-   Returns the vector of `:uop/reshape` nodes in the chain [r1 r2 ... r-last], or nil if none."
-  [red-node consumers output-ids]
-  (when-not (contains? output-ids (:id red-node))
-    (loop [curr red-node
-           chain []]
-      (let [cs (get consumers (:id curr) [])]
-        (if (== 1 (count cs))
-          (let [consumer (first cs)]
-            (if (= (:op consumer) :uop/reshape)
-              (if (contains? output-ids (:id consumer))
-                (conj chain consumer)
-                (recur consumer (conj chain consumer)))
-              (when (seq chain) chain)))
-          (when (seq chain) chain))))))
-
 (defn- param-leaf?
   "Returns true if `node` is an underlying parameter leaf or a pure cast/view directly wrapping a parameter leaf."
   [node]
@@ -66,6 +48,41 @@
     (contains? #{:uop/cast :uop/bitcast} (:op node)) (param-leaf? (first (:src node)))
     (contains? uop/MOVEMENT_OPS (:op node)) (param-leaf? (first (:src node)))
     :else false))
+
+(defn- find-foldable-epilogue-chain
+  "Given a `:uop/reduce` node, checks if its consumer is a chain of contiguous `:uop/reshape` movement ops
+   and elementwise ALU/cast operations that can be folded directly into the reduction kernel's store and output buffer.
+   Returns the vector of nodes in the chain [c1 c2 ... c-last], or nil if none."
+  [red-node consumers output-ids realized-map]
+  (when-not (contains? output-ids (:id red-node))
+    (loop [curr red-node
+           chain []]
+      (let [cs (get consumers (:id curr) [])]
+        (if (== 1 (count cs))
+          (let [consumer (first cs)
+                op (:op consumer)]
+            (cond
+              (= op :uop/reshape)
+              (if (contains? output-ids (:id consumer))
+                (conj chain consumer)
+                (recur consumer (conj chain consumer)))
+
+              (and (or (contains? uop/ALU_OPS op) (= op :uop/cast))
+                   (= (:shape consumer) (:shape curr))
+                   ;; Ensure all other inputs to consumer do not contain an un-realized reduction
+                   (let [other-srcs (remove #(= (:id %) (:id curr)) (:src consumer))]
+                     (every? (fn [s]
+                               (or (contains? realized-map (:id s))
+                                   (param-leaf? s)
+                                   (empty? (filter #(= (:op %) :uop/reduce) (uop/toposort [s])))))
+                             other-srcs)))
+              (if (contains? output-ids (:id consumer))
+                (conj chain consumer)
+                (recur consumer (conj chain consumer)))
+
+              :else
+              (when (seq chain) chain)))
+          (when (seq chain) chain))))))
 
 (defn- should-realize?
   "Determines whether `node` must be materialized into an intermediate `STAGE` buffer:
@@ -143,14 +160,25 @@
                                         node
                                         (uop/uop (:op node) (:dtype node) rewritten-srcs (:arg node) (:shape node)))]
                  (if-let [chain (and (= (:op node) :uop/reduce)
-                                     (find-foldable-reshape-chain node consumers output-ids))]
-                   ;; Fused Reduction + Post-Reduction Reshape Chain
+                                     (find-foldable-epilogue-chain node consumers output-ids realized-map))]
+                   ;; Fused Reduction + Epilogue Chain
                    (let [final-node (last chain)
                          final-id (:id final-node)
                          target-shape (vec (:shape final-node))
-                         folded-root (uop/uop-reshape substituted-node target-shape)
+                         [folded-root _]
+                         (reduce
+                          (fn [[curr-expr prev-node] chain-node]
+                            (let [rewritten-srcs (mapv (fn [src-uop]
+                                                         (if (= (:id src-uop) (:id prev-node))
+                                                           curr-expr
+                                                           (get realized-map (:id src-uop) src-uop)))
+                                                       (:src chain-node))
+                                  next-expr (uop/uop (:op chain-node) (:dtype chain-node) rewritten-srcs (:arg chain-node) (:shape chain-node))]
+                              [next-expr chain-node]))
+                          [substituted-node node]
+                          chain)
                          slot (swap! next-slot inc)
-                         dt (:dtype substituted-node)
+                         dt (:dtype final-node)
                          sz (long (reduce * 1 target-shape))
                          is-out? (contains? output-ids final-id)
                          out-kw (get output-id->kw final-id)
