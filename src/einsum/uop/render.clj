@@ -14,7 +14,7 @@
 
 (defn- dtype->c-type [dtype]
   (case dtype
-    (:bool :i1) "int"
+    (:bool :i1) "bool"
     :i8 "signed char"
     :u8 "unsigned char"
     :i16 "short"
