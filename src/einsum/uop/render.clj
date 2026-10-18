@@ -118,7 +118,12 @@
                               1))
          group-sz (long (or (:group-size kernel-entry) 64))
          unroll-factor (long (or (:unroll-factor kernel-entry) 4))
+         is-2d-gemm? (and (= target :rocm)
+                          (or (true? (:gemm-2d? kernel-entry))
+                              (and (= (:local-size kernel-entry) [16 16 1])
+                                   (not (:has-group? kernel-entry)))))
          is-2d-prefill? (and (= target :rocm)
+                             (not is-2d-gemm?)
                              (:has-group? kernel-entry)
                              (or (and (== (count out-shape) 3)
                                       (== 1 (long (first out-shape)))
@@ -127,25 +132,36 @@
                                  (and (== (count out-shape) 2)
                                       (>= (long (first out-shape)) 2)
                                       (>= (long (second out-shape)) 16))))
-         s-dim (when is-2d-prefill?
-                 (long (if (== (count out-shape) 3) (nth out-shape 1) (first out-shape))))
-         n-dim (when is-2d-prefill?
-                 (long (last out-shape)))
-         grid-n (when is-2d-prefill?
-                  (long (quot (+ n-dim local-rows -1) local-rows)))
+         s-dim (cond
+                 is-2d-gemm? (long (or (:s-dim kernel-entry)
+                                       (if (== (count out-shape) 3) (nth out-shape 1) (first out-shape))))
+                 is-2d-prefill? (long (if (== (count out-shape) 3) (nth out-shape 1) (first out-shape)))
+                 :else nil)
+         n-dim (cond
+                 is-2d-gemm? (long (or (:n-dim kernel-entry) (last out-shape)))
+                 is-2d-prefill? (long (last out-shape))
+                 :else nil)
+         grid-n (cond
+                  is-2d-gemm? (long (quot (+ n-dim 16 -1) 16))
+                  is-2d-prefill? (long (quot (+ n-dim local-rows -1) local-rows))
+                  :else nil)
+         grid-m (when is-2d-gemm?
+                  (long (quot (+ s-dim 16 -1) 16)))
          grid-blocks (if (= target :cpu)
                        1
-                       (if is-2d-prefill?
-                         grid-n
-                         (if (:has-group? kernel-entry)
-                           (long (quot (+ (long out-size) local-rows -1) local-rows))
-                           (long (quot (+ (long out-size) local-threads -1) local-threads)))))
-         global-sz (if is-2d-prefill?
-                     [grid-n s-dim 1]
-                     (or (:global-size kernel-entry) [grid-blocks 1 1]))
-         local-sz (if (:has-group? kernel-entry)
-                    [group-sz local-rows 1]
-                    [local-threads 1 1])
+                       (cond
+                         is-2d-gemm? (or (first (:global-size kernel-entry)) grid-n)
+                         is-2d-prefill? grid-n
+                         (:has-group? kernel-entry) (long (quot (+ (long out-size) local-rows -1) local-rows))
+                         :else (long (quot (+ (long out-size) local-threads -1) local-threads))))
+         global-sz (cond
+                     is-2d-gemm? (or (:global-size kernel-entry) [grid-n grid-m 1])
+                     is-2d-prefill? [grid-n s-dim 1]
+                     :else (or (:global-size kernel-entry) [grid-blocks 1 1]))
+         local-sz (cond
+                    is-2d-gemm? [16 16 1]
+                    (:has-group? kernel-entry) [group-sz local-rows 1]
+                    :else [local-threads 1 1])
 
          body-sb (StringBuilder.)
          var-names (java.util.HashMap.)
@@ -174,40 +190,51 @@
 
      ;; 3. Bind Output Loop Coordinates
      (if (= target :rocm)
-       (if is-2d-prefill?
+       (cond
+         is-2d-gemm?
+         (do
+           (.append body-sb "  int r_token = (int)(blockIdx.y * 16 + threadIdx.y);\n")
+           (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
+           (.append body-sb (format "  if (r_token >= %d || r_channel >= %d) return;\n" s-dim n-dim))
+           (.append body-sb (format "  int gidx = r_token * %d + r_channel;\n" n-dim)))
+
+         is-2d-prefill?
          (let [lds-size (* local-rows group-sz)]
            (.append body-sb (format "  __shared__ float lds[%d];\n" (long lds-size)))
-           (.append body-sb "  int r_token = (int)blockIdx.y;
-")
+           (.append body-sb "  int r_token = (int)blockIdx.y;\n")
            (.append body-sb (format "  if (r_token >= %d) return;\n" s-dim))
            (.append body-sb (format "  int r_channel = (int)(blockIdx.x * %d + threadIdx.y);\n" local-rows))
            (.append body-sb (format "  bool valid_gidx = (r_channel < %d);\n" n-dim))
            (.append body-sb (format "  int lds_offset = (int)threadIdx.y * %d;\n" group-sz))
            (.append body-sb (format "  int gidx = r_token * %d + r_channel;\n" n-dim)))
-         (if (:has-group? kernel-entry)
-           (let [lds-size (* local-rows group-sz)]
-             (.append body-sb (format "  __shared__ float lds[%d];\n" (long lds-size)))
-             (if (> local-rows 1)
-               (do
-                 (.append body-sb (format "  if ((int)(blockIdx.x * %d) >= %d) return;\n" local-rows (long out-size)))
-                 (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.y);\n" local-rows))
-                 (.append body-sb (format "  bool valid_gidx = (gidx < %d);\n" (long out-size)))
-                 (.append body-sb (format "  int lds_offset = (int)threadIdx.y * %d;\n" group-sz)))
-               (do
-                 (.append body-sb "  int gidx = (int)blockIdx.x;\n")
-                 (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size)))
-                 (.append body-sb "  bool valid_gidx = true;\n")
-                 (.append body-sb "  int lds_offset = 0;\n"))))
-           (do
-             (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.x);\n" local-threads))
-             (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size))))))
+
+         (:has-group? kernel-entry)
+         (let [lds-size (* local-rows group-sz)]
+           (.append body-sb (format "  __shared__ float lds[%d];\n" (long lds-size)))
+           (if (> local-rows 1)
+             (do
+               (.append body-sb (format "  if ((int)(blockIdx.x * %d) >= %d) return;\n" local-rows (long out-size)))
+               (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.y);\n" local-rows))
+               (.append body-sb (format "  bool valid_gidx = (gidx < %d);\n" (long out-size)))
+               (.append body-sb (format "  int lds_offset = (int)threadIdx.y * %d;\n" group-sz)))
+             (do
+               (.append body-sb "  int gidx = (int)blockIdx.x;\n")
+               (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size)))
+               (.append body-sb "  bool valid_gidx = true;\n")
+               (.append body-sb "  int lds_offset = 0;\n"))))
+
+         :else
+         (do
+           (.append body-sb (format "  int gidx = (int)(blockIdx.x * %d + threadIdx.x);\n" local-threads))
+           (.append body-sb (format "  if (gidx >= %d) return;\n" (long out-size)))))
        (do
          (when (>= (long out-size) 256)
            (.append body-sb "  #pragma omp parallel for schedule(static)\n"))
          (.append body-sb (format "  for (int gidx = 0; gidx < %d; ++gidx) {\n" (long out-size)))))
 
      (let [indent (if (= target :rocm) "  " "    ")]
-       (if is-2d-prefill?
+       (cond
+         (or is-2d-gemm? is-2d-prefill?)
          (if (== (count out-shape) 3)
            (do
              (.put var-names (:id (nth out-ranges 0)) "0")
@@ -216,6 +243,8 @@
            (do
              (.put var-names (:id (nth out-ranges 0)) "r_token")
              (.put var-names (:id (nth out-ranges 1)) "r_channel")))
+
+         :else
          (let [strides (rangeify/row-major-strides out-shape)]
            (doseq [[idx [r dim stride]] (map-indexed vector (map vector out-ranges out-shape strides))]
              (when (= :uop/range (:op r))
@@ -412,7 +441,12 @@
            canonical-fn-name (str "uop_fn_" k-hash)
            header-str (if (= target :rocm)
                         (str "// Generated by clj-einsum UOp HIPRenderer (gfx1100)\n"
-                             "#ifndef INFINITY\n#define INFINITY (1.0f/0.0f)\n#endif\n"
+                             "#ifndef INFINITY\n#define INFINITY (1.0f/0.0f)\n#endif\n\n"
+                             "typedef short __attribute__((ext_vector_type(16))) short16;\n"
+                             "typedef float __attribute__((ext_vector_type(8))) float8;\n\n"
+                             "static inline __device__ float8 rdna3_wmma_bf16_16x16x16(short16 a, short16 b, float8 c) {\n"
+                             "  return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, b, c);\n"
+                             "}\n\n"
                              "static inline __device__ __host__ float bf16_to_f32(unsigned short x) {\n"
                              "  union { unsigned int u; float f; } v;\n"
                              "  v.u = ((unsigned int)x) << 16;\n"

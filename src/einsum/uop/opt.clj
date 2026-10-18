@@ -105,7 +105,14 @@
                    m-dim (if (> num-out 1) (first eff-out) 1)
                    n-dim (last eff-out)]
                (cond
-                 ;; Prefill GEMM (M >= 2, N >= 16, K >= 64)
+                 ;; 2D GEMM (M >= 16, N >= 16)
+                 (and (:has-reduce? sig)
+                      (>= num-out 2)
+                      (>= m-dim 16)
+                      (>= n-dim 16))
+                 (get catalog :gemma4-gemm)
+
+                 ;; Short-batch Prefill GEMM (2 <= M < 16, N >= 16, K >= 64)
                  (and (:has-reduce? sig)
                       (>= num-out 2)
                       (>= m-dim 2)
@@ -120,13 +127,6 @@
                           (== 1 (long (or (:out-size ke) (:out-size sig) 1))))
                       (>= k-dim 64))
                  (get catalog :gemma4-rmsnorm)
-
-                 ;; 2D GEMM (M >= 16, N >= 16)
-                 (and (:has-reduce? sig)
-                      (>= num-out 2)
-                      (>= m-dim 16)
-                      (>= n-dim 16))
-                 (get catalog :gemma4-gemm)
 
                  ;; GEMV (M == 1, N >= 64, K >= 64)
                  (and (:has-reduce? sig)
@@ -242,16 +242,17 @@
            (>= (first out-shape) 16)
            (>= (last out-shape) 16)
            (>= (long (or (first red-shape) 0)) 16))
-      (let [m (first out-shape)
-            n (last out-shape)
-            tile-m 64
-            tile-n 64
-            grid-x (long (quot (+ m tile-m -1) tile-m))
-            grid-y (long (quot (+ n tile-n -1) tile-n))]
+      (let [m (long (first out-shape))
+            n (long (last out-shape))
+            grid-m (max 1 (long (quot (+ m 16 -1) 16)))
+            grid-n (max 1 (long (quot (+ n 16 -1) 16)))]
         (assoc ke
                :target :rocm
+               :gemm-2d? true
+               :s-dim m
+               :n-dim n
                :unroll-factor 4
-               :global-size [grid-x grid-y 1]
+               :global-size [grid-n grid-m 1]
                :local-size [16 16 1]
                :opts [{:op :local :axis 0 :amount 16}
                       {:op :local :axis 1 :amount 16}
@@ -311,18 +312,31 @@
        (if-let [recipe (lookup-catalog kernel-entry)]
          (let [base-ke (assoc kernel-entry :target :rocm)]
            (if (and (:local-size recipe) (:opts recipe))
-             (let [group-sz (or (:amount (first (filter #(= (:op %) :group) (:opts recipe)))) 64)
+             (let [has-group? (boolean (some #(= (:op %) :group) (:opts recipe)))
+                   group-sz (or (:amount (first (filter #(= (:op %) :group) (:opts recipe)))) 64)
                    local-rows (or (:amount (first (filter #(= (:op %) :local) (:opts recipe)))) 1)
                    unroll-factor (or (:amount (first (filter #(= (:op %) :unroll) (:opts recipe)))) 4)
                    out-size (long (or (:out-size base-ke) 1))
+                   rk (or (:rangeified base-ke) base-ke)
+                   out-shape (or (:out-shape rk) (:axes base-ke) [out-size])
+                   eff-out (non-singleton-dims out-shape)
+                   m (if (> (count eff-out) 1) (long (first eff-out)) 1)
+                   n (long (last eff-out))
+                   is-2d-gemm? (and (= (:local-size recipe) [16 16 1])
+                                    (not has-group?))
+                   grid-m (max 1 (long (quot (+ m 16 -1) 16)))
+                   grid-n (max 1 (long (quot (+ n 16 -1) 16)))
                    grid-blocks (max 1 (quot (+ out-size local-rows -1) local-rows))]
                (assoc base-ke
-                      :has-group? (boolean (some #(= (:op %) :group) (:opts recipe)))
+                      :gemm-2d? is-2d-gemm?
+                      :s-dim (when is-2d-gemm? m)
+                      :n-dim (when is-2d-gemm? n)
+                      :has-group? has-group?
                       :group-size group-sz
                       :local-rows local-rows
                       :unroll-factor unroll-factor
                       :local-size (:local-size recipe)
-                      :global-size [grid-blocks 1 1]
+                      :global-size (if is-2d-gemm? [grid-n grid-m 1] [grid-blocks 1 1])
                       :opts (:opts recipe)))
              (hand-coded-optimizations kernel-entry opts)))
          (hand-coded-optimizations kernel-entry opts))

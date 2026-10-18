@@ -143,8 +143,8 @@
                       (< (Math/abs (- (double f) (double f-back))) (* (Math/abs (double f)) 0.01))))))
 
 (deftest test-render-2d-prefill-gemm
-  (testing "2D prefill GEMM kernel renders 2D grid and token/channel coordinate bindings"
-    (let [invars [[:A [:tensor [1 16 128] :f32]]
+  (testing "2D prefill GEMM kernel renders 2D grid and token/channel coordinate bindings for short-batch"
+    (let [invars [[:A [:tensor [1 4 128] :f32]]
                   [:B [:tensor [256 128] :f32]]]
           ast [:= [:C :b :p :d] [:A :b :p :k] [:B :d :k]]
           uop-graph (uop-lower/ast->uop-graph "prefill_gemm" invars ast [:C])
@@ -156,10 +156,66 @@
       (is (true? (:has-group? opt-k0)))
       (is (vector? (:global-size hip-prog)))
       (is (vector? (:local-size hip-prog)))
-      ;; When 2D prefill GEMM is active, local-size has group-size along K and local-rows along N
+      ;; When 2D short-batch prefill GEMM is active, local-size has group-size along K and local-rows along N
       (is (= 64 (first (:local-size hip-prog))))
       (is (= 4 (second (:local-size hip-prog))))
       ;; Source must contain shared memory LDS declaration and synchronization
       (is (str/includes? (:source hip-prog) "__shared__"))
       (is (str/includes? (:source hip-prog) "__syncthreads()")))))
+
+(deftest test-render-2d-tiled-gemm
+  (testing "2D tiled GEMM kernel (M >= 16, N >= 16) renders 16x16 local geometry, direct token/channel coordinates, and WMMA intrinsic header"
+    (let [invars [[:A [:tensor [1 16 128] :f32]]
+                  [:B [:tensor [256 128] :f32]]]
+          ast [:= [:C :b :p :d] [:A :b :p :k] [:B :d :k]]
+          uop-graph (uop-lower/ast->uop-graph "tiled_gemm" invars ast [:C])
+          sched (schedule/schedule-graph uop-graph)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:target :rocm})
+          hip-prog (render/render-kernel opt-k0 {:target :rocm})]
+      (is (string? (:source hip-prog)))
+      (is (true? (:gemm-2d? opt-k0)))
+      (is (false? (:has-group? opt-k0)))
+      (is (= [16 16 1] (:local-size hip-prog)))
+      (is (= [16 1 1] (:global-size hip-prog)))
+      ;; Direct coordinate bindings (zero div/mod in kernel preamble)
+      (is (str/includes? (:source hip-prog) "int r_token = (int)(blockIdx.y * 16 + threadIdx.y);"))
+      (is (str/includes? (:source hip-prog) "int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);"))
+      (is (str/includes? (:source hip-prog) "if (r_token >= 16 || r_channel >= 256) return;"))
+      ;; WMMA intrinsic in ROCm header
+      (is (str/includes? (:source hip-prog) "rdna3_wmma_bf16_16x16x16"))
+      ;; Zero LDS overhead
+      (is (not (str/includes? (:source hip-prog) "__syncthreads()"))))))
+
+(defspec prop-2d-tiled-gemm-invariants
+  30
+  (prop/for-all [m (gen/choose 16 32)
+                 k (gen/choose 16 32)
+                 n (gen/choose 16 32)]
+                (let [a-data (float-array (repeatedly (* m k) #(- (rand 2.0) 1.0)))
+                      b-data (float-array (repeatedly (* k n) #(- (rand 2.0) 1.0)))
+                      p0 (uop/uop-param 0 :f32 [m k])
+                      p1 (uop/uop-param 1 :f32 [k n])
+                      e0 (uop/uop-expand (uop/uop-reshape p0 [m 1 k]) [m n k])
+                      e1 (-> p1
+                             (uop/uop-permute [1 0])
+                             (uop/uop-reshape [1 n k])
+                             (uop/uop-expand [m n k]))
+                      prod (uop/uop-alu :uop/mul e0 e1)
+                      red (uop/uop-reshape (uop/uop-reduce prod :add [2] false) [m n])
+                      rk (rangeify/rangeify-kernel red {:out-slot 2})
+                      opt-k (opt/optimize-kernel {:name "k_gemm2d" :rangeified rk} {:target :rocm})
+                      hip-prog (render/render-kernel opt-k {:target :rocm})
+                      raw-out ^floats (rangeify/eval-rangeified-kernel rk {0 a-data 1 b-data})
+                      opt-out ^floats (rangeify/eval-rangeified-kernel (:rangeified opt-k) {0 a-data 1 b-data})]
+                  (and (true? (:gemm-2d? opt-k))
+                       (= [16 16 1] (:local-size hip-prog))
+                       (str/includes? (:source hip-prog) "int r_token = (int)(blockIdx.y * 16 + threadIdx.y);")
+                       (str/includes? (:source hip-prog) "int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);")
+                       (= (alength raw-out) (alength opt-out))
+                       (every? true?
+                               (map (fn [x y] (< (Math/abs (- (double x) (double y))) 1e-4))
+                                    (seq raw-out)
+                                    (seq opt-out)))))))
+
 
