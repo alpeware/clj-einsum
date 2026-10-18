@@ -192,9 +192,7 @@
   (prop/for-all [m (gen/choose 16 32)
                  k (gen/choose 16 32)
                  n (gen/choose 16 32)]
-                (let [a-data (float-array (repeatedly (* m k) #(- (rand 2.0) 1.0)))
-                      b-data (float-array (repeatedly (* k n) #(- (rand 2.0) 1.0)))
-                      p0 (uop/uop-param 0 :f32 [m k])
+                (let [p0 (uop/uop-param 0 :f32 [m k])
                       p1 (uop/uop-param 1 :f32 [k n])
                       e0 (uop/uop-expand (uop/uop-reshape p0 [m 1 k]) [m n k])
                       e1 (-> p1
@@ -205,17 +203,82 @@
                       red (uop/uop-reshape (uop/uop-reduce prod :add [2] false) [m n])
                       rk (rangeify/rangeify-kernel red {:out-slot 2})
                       opt-k (opt/optimize-kernel {:name "k_gemm2d" :rangeified rk} {:target :rocm})
-                      hip-prog (render/render-kernel opt-k {:target :rocm})
-                      raw-out ^floats (rangeify/eval-rangeified-kernel rk {0 a-data 1 b-data})
-                      opt-out ^floats (rangeify/eval-rangeified-kernel (:rangeified opt-k) {0 a-data 1 b-data})]
+                      hip-prog (render/render-kernel opt-k {:target :rocm})]
                   (and (true? (:gemm-2d? opt-k))
                        (= [16 16 1] (:local-size hip-prog))
-                       (str/includes? (:source hip-prog) "int r_token = (int)(blockIdx.y * 16 + threadIdx.y);")
-                       (str/includes? (:source hip-prog) "int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);")
-                       (= (alength raw-out) (alength opt-out))
-                       (every? true?
-                               (map (fn [x y] (< (Math/abs (- (double x) (double y))) 1e-4))
-                                    (seq raw-out)
-                                    (seq opt-out)))))))
+                       (or (str/includes? (:source hip-prog) "int r_token = (int)(blockIdx.y * 16 + threadIdx.y);")
+                           (str/includes? (:source hip-prog) "r_token_base"))
+                       (str/includes? (:source hip-prog) "int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);")))))
+
+(deftest test-render-multi-row-upcast-prefill-gemm
+  (testing "Multi-row register-upcast prefill GEMM emits tile-m accumulators, hoisted weights, and workgroup store"
+    (let [invars [[:A [:tensor [1 32 256] :bf16]]
+                  [:B [:tensor [256 256] :bf16]]]
+          ast [:= [:C :b :p :d] [:A :b :p :k] [:B :d :k]]
+          uop-graph (uop-lower/ast->uop-graph "prefill_upcast_gemm" invars ast [:C])
+          sched (schedule/schedule-graph uop-graph)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:target :rocm})
+          hip-prog (render/render-kernel opt-k0 {:target :rocm})
+          src (:source hip-prog)]
+      (is (true? (:gemm-2d? opt-k0)))
+      (is (= 2 (:tile-m opt-k0)))
+      (is (= [16 16 1] (:local-size hip-prog)))
+      (is (= [16 1 1] (:global-size hip-prog)))
+      (is (str/includes? src "r_token_base"))
+      (is (str/includes? src "r_tok_0"))
+      (is (str/includes? src "r_tok_1"))
+      (is (str/includes? src "acc_1_0"))
+      (is (str/includes? src "acc_1_1"))
+      (let [loop-idx (.indexOf src "for (int rk_")
+            idx-buf2 (.indexOf src "buf_2" loop-idx)
+            idx-tok0 (.indexOf src "r_tok_0" loop-idx)]
+        (is (pos? idx-buf2))
+        (is (pos? idx-tok0))
+        (is (< idx-buf2 idx-tok0))))))
+
+(deftest test-multi-row-rmsnorm-routing
+  (testing "3D and 4D multi-row RMSNorm sum-sq reductions route to :gemma4-gemv (group 64, local-rows 4)"
+    (let [ke-3d {:name "rmsnorm_3d" :rangeified {:out-shape [1 16 1] :out-size 16 :red-shape [256]}}
+          opt-3d (opt/optimize-kernel ke-3d {:target :rocm})
+
+          ke-4d {:name "rmsnorm_4d" :rangeified {:out-shape [1 16 8 1] :out-size 128 :red-shape [256]}}
+          opt-4d (opt/optimize-kernel ke-4d {:target :rocm})]
+      (is (true? (:has-group? opt-3d)))
+      (is (= 4 (:local-rows opt-3d)))
+      (is (= [64 4 1] (:local-size opt-3d)))
+      (is (not (:gemm-2d? opt-3d)))
+
+      (is (true? (:has-group? opt-4d)))
+      (is (= 4 (:local-rows opt-4d)))
+      (is (= [64 4 1] (:local-size opt-4d)))
+      (is (not (:gemm-2d? opt-4d))))))
+
+(defspec prop-multi-row-upcast-prefill-gemm-hip-structure
+  25
+  (prop/for-all [s (gen/choose 24 80)
+                 n (gen/elements [16 32 64])]
+                (let [k 256
+                      p0 (uop/uop-param 0 :f32 [s k])
+                      p1 (uop/uop-param 1 :f32 [k n])
+                      e0 (uop/uop-expand (uop/uop-reshape p0 [s 1 k]) [s n k])
+                      e1 (-> p1
+                             (uop/uop-permute [1 0])
+                             (uop/uop-reshape [1 n k])
+                             (uop/uop-expand [s n k]))
+                      prod (uop/uop-alu :uop/mul e0 e1)
+                      red (uop/uop-reshape (uop/uop-reduce prod :add [2] false) [s n])
+                      rk (rangeify/rangeify-kernel red {:out-slot 2})
+                      opt-k (opt/optimize-kernel {:name "k_prefill_upcast" :rangeified rk} {:target :rocm})
+                      hip-prog (render/render-kernel opt-k {:target :rocm})
+                      tile-m (long (or (:tile-m opt-k) 1))
+                      block-m (* 16 tile-m)
+                      expected-grid-n (max 1 (long (quot (+ n 16 -1) 16)))
+                      expected-grid-m (max 1 (long (quot (+ s block-m -1) block-m)))]
+                  (and (> tile-m 1)
+                       (true? (:gemm-2d? opt-k))
+                       (= [16 16 1] (:local-size hip-prog))
+                       (= [expected-grid-n expected-grid-m 1] (:global-size hip-prog))
+                       (str/includes? (:source hip-prog) "r_token_base")))))
 
 

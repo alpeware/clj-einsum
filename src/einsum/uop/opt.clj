@@ -70,10 +70,12 @@
                          (if (seq rs) rs (extract-reduction-shape rk))))
         has-red? (or (true? (:has-reduce? ke)) (seq red-shape) (has-reduce-axis? rk))
         eff-out (non-singleton-dims out-shape)
-        eff-red (non-singleton-dims red-shape)]
-    {:has-reduce? (boolean has-red?)
-     :out-shape eff-out
-     :red-shape eff-red}))
+        eff-red (non-singleton-dims red-shape)
+        row-reduce? (and (> (count out-shape) 1) (== 1 (long (last out-shape))))]
+    (cond-> {:has-reduce? (boolean has-red?)
+             :out-shape eff-out
+             :red-shape eff-red}
+      row-reduce? (assoc :row-reduce? true))))
 
 (defn load-rdna3-catalog
   "Loads the pre-populated RDNA3 beam catalog `resources/uop/rdna3_beam_catalog.edn`."
@@ -96,6 +98,9 @@
      (let [sig (if (and (map? ke) (or (contains? ke :rangeified) (contains? ke :axes) (contains? ke :out-shape)))
                  (kernel-signature ke)
                  ke)
+           raw-out-shape (or (:out-shape (:rangeified ke)) (:out-shape ke) (:axes ke) [])
+           row-reduce? (or (true? (:row-reduce? sig))
+                           (and (> (count raw-out-shape) 1) (== 1 (long (last raw-out-shape)))))
            eff-out (if (map? sig) (:out-shape sig) (non-singleton-dims (or (:out-shape ke) [])))
            eff-red (if (map? sig) (:red-shape sig) (non-singleton-dims (or (:red-shape ke) [])))]
        (or (get catalog sig)
@@ -105,29 +110,35 @@
                    m-dim (if (> num-out 1) (first eff-out) 1)
                    n-dim (last eff-out)]
                (cond
-                 ;; 2D GEMM (M >= 16, N >= 16)
+                 ;; Single-row RMSNorm reduction (out-size == 1)
                  (and (:has-reduce? sig)
+                      (>= k-dim 64)
+                      (or (= [1] eff-out)
+                          (== 1 (long (or (:out-size ke) (:out-size (:rangeified ke)) (:out-size sig) (reduce * 1 eff-out))))))
+                 (get catalog :gemma4-rmsnorm)
+
+                 ;; Multi-row RMSNorm / Softmax reduction (keep_dims trailing 1 with out-size > 1)
+                 (and (:has-reduce? sig)
+                      row-reduce?
+                      (>= k-dim 64))
+                 (get catalog :gemma4-gemv)
+
+                 ;; 2D Matmul / large contractions (M >= 16, N >= 16)
+                 (and (:has-reduce? sig)
+                      (not row-reduce?)
                       (>= num-out 2)
                       (>= m-dim 16)
                       (>= n-dim 16))
                  (get catalog :gemma4-gemm)
 
-                 ;; Short-batch Prefill GEMM (2 <= M < 16, N >= 16, K >= 64)
+                 ;; Short-batch prefill GEMM (2 <= M <= 15, N >= 16, K >= 64)
                  (and (:has-reduce? sig)
+                      (not row-reduce?)
                       (>= num-out 2)
-                      (>= m-dim 2)
+                      (<= 2 m-dim 15)
                       (>= n-dim 16)
                       (>= k-dim 64))
-                 (or (get catalog :gemma4-prefill-gemm)
-                     (get catalog :gemma4-gemm))
-
-                 ;; RMSNorm / 1-row reduction
-                 (and (:has-reduce? sig)
-                      (or (= [1] eff-out)
-                          (== 1 (long (or (:out-size ke) (:out-size sig) 1))))
-                      (>= k-dim 64))
-                 (get catalog :gemma4-rmsnorm)
-
+                 (get catalog :gemma4-prefill-gemm)
                  ;; GEMV (M == 1, N >= 64, K >= 64)
                  (and (:has-reduce? sig)
                       (or (= num-out 1) (== m-dim 1))
@@ -225,7 +236,8 @@
         out-shape (or (:out-shape rk) (:axes ke) [out-size])
         red-shape (let [rs (or (:red-shape rk) (:red-axes ke))]
                     (if (seq rs) rs (extract-reduction-shape rk)))
-        has-red? (or (true? (:has-reduce? ke)) (seq red-shape) (has-reduce-axis? rk))]
+        has-red? (or (true? (:has-reduce? ke)) (seq red-shape) (has-reduce-axis? rk))
+        row-reduce? (and (> (count out-shape) 1) (== 1 (long (last out-shape))))]
     (cond
       (= target :cpu)
       (let [opts [[:omp-parallel 0 1]
@@ -238,19 +250,23 @@
 
       ;; Pattern 1: 2D Matmul (M >= 16, N >= 16, K >= 16)
       (and has-red?
+           (not row-reduce?)
            (>= (count out-shape) 2)
            (>= (first out-shape) 16)
            (>= (last out-shape) 16)
            (>= (long (or (first red-shape) 0)) 16))
       (let [m (long (first out-shape))
             n (long (last out-shape))
-            grid-m (max 1 (long (quot (+ m 16 -1) 16)))
+            tile-m (if (>= m 16) (min 8 (long (quot (+ m 15) 16))) 1)
+            block-m (* 16 tile-m)
+            grid-m (max 1 (long (quot (+ m block-m -1) block-m)))
             grid-n (max 1 (long (quot (+ n 16 -1) 16)))]
         (assoc ke
                :target :rocm
                :gemm-2d? true
                :s-dim m
                :n-dim n
+               :tile-m tile-m
                :unroll-factor 4
                :global-size [grid-n grid-m 1]
                :local-size [16 16 1]
@@ -260,12 +276,12 @@
                       {:op :upcast :axis 1 :amount 4}
                       {:op :unroll :axis 0 :amount 4}]))
 
-      ;; Pattern 2: Cooperative Reduction (GEMV, Prefill GEMM, RMSNorm, Softmax) when has-red? and innermost K >= 64
+      ;; Pattern 2: Cooperative Reduction (GEMV, Short-batch Prefill GEMM, RMSNorm, Softmax) when has-red? and innermost K >= 64
       (and has-red?
            (>= (long (or (last red-shape) (first red-shape) 0)) 64))
       (let [k (long (or (last red-shape) (first red-shape) 64))
             eff-out (non-singleton-dims out-shape)
-            single-row? (or (== out-size 1) (<= out-size 2) (= 1 (long (last eff-out))))
+            single-row? (or (== out-size 1) (<= out-size 2) (and (not row-reduce?) (= 1 (long (last eff-out)))))
             group-size (if single-row?
                          (cond (>= k 256) 256 (>= k 128) 128 :else 64)
                          64)
@@ -312,19 +328,24 @@
        (if-let [recipe (lookup-catalog kernel-entry)]
          (let [base-ke (assoc kernel-entry :target :rocm)]
            (if (and (:local-size recipe) (:opts recipe))
-             (let [has-group? (boolean (some #(= (:op %) :group) (:opts recipe)))
+             (let [rk (or (:rangeified base-ke) base-ke)
+                   out-size (long (or (:out-size base-ke) (:out-size rk) (reduce * 1 (or (:out-shape rk) (:axes base-ke) [1]))))
+                   out-shape (or (:out-shape rk) (:axes base-ke) [out-size])
+                   row-reduce? (and (> (count out-shape) 1) (== 1 (long (last out-shape))))
+                   has-group? (boolean (some #(= (:op %) :group) (:opts recipe)))
                    group-sz (or (:amount (first (filter #(= (:op %) :group) (:opts recipe)))) 64)
                    local-rows (or (:amount (first (filter #(= (:op %) :local) (:opts recipe)))) 1)
                    unroll-factor (or (:amount (first (filter #(= (:op %) :unroll) (:opts recipe)))) 4)
-                   out-size (long (or (:out-size base-ke) 1))
-                   rk (or (:rangeified base-ke) base-ke)
-                   out-shape (or (:out-shape rk) (:axes base-ke) [out-size])
                    n (long (last out-shape))
-                   m (long (quot out-size n))
+                   m (if (and (pos? n) (pos? out-size)) (long (quot out-size n)) 1)
                    is-2d-gemm? (and (= (:local-size recipe) [16 16 1])
                                     (not has-group?))
-                   grid-m (max 1 (long (quot (+ m 16 -1) 16)))
-                   grid-n (max 1 (long (quot (+ n 16 -1) 16)))
+                   tile-m (if (and is-2d-gemm? (not row-reduce?) (>= m 16))
+                            (min 8 (long (quot (+ m 15) 16)))
+                            1)
+                   block-m (* 16 tile-m)
+                   grid-m-gemm (max 1 (long (quot (+ m block-m -1) block-m)))
+                   grid-n-gemm (max 1 (long (quot (+ n 16 -1) 16)))
                    grid-blocks (max 1 (quot (+ out-size local-rows -1) local-rows))]
                (assoc base-ke
                       :gemm-2d? is-2d-gemm?
@@ -335,8 +356,9 @@
                       :local-rows local-rows
                       :unroll-factor unroll-factor
                       :local-size (:local-size recipe)
-                      :global-size (if is-2d-gemm? [grid-n grid-m 1] [grid-blocks 1 1])
-                      :opts (:opts recipe)))
+                      :global-size (if is-2d-gemm? [grid-n-gemm grid-m-gemm 1] [grid-blocks 1 1])
+                      :opts (:opts recipe)
+                      :tile-m tile-m))
              (hand-coded-optimizations kernel-entry opts)))
          (hand-coded-optimizations kernel-entry opts))
        (hand-coded-optimizations kernel-entry opts)))))
