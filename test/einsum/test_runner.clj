@@ -94,6 +94,7 @@
             [einsum.uop.rangeify-test]
             [einsum.uop.render-test]
             [einsum.uop.runtime-test]
+            [einsum.uop.schedule-test]
             [einsum.uop.e2b-integration-test]
             [experiments.gate1-compression.tiered-turbo-kv-test]
             [experiments.gate3-evals.clojure-bench-test]
@@ -149,6 +150,7 @@
    'einsum.uop.rangeify-test
    'einsum.uop.render-test
    'einsum.uop.runtime-test
+   'einsum.uop.schedule-test
    'einsum.uop.e2b-integration-test])
 
 (def logic-namespaces

@@ -25,6 +25,38 @@
      {}
      nodes)))
 
+(defn- build-consumers
+  "Returns a map `{uop-id -> [consumer-node ...]}` across all nodes reachable from `roots`."
+  [roots]
+  (let [nodes (uop/toposort roots)]
+    (reduce
+     (fn [acc node]
+       (reduce
+        (fn [m child]
+          (update m (:id child) (fnil conj []) node))
+        acc
+        (:src node)))
+     {}
+     nodes)))
+
+(defn- find-foldable-reshape-chain
+  "Given a `:uop/reduce` node, checks if its consumer is a chain of contiguous `:uop/reshape` movement ops
+   that can be folded directly into the reduction kernel's store and output buffer.
+   Returns the vector of `:uop/reshape` nodes in the chain [r1 r2 ... r-last], or nil if none."
+  [red-node consumers output-ids]
+  (when-not (contains? output-ids (:id red-node))
+    (loop [curr red-node
+           chain []]
+      (let [cs (get consumers (:id curr) [])]
+        (if (== 1 (count cs))
+          (let [consumer (first cs)]
+            (if (= (:op consumer) :uop/reshape)
+              (if (contains? output-ids (:id consumer))
+                (conj chain consumer)
+                (recur consumer (conj chain consumer)))
+              (when (seq chain) chain)))
+          (when (seq chain) chain))))))
+
 (defn- param-leaf?
   "Returns true if `node` is an underlying parameter leaf or a pure cast/view directly wrapping a parameter leaf."
   [node]
@@ -78,6 +110,7 @@
         output-ids (set (keys output-id->kw))
         all-nodes (uop/toposort out-uops)
         consumer-counts (build-consumer-counts out-uops)
+        consumers (build-consumers out-uops)
 
         ;; Input parameter slots: 0 .. (count invars - 1)
         invar-slots (into {} (map-indexed (fn [idx [k _]] [k idx]) invars))
@@ -100,81 +133,126 @@
         {:keys [kernels buffers node->slot]}
         (reduce
          (fn [{:keys [realized-map kernels buffers node->slot] :as state} node]
-           ;; First, rewrite `node`'s immediate children to substitute any already-realized children with their buffer params
-           (let [rewritten-srcs (mapv #(get realized-map (:id %) %) (:src node))
-                 substituted-node (if (= rewritten-srcs (:src node))
-                                    node
-                                    (uop/uop (:op node) (:dtype node) rewritten-srcs (:arg node) (:shape node)))
-                 id (:id node)]
-             ;; Special case: if an output target is already a `:uop/param` (or pure reshape of a realized buffer)
-             ;; and not yet materialized in its own output slot, or if `should-realize?` holds:
-             (if (and (should-realize? node consumer-counts output-ids)
-                      (not (contains? uop/SOURCE_OPS (:op node))))
-               (let [slot (swap! next-slot inc)
-                     sh (vec (or (:shape substituted-node) []))
-                     dt (:dtype substituted-node)
-                     sz (long (reduce * 1 sh))
-                     is-out? (contains? output-ids id)
-                     out-kw (get output-id->kw id)
-                     rk (rangeify/rangeify-kernel substituted-node
-                                                  {:out-slot slot
-                                                   :axis-counter axis-counter
-                                                   :vconst-base-slot (swap! vconst-base + 100)})
-                     kernel-idx (count kernels)
-                     kernel-entry {:kernel-id kernel-idx
-                                   :name (str name "_k" kernel-idx (when out-kw (str "_" (clojure.core/name out-kw))))
-                                   :out-slot slot
-                                   :out-var out-kw
-                                   :out-shape sh
-                                   :out-dtype dt
-                                   :out-size sz
-                                   :root-uop substituted-node
-                                   :rangeified rk}
-                     buf-param (uop/uop-param slot dt sh (or out-kw (keyword (str "stage_" slot))))
-                     buf-info {:slot slot
-                               :name (or out-kw (keyword (str "stage_" slot)))
-                               :dtype dt
-                               :shape sh
-                               :size sz
-                               :role (if is-out? :output :intermediate)}]
-                 {:realized-map (assoc realized-map id buf-param)
-                  :kernels (conj kernels kernel-entry)
-                  :buffers (assoc buffers slot buf-info)
-                  :node->slot (assoc node->slot id slot)})
-               ;; Not realized here: keep substituted-node in `realized-map` so downstream ops inline it
-               ;; unless it is an output target that is just a pure movement view (e.g. final `:reshape` on an already realized node)
-               (if (contains? output-ids id)
-                 (let [slot (swap! next-slot inc)
-                       sh (vec (or (:shape substituted-node) []))
-                       dt (:dtype substituted-node)
-                       sz (long (reduce * 1 sh))
-                       out-kw (get output-id->kw id)
-                       rk (rangeify/rangeify-kernel substituted-node
-                                                    {:out-slot slot
-                                                     :axis-counter axis-counter
-                                                     :vconst-base-slot (swap! vconst-base + 100)})
-                       kernel-idx (count kernels)
-                       kernel-entry {:kernel-id kernel-idx
-                                     :name (str name "_k" kernel-idx "_" (clojure.core/name out-kw))
-                                     :out-slot slot
-                                     :out-var out-kw
-                                     :out-shape sh
-                                     :out-dtype dt
-                                     :out-size sz
-                                     :root-uop substituted-node
-                                     :rangeified rk}
-                       buf-param (uop/uop-param slot dt sh out-kw)
-                       buf-info {:slot slot
-                                 :name out-kw
-                                 :dtype dt
-                                 :shape sh
-                                 :size sz
-                                 :role :output}]
-                   {:realized-map (assoc realized-map id buf-param)
-                    :kernels (conj kernels kernel-entry)
-                    :buffers (assoc buffers slot buf-info)
-                    :node->slot (assoc node->slot id slot)})
-                 (assoc state :realized-map (assoc realized-map id substituted-node))))))
+           (let [id (:id node)]
+             (if (or (contains? node->slot id)
+                     (contains? realized-map id))
+               state
+               ;; Rewrite `node`'s immediate children to substitute any already-realized children with their buffer params
+               (let [rewritten-srcs (mapv #(get realized-map (:id %) %) (:src node))
+                     substituted-node (if (= rewritten-srcs (:src node))
+                                        node
+                                        (uop/uop (:op node) (:dtype node) rewritten-srcs (:arg node) (:shape node)))]
+                 (if-let [chain (and (= (:op node) :uop/reduce)
+                                     (find-foldable-reshape-chain node consumers output-ids))]
+                   ;; Fused Reduction + Post-Reduction Reshape Chain
+                   (let [final-node (last chain)
+                         final-id (:id final-node)
+                         target-shape (vec (:shape final-node))
+                         folded-root (uop/uop-reshape substituted-node target-shape)
+                         slot (swap! next-slot inc)
+                         dt (:dtype substituted-node)
+                         sz (long (reduce * 1 target-shape))
+                         is-out? (contains? output-ids final-id)
+                         out-kw (get output-id->kw final-id)
+                         rk (rangeify/rangeify-kernel folded-root
+                                                      {:out-slot slot
+                                                       :axis-counter axis-counter
+                                                       :vconst-base-slot (swap! vconst-base + 100)})
+                         kernel-idx (count kernels)
+                         kernel-entry {:kernel-id kernel-idx
+                                       :name (str name "_k" kernel-idx (when out-kw (str "_" (clojure.core/name out-kw))))
+                                       :out-slot slot
+                                       :out-var out-kw
+                                       :out-shape target-shape
+                                       :out-dtype dt
+                                       :out-size sz
+                                       :root-uop folded-root
+                                       :rangeified rk}
+                         buf-param (uop/uop-param slot dt target-shape (or out-kw (keyword (str "stage_" slot))))
+                         buf-info {:slot slot
+                                   :name (or out-kw (keyword (str "stage_" slot)))
+                                   :dtype dt
+                                   :shape target-shape
+                                   :size sz
+                                   :role (if is-out? :output :intermediate)}
+                         node->slot-updates (into {id slot} (map (fn [r] [(:id r) slot]) chain))
+                         realized-updates (into {final-id buf-param
+                                                 id (uop/uop-reshape buf-param (:shape substituted-node))}
+                                                (map (fn [r] [(:id r) (uop/uop-reshape buf-param (:shape r))])
+                                                     (butlast chain)))]
+                     {:realized-map (merge realized-map realized-updates)
+                      :kernels (conj kernels kernel-entry)
+                      :buffers (assoc buffers slot buf-info)
+                      :node->slot (merge node->slot node->slot-updates)})
+
+                   ;; Standard realization boundary selection
+                   (if (and (should-realize? node consumer-counts output-ids)
+                            (not (contains? uop/SOURCE_OPS (:op node))))
+                     (let [slot (swap! next-slot inc)
+                           sh (vec (or (:shape substituted-node) []))
+                           dt (:dtype substituted-node)
+                           sz (long (reduce * 1 sh))
+                           is-out? (contains? output-ids id)
+                           out-kw (get output-id->kw id)
+                           rk (rangeify/rangeify-kernel substituted-node
+                                                        {:out-slot slot
+                                                         :axis-counter axis-counter
+                                                         :vconst-base-slot (swap! vconst-base + 100)})
+                           kernel-idx (count kernels)
+                           kernel-entry {:kernel-id kernel-idx
+                                         :name (str name "_k" kernel-idx (when out-kw (str "_" (clojure.core/name out-kw))))
+                                         :out-slot slot
+                                         :out-var out-kw
+                                         :out-shape sh
+                                         :out-dtype dt
+                                         :out-size sz
+                                         :root-uop substituted-node
+                                         :rangeified rk}
+                           buf-param (uop/uop-param slot dt sh (or out-kw (keyword (str "stage_" slot))))
+                           buf-info {:slot slot
+                                     :name (or out-kw (keyword (str "stage_" slot)))
+                                     :dtype dt
+                                     :shape sh
+                                     :size sz
+                                     :role (if is-out? :output :intermediate)}]
+                       {:realized-map (assoc realized-map id buf-param)
+                        :kernels (conj kernels kernel-entry)
+                        :buffers (assoc buffers slot buf-info)
+                        :node->slot (assoc node->slot id slot)})
+                     ;; Not realized here: keep substituted-node in `realized-map` so downstream ops inline it
+                     ;; unless it is an output target that is just a pure movement view (e.g. final `:reshape` on an already realized node)
+                     (if (contains? output-ids id)
+                       (let [slot (swap! next-slot inc)
+                             sh (vec (or (:shape substituted-node) []))
+                             dt (:dtype substituted-node)
+                             sz (long (reduce * 1 sh))
+                             out-kw (get output-id->kw id)
+                             rk (rangeify/rangeify-kernel substituted-node
+                                                          {:out-slot slot
+                                                           :axis-counter axis-counter
+                                                           :vconst-base-slot (swap! vconst-base + 100)})
+                             kernel-idx (count kernels)
+                             kernel-entry {:kernel-id kernel-idx
+                                           :name (str name "_k" kernel-idx "_" (clojure.core/name out-kw))
+                                           :out-slot slot
+                                           :out-var out-kw
+                                           :out-shape sh
+                                           :out-dtype dt
+                                           :out-size sz
+                                           :root-uop substituted-node
+                                           :rangeified rk}
+                             buf-param (uop/uop-param slot dt sh out-kw)
+                             buf-info {:slot slot
+                                       :name out-kw
+                                       :dtype dt
+                                       :shape sh
+                                       :size sz
+                                       :role :output}]
+                         {:realized-map (assoc realized-map id buf-param)
+                          :kernels (conj kernels kernel-entry)
+                          :buffers (assoc buffers slot buf-info)
+                          :node->slot (assoc node->slot id slot)})
+                       (assoc state :realized-map (assoc realized-map id substituted-node)))))))))
          {:realized-map {}
           :kernels []
           :buffers initial-buffers
