@@ -531,20 +531,24 @@
                  (reset! kv-buffers-atom prefill-kv)
                  [prefill-logits (System/nanoTime)])
 
-               ;; Path C: Chunked prefill (with sequential fallback for tail)
+               ;; Path C: Chunked prefill (with parallel tail chunk or sequential fallback)
                :else
-               (let [target-chunk-sz (min prompt-count (long (or (:chunk-size config) 128)))
+               (let [target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size config) 128)))
                      chunk-exec (or (:chunked-prefill-executable session)
                                     (when (pos? target-chunk-sz)
                                       (kernels/compile-gemma4-chunked-prefill-executable session seq-len target-chunk-sz)))
                      chunk-sz target-chunk-sz
                      num-full-chunks (if (and chunk-exec (pos? chunk-sz)) (quot prompt-count chunk-sz) 0)
                      chunk-end (* num-full-chunks chunk-sz)
-                     exact-chunks? (and (pos? num-full-chunks) (= chunk-end prompt-count))]
+                     exact-chunks? (and (pos? num-full-chunks) (= chunk-end prompt-count))
+                     tail-len (- prompt-count chunk-end)]
                  (when-not quiet
                    (if (pos? num-full-chunks)
-                     (println (format "Chunked prefilling %d prompt tokens into KV-Cache (%d x %d chunks, %d tail tokens)..."
-                                      prompt-count num-full-chunks chunk-sz (- prompt-count chunk-end)))
+                     (if (> tail-len 1)
+                       (println (format "Chunked prefilling %d prompt tokens into KV-Cache (%d x %d chunks + 1 x %d tail chunk)..."
+                                        prompt-count num-full-chunks chunk-sz tail-len))
+                       (println (format "Chunked prefilling %d prompt tokens into KV-Cache (%d x %d chunks, %d tail tokens)..."
+                                        prompt-count num-full-chunks chunk-sz tail-len)))
                      (println (format "Prefilling %d prompt tokens into KV-Cache..." prompt-count))))
                  (let [[post-chunk-logits post-chunk-kv]
                        (if (pos? num-full-chunks)
@@ -578,32 +582,58 @@
                    (reset! kv-buffers-atom post-chunk-kv)
                    (if exact-chunks?
                      [post-chunk-logits (System/nanoTime)]
-                     (let [cur-log (loop [p chunk-end
-                                          cur-logits post-chunk-logits]
-                                     (if (< p prompt-count)
-                                       (let [[new-log new-kv]
-                                             (xla/with-device-arena [step-arena session-arena]
-                                               (let [tok (int (nth clamped-prompt-ids p))
-                                                     _ (aset x-arr 0 tok)
-                                                     _ (aset pos-arr 0 p)
-                                                     x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
-                                                     pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
-                                                     step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                                     outs (xla/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
-                                                     outs-vec (if (vector? outs) outs [outs])
-                                                     nl (first outs-vec)
-                                                     nk (vec (subvec outs-vec 1))]
-                                                 (xla/promote! step-arena session-arena nl)
-                                                 (xla/promote! step-arena session-arena nk)
-                                                 [nl nk]))
-                                             old-kv @kv-buffers-atom]
-                                         (when cur-logits (arena/destroy! session-arena cur-logits))
-                                         (when (seq old-kv)
-                                           (arena/destroy! session-arena old-kv))
-                                         (reset! kv-buffers-atom new-kv)
-                                         (recur (inc p) new-log))
-                                       cur-logits))]
-                       [cur-log (System/nanoTime)])))))
+                     (cond
+                       (> tail-len 1)
+                       (let [tail-exec (or (:tail-prefill-executable session)
+                                           (kernels/compile-gemma4-chunked-prefill-executable session seq-len tail-len))
+                             start-p chunk-end
+                             [tail-log tail-kv]
+                             (xla/with-device-arena [iter-arena session-arena]
+                               (let [tail-toks (int-array tail-len)
+                                     _ (dotimes [ti tail-len]
+                                         (aset tail-toks ti (int (nth clamped-prompt-ids (+ start-p ti)))))
+                                     pos-c (int-array [start-p])
+                                     x-b (xla/device-buffer iter-arena tail-toks [1 tail-len] :i32)
+                                     pos-b (xla/device-buffer iter-arena pos-c [1] :i32)
+                                     step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                                     outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle tail-exec) tail-exec) step-inputs num-outs))
+                                     outs-vec (if (vector? outs) outs [outs])
+                                     nl (first outs-vec)
+                                     nk (vec (subvec outs-vec 1))]
+                                 (xla/promote! iter-arena session-arena nl)
+                                 (xla/promote! iter-arena session-arena nk)
+                                 [nl nk]))
+                             old-kv @kv-buffers-atom]
+                         (when post-chunk-logits (arena/destroy! session-arena post-chunk-logits))
+                         (when (seq old-kv) (arena/destroy! session-arena old-kv))
+                         (reset! kv-buffers-atom tail-kv)
+                         [tail-log (System/nanoTime)])
+
+                       (== tail-len 1)
+                       (let [[new-log new-kv]
+                             (xla/with-device-arena [step-arena session-arena]
+                               (let [tok (int (nth clamped-prompt-ids chunk-end))
+                                     _ (aset x-arr 0 tok)
+                                     _ (aset pos-arr 0 chunk-end)
+                                     x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
+                                     pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
+                                     step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                                     outs (xla/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                     outs-vec (if (vector? outs) outs [outs])
+                                     nl (first outs-vec)
+                                     nk (vec (subvec outs-vec 1))]
+                                 (xla/promote! step-arena session-arena nl)
+                                 (xla/promote! step-arena session-arena nk)
+                                 [nl nk]))
+                             old-kv @kv-buffers-atom]
+                         (when post-chunk-logits (arena/destroy! session-arena post-chunk-logits))
+                         (when (seq old-kv)
+                           (arena/destroy! session-arena old-kv))
+                         (reset! kv-buffers-atom new-kv)
+                         [new-log (System/nanoTime)])
+
+                       :else
+                       [post-chunk-logits (System/nanoTime)])))))
 
              cur-tokens (atom (vec clamped-prompt-ids))
              max-tokens (long (or max-new-tokens 256))]
@@ -877,17 +907,26 @@
                         (when (or (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
                           (profile/with-profile metrics-atom "graph_compilation"
                             (kernels/compile-gemma4-kv-executable session max-seq-len)))))
+          prompt-count (count prompt-ids)
+          target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size (:config session)) 128)))
+          num-full-chunks (if (pos? target-chunk-sz) (quot prompt-count target-chunk-sz) 0)
+          tail-len (- prompt-count (* num-full-chunks target-chunk-sz))
           chunked-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
                                  (if (:chunked-prefill-executable session)
                                    (:chunked-prefill-executable session)
-                                   (let [prompt-count (count prompt-ids)
-                                         target-chunk-sz (min prompt-count (long (or (:chunk-size (:config session)) 128)))]
-                                     (when (pos? target-chunk-sz)
-                                       (profile/with-profile metrics-atom "graph_compilation"
-                                         (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len target-chunk-sz))))))
+                                   (when (pos? target-chunk-sz)
+                                     (profile/with-profile metrics-atom "graph_compilation"
+                                       (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len target-chunk-sz)))))
+          tail-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
+                              (if (:tail-prefill-executable session)
+                                (:tail-prefill-executable session)
+                                (when (and (pos? num-full-chunks) (> tail-len 1))
+                                  (profile/with-profile metrics-atom "graph_compilation"
+                                    (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len tail-len)))))
           active-session (assoc session
                                 :prefill-executable prefill-exec
                                 :chunked-prefill-executable chunked-prefill-exec
+                                :tail-prefill-executable tail-prefill-exec
                                 :step-executable step-exec)
           device-weights (binding [profile/*active-trace-spans* trace-spans-atom]
                            (if reuse-weights?
