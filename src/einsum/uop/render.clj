@@ -235,14 +235,19 @@
      (let [indent (if (= target :rocm) "  " "    ")]
        (cond
          (or is-2d-gemm? is-2d-prefill?)
-         (if (== (count out-shape) 3)
-           (do
-             (.put var-names (:id (nth out-ranges 0)) "0")
-             (.put var-names (:id (nth out-ranges 1)) "r_token")
-             (.put var-names (:id (nth out-ranges 2)) "r_channel"))
-           (do
-             (.put var-names (:id (nth out-ranges 0)) "r_token")
-             (.put var-names (:id (nth out-ranges 1)) "r_channel")))
+         (let [n-ranges (count out-ranges)]
+           (cond
+             (== n-ranges 2)
+             (do
+               (.put var-names (:id (nth out-ranges 0)) "r_token")
+               (.put var-names (:id (nth out-ranges 1)) "r_channel"))
+
+             (>= n-ranges 3)
+             (do
+               (dotimes [i (- n-ranges 2)]
+                 (.put var-names (:id (nth out-ranges i)) "0"))
+               (.put var-names (:id (nth out-ranges (- n-ranges 2))) "r_token")
+               (.put var-names (:id (nth out-ranges (dec n-ranges))) "r_channel"))))
 
          :else
          (let [strides (rangeify/row-major-strides out-shape)]
