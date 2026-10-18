@@ -133,13 +133,14 @@
     (if (>= p-count (dec seq-len))
       clamped-prompt-ids
       (let [t0 (System/nanoTime)
+            uop? (= (:backend ctx) :uop)
             num-layers (long (or (:num-layers config) 35))
             num-kv-shared (long (or (:num-kv-shared-layers config) 0))
             num-unshared (- num-layers num-kv-shared)
             safe-prefill-len (cfg/max-safe-prefill-seq-len config)
             prefill-exec (or prefill-executable
                              (:prefill-executable session)
-                             (when (<= seq-len safe-prefill-len)
+                             (when (and (not uop?) (<= seq-len safe-prefill-len))
                                (kernels/compile-gemma4-prefill-executable session seq-len)))
             step-exec (or (:step-executable session)
                           (kernels/compile-gemma4-kv-executable session seq-len))
@@ -206,7 +207,7 @@
                         cur-kv)))))
 
               ;; Path B: 1-shot parallel prefill
-              (some? prefill-exec)
+              (and (not uop?) (some? prefill-exec))
               (xla/with-device-arena [prefill-arena session-arena]
                 (let [pos-p (int-array [(dec p-count)])
                       in-b (xla/device-buffer prefill-arena in-arr [1 seq-len] :i32)
@@ -223,11 +224,12 @@
               ;; Path C: Chunked prefill (with sequential fallback for tail)
               :else
               (let [initial-kv (kernels/allocate-kv-cache-buffers session seq-len session-arena)
+                    target-chunk-sz (min prefill-limit (long (or (:chunk-size config) 128)))
                     chunk-exec (or (:chunked-prefill-executable session)
-                                   (when (>= prefill-limit 128)
-                                     (kernels/compile-gemma4-chunked-prefill-executable session seq-len 128)))
-                    chunk-sz 128
-                    num-full-chunks (if chunk-exec (quot prefill-limit chunk-sz) 0)
+                                   (when (pos? target-chunk-sz)
+                                     (kernels/compile-gemma4-chunked-prefill-executable session seq-len target-chunk-sz)))
+                    chunk-sz target-chunk-sz
+                    num-full-chunks (if (and chunk-exec (pos? chunk-sz)) (quot prefill-limit chunk-sz) 0)
                     chunk-end (* num-full-chunks chunk-sz)]
                 (when-not quiet
                   (if (pos? num-full-chunks)
@@ -430,6 +432,7 @@
    (run-cached-kv-generation session exec device-weights prompt-ids nil))
   ([{:keys [ctx opts config tokenizer kv-state prefill-executable session-arena] :as session} exec device-weights prompt-ids max-seq-len]
    (let [session-arena (or session-arena (xla/create-arena ctx))
+         uop? (= (:backend ctx) :uop)
          {:keys [max-new-tokens quiet mode]} opts
          is-agent? (= mode :agent)
          seq-len (long (or max-seq-len (:max-seq-len config) 512))
@@ -465,7 +468,7 @@
                       (pos? p-match)
                       (:kv-buffers prior-cache)
 
-                      (and (some? prefill-exec) (<= seq-len (cfg/max-safe-prefill-seq-len config)))
+                      (and (not uop?) (some? prefill-exec) (<= seq-len (cfg/max-safe-prefill-seq-len config)))
                       nil
 
                       :else
@@ -509,7 +512,7 @@
                  [cur-log (System/nanoTime)])
 
                ;; Path B: 1-Shot Parallel Prefill
-               (some? prefill-exec)
+               (and (not uop?) (some? prefill-exec))
                (let [[prefill-logits prefill-kv]
                      (xla/with-device-arena [step-arena session-arena]
                        (let [in-arr (int-array seq-len)
@@ -530,11 +533,12 @@
 
                ;; Path C: Chunked prefill (with sequential fallback for tail)
                :else
-               (let [chunk-exec (or (:chunked-prefill-executable session)
-                                    (when (>= prompt-count 128)
-                                      (kernels/compile-gemma4-chunked-prefill-executable session seq-len 128)))
-                     chunk-sz 128
-                     num-full-chunks (if chunk-exec (quot prompt-count chunk-sz) 0)
+               (let [target-chunk-sz (min prompt-count (long (or (:chunk-size config) 128)))
+                     chunk-exec (or (:chunked-prefill-executable session)
+                                    (when (pos? target-chunk-sz)
+                                      (kernels/compile-gemma4-chunked-prefill-executable session seq-len target-chunk-sz)))
+                     chunk-sz target-chunk-sz
+                     num-full-chunks (if (and chunk-exec (pos? chunk-sz)) (quot prompt-count chunk-sz) 0)
                      chunk-end (* num-full-chunks chunk-sz)
                      exact-chunks? (and (pos? num-full-chunks) (= chunk-end prompt-count))]
                  (when-not quiet
@@ -753,11 +757,13 @@
          exec (if vram-loop?
                 (kernels/compile-in-vram-loop-executable session max-seq-len)
                 (kernels/compile-gemma4-kv-executable session max-seq-len))
+         uop? (= (:backend (:ctx session)) :uop)
          safe-prefill-len (cfg/max-safe-prefill-seq-len (:config session))
-         prefill-exec (when (and (not turboquant?) (<= max-seq-len safe-prefill-len))
+         prefill-exec (when (and (not uop?) (not turboquant?) (<= max-seq-len safe-prefill-len))
                         (kernels/compile-gemma4-prefill-executable session max-seq-len))
-         chunked-prefill-exec (when (>= max-seq-len 256)
-                                (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len 128))
+         chunked-prefill-exec (when (or (>= max-seq-len 256) uop?)
+                                (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len (min max-seq-len 128)))
+
          step-exec (when vram-loop?
                      (kernels/compile-gemma4-kv-executable session max-seq-len))
          _ (when-not (:quiet opts) (println "Pinning Gemma 4 weights in PJRT VRAM..."))
@@ -854,11 +860,12 @@
 
                        :else
                        (kernels/compile-gemma4-kv-executable session max-seq-len)))))
+          uop? (= (:backend (:ctx session)) :uop)
           safe-prefill-len (cfg/max-safe-prefill-seq-len (:config session))
           prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
                          (if (:prefill-executable session)
                            (:prefill-executable session)
-                           (when (and (not (:turboquant-kv? (:config session)))
+                           (when (and (not uop?) (not (:turboquant-kv? (:config session)))
                                       (or (= (or (:method opts) :kv-cache) :kv-cache)
                                           (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
                                       (<= max-seq-len safe-prefill-len))

@@ -175,6 +175,38 @@
             (is (some #(not (zero? %)) (subvec (vec k-out-data) offset (+ offset 32))))
             (is (some #(not (zero? %)) (subvec (vec v-out-data) offset (+ offset 32))))))))))
 
+(deftest test-uop-gemma4-e2b-chunked-prefill-compilation-and-execution
+  (testing "Gemma 4 E2B chunked prefill compiles and executes via UOp backend producing valid logits and updated KV caches"
+    (let [max-seq 8
+          prompt-len 4
+          cfg (make-compact-e2b-config max-seq)
+          ctx (xla/init-backend! :uop-cpu {:quiet? true})
+          session {:ctx ctx :config cfg :opts {:quiet true}}
+          chunk-exec (kernels/compile-gemma4-chunked-prefill-executable session max-seq prompt-len)
+          _ (is (some? chunk-exec))
+          _ (is (true? (or (:uop-executable? chunk-exec) (= (:backend ctx) :uop))))
+          invars (kernels/build-gemma4-kv-invars (assoc cfg :q-len prompt-len :chunk-size prompt-len) max-seq)
+          chunk-inputs (allocate-dummy-invars invars {:x (int-array [2 15 28 42]) :pos (int-array [0])})
+          num-outs 3 ;; logits, k_cache_out_0, v_cache_out_0
+          exec-step (requiring-resolve 'einsum.models.gemma4.runtime/execute-step-executable)
+          outs (exec-step ctx chunk-exec chunk-inputs num-outs)]
+      (is (vector? outs))
+      (is (= 3 (count outs)))
+      (let [[logits-buf k-out-buf v-out-buf] outs
+            vocab-sz (:vocab-size cfg)
+            logits-data (xla/to-host-slice logits-buf 0 vocab-sz vocab-sz)
+            layer-seq-len 4
+            head-dim 32
+            k-out-data (xla/to-host-slice k-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))
+            v-out-data (xla/to-host-slice v-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))]
+        (is (= vocab-sz (alength ^floats logits-data)))
+        (is (some #(not (zero? %)) (seq logits-data)))
+        ;; Rows 0, 1, 2, 3 must have populated KV activations
+        (dotimes [p prompt-len]
+          (let [offset (* p head-dim)]
+            (is (some #(not (zero? %)) (subvec (vec k-out-data) offset (+ offset head-dim))))
+            (is (some #(not (zero? %)) (subvec (vec v-out-data) offset (+ offset head-dim))))))))))
+
 ;; -----------------------------------------------------------------------------
 ;; 5. Greedy Token Generation Parity
 ;; -----------------------------------------------------------------------------
