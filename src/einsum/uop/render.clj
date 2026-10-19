@@ -225,23 +225,15 @@
        :else m))))
 
 (defn optimal-gemm-tile-m
-  "Finds the register tile factor TM in {4, 5, 6, 7, 8} that minimizes total launched
-   token strips `TM * ceil(tiles-16 / TM)` for a given sequence/row dimension `q-dim`.
-   If `tiles-16 <= 8`, returns `(max 1 tiles-16)` directly."
+  "Finds the register tile factor TM in {1..8} that first minimizes the number of
+   weight-streaming workgroup rows `min-grid-m = ceil(tiles-16 / 8)`, and then selects
+   the smallest `TM = ceil(tiles-16 / min-grid-m)` that covers `q-dim` within `min-grid-m` rows."
   ^long [^long q-dim]
   (let [tiles-16 (long (quot (+ q-dim 15) 16))]
     (if (<= tiles-16 8)
       (max 1 tiles-16)
-      (long
-       (second
-        (reduce (fn [[best-strips best-tm] tm]
-                  (let [g (long (quot (+ tiles-16 tm -1) tm))
-                        strips (* tm g)]
-                    (if (<= strips best-strips)
-                      [strips tm]
-                      [best-strips best-tm])))
-                [Long/MAX_VALUE 8]
-                [4 5 6 7 8]))))))
+      (let [min-grid-m (long (quot (+ tiles-16 7) 8))]
+        (long (quot (+ tiles-16 min-grid-m -1) min-grid-m))))))
 
 (defn render-kernel
   "Renders an optimized kernel map (from `einsum.uop.opt/optimize-kernel` or `schedule-graph`)

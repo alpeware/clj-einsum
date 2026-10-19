@@ -523,7 +523,9 @@
     (is (= 4 (render/optimal-gemm-tile-m 64)))
     (is (= 8 (render/optimal-gemm-tile-m 128)))
     (is (= 5 (render/optimal-gemm-tile-m 136)))
+    (is (= 7 (render/optimal-gemm-tile-m 392)))
     (is (= 7 (render/optimal-gemm-tile-m 448)))
+    (is (= 8 (render/optimal-gemm-tile-m 456)))
 
     ;; 2. Construct 2D GEMM graph: M=136, N=256, K=256
     (let [invars [[:A [:tensor [136 256] :f32]]
