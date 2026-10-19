@@ -214,7 +214,7 @@
 (deftest test-render-multi-row-upcast-prefill-gemm
   (testing "Multi-row register-upcast prefill GEMM emits tile-m accumulators, hoisted weights, and workgroup store"
     (let [invars [[:A [:tensor [1 32 256] :bf16]]
-                  [:B [:tensor [256 256] :bf16]]]
+                  [:B [:tensor [32 256] :bf16]]]
           ast [:= [:C :b :p :d] [:A :b :p :k] [:B :d :k]]
           uop-graph (uop-lower/ast->uop-graph "prefill_upcast_gemm" invars ast [:C])
           sched (schedule/schedule-graph uop-graph)
@@ -225,7 +225,7 @@
       (is (true? (:gemm-2d? opt-k0)))
       (is (= 2 (:tile-m opt-k0)))
       (is (= [16 16 1] (:local-size hip-prog)))
-      (is (= [16 1 1] (:global-size hip-prog)))
+      (is (= [2 1 1] (:global-size hip-prog)))
       (is (str/includes? src "__shared__ float s_W[16][17];"))
       (is (str/includes? src "__shared__ float s_X[2][16][17];"))
       (is (str/includes? src "s_W[threadIdx.y][threadIdx.x]"))
@@ -278,7 +278,8 @@
                       hip-prog (render/render-kernel opt-k {:target :rocm})
                       tile-m (long (or (:tile-m opt-k) 1))
                       block-m (* 16 tile-m)
-                      expected-grid-n (max 1 (long (quot (+ n 16 -1) 16)))
+                      block-n (if (>= n 64) 64 16)
+                      expected-grid-n (max 1 (long (quot (+ n block-n -1) block-n)))
                       expected-grid-m (max 1 (long (quot (+ s block-m -1) block-m)))]
                   (and (> tile-m 1)
                        (true? (:gemm-2d? opt-k))
@@ -513,3 +514,52 @@
                                (map (fn [x y] (< (Math/abs (- (double x) (double y))) 1e-4))
                                     (seq raw-out)
                                     (seq opt-out)))))))
+
+(deftest test-2d-lds-gemm-tile-n-4-and-strip-minimization
+  (testing "Strip-minimizing optimal-gemm-tile-m and 2D register tiling (gemm-tile-n = 4) on RDNA3"
+    ;; 1. Check strip-minimization helper properties
+    (is (= 1 (render/optimal-gemm-tile-m 16)))
+    (is (= 2 (render/optimal-gemm-tile-m 32)))
+    (is (= 4 (render/optimal-gemm-tile-m 64)))
+    (is (= 8 (render/optimal-gemm-tile-m 128)))
+    (is (= 5 (render/optimal-gemm-tile-m 136)))
+    (is (= 7 (render/optimal-gemm-tile-m 448)))
+
+    ;; 2. Construct 2D GEMM graph: M=136, N=256, K=256
+    (let [invars [[:A [:tensor [136 256] :f32]]
+                  [:B [:tensor [256 256] :f32]]]
+          ast [:= [:C :p :d] [:A :p :k] [:B :d :k]]
+          uop-graph (uop-lower/ast->uop-graph "gemm_2d_tile_n4" invars ast [:C])
+          sched (schedule/schedule-graph uop-graph)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:target :rocm})
+          hip-prog (render/render-kernel opt-k0 {:target :rocm})
+          src (:source hip-prog)]
+      ;; Verify geometry: tm=5, tn=4 -> grid = [4 2 1], local = [16 16 1]
+      (is (true? (:gemm-2d? opt-k0)))
+      (is (= 5 (:tile-m opt-k0)))
+      (is (= [16 16 1] (:local-size hip-prog)))
+      (is (= [4 2 1] (:global-size hip-prog)))
+
+      ;; Preamble coordinates & shared memory
+      (is (str/includes? src "__shared__ float s_W[4][16][17];"))
+      (is (str/includes? src "__shared__ float s_X[5][16][17];"))
+      (is (str/includes? src "r_channel_0"))
+      (is (str/includes? src "r_channel_3"))
+      (is (str/includes? src "r_channel_w_0"))
+      (is (str/includes? src "r_channel_w_3"))
+
+      ;; FMA register unrolling
+      (is (str/includes? src "float w_reg_0 = s_W[0][threadIdx.x][k_sub];"))
+      (is (str/includes? src "float w_reg_3 = s_W[3][threadIdx.x][k_sub];"))
+      (is (str/includes? src "float x_reg_0 = s_X[0][threadIdx.y][k_sub];"))
+      (is (str/includes? src "float x_reg_4 = s_X[4][threadIdx.y][k_sub];"))
+
+      ;; 2D accumulator grid updates
+      (is (str/includes? src "acc_1_0_0 +="))
+      (is (str/includes? src "acc_1_4_3 +="))
+
+      ;; 4-way output store per tm row
+      (is (str/includes? src "int r_channel = r_channel_0;"))
+      (is (str/includes? src "int r_channel = r_channel_3;"))
+      (is (str/includes? src "buf_0[")))))

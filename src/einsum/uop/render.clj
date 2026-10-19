@@ -224,6 +224,25 @@
 
        :else m))))
 
+(defn optimal-gemm-tile-m
+  "Finds the register tile factor TM in {4, 5, 6, 7, 8} that minimizes total launched
+   token strips `TM * ceil(tiles-16 / TM)` for a given sequence/row dimension `q-dim`.
+   If `tiles-16 <= 8`, returns `(max 1 tiles-16)` directly."
+  ^long [^long q-dim]
+  (let [tiles-16 (long (quot (+ q-dim 15) 16))]
+    (if (<= tiles-16 8)
+      (max 1 tiles-16)
+      (long
+       (second
+        (reduce (fn [[best-strips best-tm] tm]
+                  (let [g (long (quot (+ tiles-16 tm -1) tm))
+                        strips (* tm g)]
+                    (if (<= strips best-strips)
+                      [strips tm]
+                      [best-strips best-tm])))
+                [Long/MAX_VALUE 8]
+                [4 5 6 7 8]))))))
+
 (defn render-kernel
   "Renders an optimized kernel map (from `einsum.uop.opt/optimize-kernel` or `schedule-graph`)
    into a standalone C99 (`:target :cpu`) or HIP C++ (`:target :rocm`) program map:
@@ -304,12 +323,14 @@
                                             loads (filter #(= (:op %) :uop/load)
                                                           (tree-seq #(seq (:src %)) :src body-uop))]
                                         (boolean (some #(not (node-has-token-range? %)) loads))))
+         target-dim (when is-2d-gemm? (if (> batch-heads 1) q-dim s-dim))
+         opt-tm (if (and target-dim (>= (long target-dim) 16))
+                  (optimal-gemm-tile-m (long target-dim))
+                  1)
          raw-gemm-tile-m (if is-2d-gemm?
-                           (long (or (:tile-m kernel-entry)
-                                     (let [target-dim (if (> batch-heads 1) q-dim s-dim)]
-                                       (if (and target-dim (>= target-dim 16))
-                                         (min 8 (long (quot (+ target-dim 15) 16)))
-                                         1))))
+                           (if-let [ke-tm (:tile-m kernel-entry)]
+                             (min (long ke-tm) opt-tm)
+                             opt-tm)
                            1)
          use-gemm-tile? (boolean (and (= target :rocm)
                                       is-2d-gemm?
@@ -338,8 +359,20 @@
 
                                 :else nil)))
          use-lds-gemm? (some? lds-gemm-factors)
+         gemm-k-const (when (and gemm-red-node (seq (rest (:src gemm-red-node))))
+                        (let [b (first (:src (first (rest (:src gemm-red-node)))))]
+                          (when (= :uop/const (:op b)) (long (:arg b)))))
+         gemm-tile-n (if (and use-lds-gemm?
+                              (== 1 batch-heads)
+                              (>= (long n-dim) 64)
+                              (zero? (mod (long n-dim) 64))
+                              gemm-k-const
+                              (>= (long gemm-k-const) 256))
+                       4
+                       1)
+         block-n (* 16 gemm-tile-n)
          grid-n (cond
-                  is-2d-gemm? (long (quot (+ n-dim 16 -1) 16))
+                  is-2d-gemm? (long (quot (+ n-dim block-n -1) block-n))
                   is-2d-prefill? (long (quot (+ n-dim local-rows -1) local-rows))
                   :else nil)
          grid-q (when is-2d-gemm?
@@ -416,24 +449,48 @@
                    (.append body-sb "  int r_tok_0 = r_token_base;\n")
                    (.append body-sb (format "  int r_tok_%d = (raw_token_base + %d < %d) ? (raw_token_base + %d) : r_token_base;\n"
                                             tm (* tm 16) q-dim (* tm 16))))))
-             (do
-               (.append body-sb "  __shared__ float s_W[16][17];\n")
-               (.append body-sb (format "  __shared__ float s_X[%d][16][17];\n" gemm-tile-m))
-               (.append body-sb (format "  int block_token_base = (int)(blockIdx.y * %d);\n" block-m))
-               (.append body-sb "  int block_channel_base = (int)(blockIdx.x * 16);\n")
-               (.append body-sb (format "  if (block_token_base >= %d || block_channel_base >= %d) return;\n"
-                                        s-dim n-dim))
-               (.append body-sb "  int raw_token_base = block_token_base + (int)threadIdx.y;\n")
-               (.append body-sb "  int raw_channel = block_channel_base + (int)threadIdx.x;\n")
-               (.append body-sb "  int raw_channel_w = block_channel_base + (int)threadIdx.y;\n")
-               (.append body-sb (format "  int r_token_base = (raw_token_base < %d) ? raw_token_base : 0;\n" s-dim))
-               (.append body-sb (format "  int r_channel = (raw_channel < %d) ? raw_channel : 0;\n" n-dim))
-               (.append body-sb (format "  int r_channel_w = (raw_channel_w < %d) ? raw_channel_w : 0;\n" n-dim))
-               (dotimes [tm gemm-tile-m]
-                 (if (zero? tm)
-                   (.append body-sb "  int r_tok_0 = r_token_base;\n")
-                   (.append body-sb (format "  int r_tok_%d = (raw_token_base + %d < %d) ? (raw_token_base + %d) : r_token_base;\n"
-                                            tm (* tm 16) s-dim (* tm 16)))))))
+             (if (> gemm-tile-n 1)
+               (do
+                 (.append body-sb (format "  __shared__ float s_W[%d][16][17];\n" gemm-tile-n))
+                 (.append body-sb (format "  __shared__ float s_X[%d][16][17];\n" gemm-tile-m))
+                 (.append body-sb (format "  int block_token_base = (int)(blockIdx.y * %d);\n" block-m))
+                 (.append body-sb (format "  int block_channel_base = (int)(blockIdx.x * %d);\n" block-n))
+                 (.append body-sb (format "  if (block_token_base >= %d || block_channel_base >= %d) return;\n"
+                                          s-dim n-dim))
+                 (.append body-sb "  int raw_token_base = block_token_base + (int)threadIdx.y;\n")
+                 (dotimes [tn gemm-tile-n]
+                   (.append body-sb (format "  int r_channel_%d = block_channel_base + %d + (int)threadIdx.x;\n"
+                                            tn (* tn 16)))
+                   (.append body-sb (format "  int r_channel_w_%d = block_channel_base + %d + (int)threadIdx.y;\n"
+                                            tn (* tn 16))))
+                 (.append body-sb "  int r_channel = r_channel_0;\n")
+                 (.append body-sb "  int r_channel_w = r_channel_w_0;\n")
+                 (.append body-sb "  int raw_channel = r_channel_0;\n")
+                 (.append body-sb "  int raw_channel_w = r_channel_w_0;\n")
+                 (.append body-sb (format "  int r_token_base = (raw_token_base < %d) ? raw_token_base : 0;\n" s-dim))
+                 (dotimes [tm gemm-tile-m]
+                   (if (zero? tm)
+                     (.append body-sb "  int r_tok_0 = r_token_base;\n")
+                     (.append body-sb (format "  int r_tok_%d = (raw_token_base + %d < %d) ? (raw_token_base + %d) : r_token_base;\n"
+                                              tm (* tm 16) s-dim (* tm 16))))))
+               (do
+                 (.append body-sb "  __shared__ float s_W[16][17];\n")
+                 (.append body-sb (format "  __shared__ float s_X[%d][16][17];\n" gemm-tile-m))
+                 (.append body-sb (format "  int block_token_base = (int)(blockIdx.y * %d);\n" block-m))
+                 (.append body-sb "  int block_channel_base = (int)(blockIdx.x * 16);\n")
+                 (.append body-sb (format "  if (block_token_base >= %d || block_channel_base >= %d) return;\n"
+                                          s-dim n-dim))
+                 (.append body-sb "  int raw_token_base = block_token_base + (int)threadIdx.y;\n")
+                 (.append body-sb "  int raw_channel = block_channel_base + (int)threadIdx.x;\n")
+                 (.append body-sb "  int raw_channel_w = block_channel_base + (int)threadIdx.y;\n")
+                 (.append body-sb (format "  int r_token_base = (raw_token_base < %d) ? raw_token_base : 0;\n" s-dim))
+                 (.append body-sb (format "  int r_channel = (raw_channel < %d) ? raw_channel : 0;\n" n-dim))
+                 (.append body-sb (format "  int r_channel_w = (raw_channel_w < %d) ? raw_channel_w : 0;\n" n-dim))
+                 (dotimes [tm gemm-tile-m]
+                   (if (zero? tm)
+                     (.append body-sb "  int r_tok_0 = r_token_base;\n")
+                     (.append body-sb (format "  int r_tok_%d = (raw_token_base + %d < %d) ? (raw_token_base + %d) : r_token_base;\n"
+                                              tm (* tm 16) s-dim (* tm 16))))))))
            (if (> batch-heads 1)
              (if use-gemm-tile?
                (do
@@ -613,10 +670,14 @@
                                                                   (tree-seq #(seq (:src %)) :src uop))))
                              is-gemm-red? (boolean (and use-gemm-tile? (= node gemm-red-node)))
                              is-lds-gemm? (boolean (and use-lds-gemm? (= node gemm-red-node)))]
-                         (if is-gemm-red?
+                         (if (and is-gemm-red? (> gemm-tile-n 1))
                            (dotimes [tm gemm-tile-m]
-                             (.append body-sb (format "%s%s %s_%d = %s;\n" cur-indent c-type acc-name tm init-lit)))
-                           (.append body-sb (format "%s%s %s = %s;\n" cur-indent c-type acc-name init-lit)))
+                             (dotimes [tn gemm-tile-n]
+                               (.append body-sb (format "%s%s %s_%d_%d = %s;\n" cur-indent c-type acc-name tm tn init-lit))))
+                           (if is-gemm-red?
+                             (dotimes [tm gemm-tile-m]
+                               (.append body-sb (format "%s%s %s_%d = %s;\n" cur-indent c-type acc-name tm init-lit)))
+                             (.append body-sb (format "%s%s %s = %s;\n" cur-indent c-type acc-name init-lit))))
                          (when has-guard?
                            (.append body-sb (format "%sif (valid_gidx) {\n" cur-indent)))
 
@@ -629,10 +690,16 @@
                                (emit-expr inv-node cur-indent inner-vars))
 
                               ;; 2. Hoist rk-invariant roots of w-factor into w-base-vars
-                             (let [w-base-vars (doto (java.util.HashMap. inner-vars)
-                                                 (.put chan-range-id "r_channel_w"))]
-                               (doseq [inv-node (find-rk-invariant-roots w-factor node-has-red-range?)]
-                                 (emit-expr inv-node cur-indent w-base-vars))
+                             (let [tn-w-base-vars (if (> gemm-tile-n 1)
+                                                    (mapv (fn [tn]
+                                                            (doto (java.util.HashMap. inner-vars)
+                                                              (.put chan-range-id (format "r_channel_w_%d" tn))))
+                                                          (range gemm-tile-n))
+                                                    [(doto (java.util.HashMap. inner-vars)
+                                                       (.put chan-range-id "r_channel_w"))])]
+                               (doseq [w-vars tn-w-base-vars]
+                                 (doseq [inv-node (find-rk-invariant-roots w-factor node-has-red-range?)]
+                                   (emit-expr inv-node cur-indent w-vars)))
 
                                 ;; 3. Construct tm-base-vars and hoist rk-invariant, token-dependent roots of x-factor
                                (let [tm-base-vars (mapv (fn [tm]
@@ -658,16 +725,22 @@
 
                                     ;; Cooperative load into s_W and s_X
                                    (let [load-indent (if k-aligned? tile-indent (str tile-indent "  "))
-                                         w-scoped-vars (doto (java.util.HashMap. w-base-vars)
-                                                         (.put (:id r-uop) r-var))
                                          x-shared-vars (doto (java.util.HashMap. inner-vars)
                                                          (.put (:id r-uop) r-var))]
                                      (when-not k-aligned?
                                        (.append body-sb (format "%sif (%s < %s) {\n" tile-indent r-var bound-expr)))
 
                                       ;; Load w-factor
-                                     (let [w-val (emit-expr w-factor load-indent w-scoped-vars)]
-                                       (.append body-sb (format "%ss_W[threadIdx.y][threadIdx.x] = %s;\n" load-indent w-val)))
+                                     (if (> gemm-tile-n 1)
+                                       (dotimes [tn gemm-tile-n]
+                                         (let [w-scoped-vars (doto (java.util.HashMap. (nth tn-w-base-vars tn))
+                                                               (.put (:id r-uop) r-var))
+                                               w-val (emit-expr w-factor load-indent w-scoped-vars)]
+                                           (.append body-sb (format "%ss_W[%d][threadIdx.y][threadIdx.x] = %s;\n" load-indent tn w-val))))
+                                       (let [w-scoped-vars (doto (java.util.HashMap. (first tn-w-base-vars))
+                                                             (.put (:id r-uop) r-var))
+                                             w-val (emit-expr w-factor load-indent w-scoped-vars)]
+                                         (.append body-sb (format "%ss_W[threadIdx.y][threadIdx.x] = %s;\n" load-indent w-val))))
 
                                       ;; Hoist token-invariant load roots of x-factor into x-shared-vars
                                      (doseq [inv-node (find-invariant-load-roots x-factor node-has-token-range?)]
@@ -684,7 +757,10 @@
                                      (when-not k-aligned?
                                        (let [else-indent (str tile-indent "  ")]
                                          (.append body-sb (format "%s} else {\n" tile-indent))
-                                         (.append body-sb (format "%ss_W[threadIdx.y][threadIdx.x] = 0.0f;\n" else-indent))
+                                         (if (> gemm-tile-n 1)
+                                           (dotimes [tn gemm-tile-n]
+                                             (.append body-sb (format "%ss_W[%d][threadIdx.y][threadIdx.x] = 0.0f;\n" else-indent tn)))
+                                           (.append body-sb (format "%ss_W[threadIdx.y][threadIdx.x] = 0.0f;\n" else-indent)))
                                          (dotimes [tm gemm-tile-m]
                                            (.append body-sb (format "%ss_X[%d][threadIdx.y][threadIdx.x] = 0.0f;\n" else-indent tm)))
                                          (.append body-sb (format "%s}\n" tile-indent)))))
@@ -696,10 +772,22 @@
                                    (.append body-sb (format "%s#pragma unroll 16\n" tile-indent))
                                    (.append body-sb (format "%sfor (int k_sub = 0; k_sub < 16; ++k_sub) {\n" tile-indent))
                                    (let [fma-indent (str tile-indent "  ")]
-                                     (.append body-sb (format "%sfloat w_reg = s_W[threadIdx.x][k_sub];\n" fma-indent))
-                                     (dotimes [tm gemm-tile-m]
-                                       (.append body-sb (format "%s%s_%d += s_X[%d][threadIdx.y][k_sub] * w_reg;\n"
-                                                                fma-indent acc-name tm tm)))
+                                     (if (> gemm-tile-n 1)
+                                       (do
+                                         (dotimes [tn gemm-tile-n]
+                                           (.append body-sb (format "%sfloat w_reg_%d = s_W[%d][threadIdx.x][k_sub];\n"
+                                                                    fma-indent tn tn)))
+                                         (dotimes [tm gemm-tile-m]
+                                           (.append body-sb (format "%sfloat x_reg_%d = s_X[%d][threadIdx.y][k_sub];\n"
+                                                                    fma-indent tm tm))
+                                           (dotimes [tn gemm-tile-n]
+                                             (.append body-sb (format "%s%s_%d_%d += x_reg_%d * w_reg_%d;\n"
+                                                                      fma-indent acc-name tm tn tm tn)))))
+                                       (do
+                                         (.append body-sb (format "%sfloat w_reg = s_W[threadIdx.x][k_sub];\n" fma-indent))
+                                         (dotimes [tm gemm-tile-m]
+                                           (.append body-sb (format "%s%s_%d += s_X[%d][threadIdx.y][k_sub] * w_reg;\n"
+                                                                    fma-indent acc-name tm tm)))))
                                      (.append body-sb (format "%s}\n" tile-indent)))
 
                                     ;; Synchronize before next tile load to avoid race on shared memory
@@ -887,36 +975,67 @@
          (if use-gemm-tile?
            (let [acc-name (emit-expr gemm-red-node indent var-names)
                  row-bound (if (> batch-heads 1) q-dim s-dim)]
-             (dotimes [tm gemm-tile-m]
-               (let [row-offset (* tm 16)
-                     guard-str (if use-lds-gemm?
-                                 (if (zero? row-offset)
-                                   (format "raw_channel < %d && raw_token_base < %d" n-dim row-bound)
-                                   (format "raw_channel < %d && raw_token_base + %d < %d" n-dim row-offset row-bound))
-                                 (if (zero? row-offset)
-                                   (format "r_token_base < %d" row-bound)
-                                   (format "r_token_base + %d < %d" row-offset row-bound)))
-                     tok-val (if (zero? row-offset)
-                               (if use-lds-gemm? "raw_token_base" "r_token_base")
-                               (if use-lds-gemm?
-                                 (format "(raw_token_base + %d)" row-offset)
-                                 (format "(r_token_base + %d)" row-offset)))
-                     acc-var (format "%s_%d" acc-name tm)
-                     store-indent (str indent "  ")
-                     tm-store-vars (doto (java.util.HashMap. var-names)
-                                     (.put (:id gemm-red-node) acc-var))]
-                 (.append body-sb (format "%sif (%s) {\n" indent guard-str))
-                 (.append body-sb (format "%sint r_token = %s;\n" store-indent tok-val))
-                 (let [out-idx-var (emit-expr out-lin-idx-uop store-indent tm-store-vars)
-                       final-val-var (if (= val-expr gemm-red-node)
-                                       acc-var
-                                       (emit-expr val-expr store-indent tm-store-vars))
-                       val-to-write (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
-                                      (format "f32_to_bf16(%s)" final-val-var)
-                                      final-val-var)]
-                   (.append body-sb (format "%sbuf_0[%s] = %s;\n"
-                                            store-indent out-idx-var val-to-write))
-                   (.append body-sb (format "%s}\n" indent))))))
+             (if (> gemm-tile-n 1)
+               (dotimes [tm gemm-tile-m]
+                 (let [row-offset (* tm 16)
+                       guard-str (if (zero? row-offset)
+                                   (format "raw_token_base < %d" row-bound)
+                                   (format "raw_token_base + %d < %d" row-offset row-bound))
+                       tok-val (if (zero? row-offset)
+                                 "raw_token_base"
+                                 (format "(raw_token_base + %d)" row-offset))
+                       store-indent (str indent "  ")]
+                   (.append body-sb (format "%sif (%s) {\n" indent guard-str))
+                   (.append body-sb (format "%sint r_token = %s;\n" store-indent tok-val))
+                   (dotimes [tn gemm-tile-n]
+                     (let [acc-var (format "%s_%d_%d" acc-name tm tn)
+                           inner-indent (str store-indent "  ")
+                           tn-store-vars (doto (java.util.HashMap. var-names)
+                                           (.put (:id gemm-red-node) acc-var)
+                                           (.put chan-range-id (format "r_channel_%d" tn)))]
+                       (.append body-sb (format "%s{\n" store-indent))
+                       (.append body-sb (format "%sint r_channel = r_channel_%d;\n" inner-indent tn))
+                       (let [out-idx-var (emit-expr out-lin-idx-uop inner-indent tn-store-vars)
+                             final-val-var (if (= val-expr gemm-red-node)
+                                             acc-var
+                                             (emit-expr val-expr inner-indent tn-store-vars))
+                             val-to-write (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
+                                            (format "f32_to_bf16(%s)" final-val-var)
+                                            final-val-var)]
+                         (.append body-sb (format "%sbuf_0[%s] = %s;\n"
+                                                  inner-indent out-idx-var val-to-write)))
+                       (.append body-sb (format "%s}\n" store-indent))))
+                   (.append body-sb (format "%s}\n" indent))))
+               (dotimes [tm gemm-tile-m]
+                 (let [row-offset (* tm 16)
+                       guard-str (if use-lds-gemm?
+                                   (if (zero? row-offset)
+                                     (format "raw_channel < %d && raw_token_base < %d" n-dim row-bound)
+                                     (format "raw_channel < %d && raw_token_base + %d < %d" n-dim row-offset row-bound))
+                                   (if (zero? row-offset)
+                                     (format "r_token_base < %d" row-bound)
+                                     (format "r_token_base + %d < %d" row-offset row-bound)))
+                       tok-val (if (zero? row-offset)
+                                 (if use-lds-gemm? "raw_token_base" "r_token_base")
+                                 (if use-lds-gemm?
+                                   (format "(raw_token_base + %d)" row-offset)
+                                   (format "(r_token_base + %d)" row-offset)))
+                       acc-var (format "%s_%d" acc-name tm)
+                       store-indent (str indent "  ")
+                       tm-store-vars (doto (java.util.HashMap. var-names)
+                                       (.put (:id gemm-red-node) acc-var))]
+                   (.append body-sb (format "%sif (%s) {\n" indent guard-str))
+                   (.append body-sb (format "%sint r_token = %s;\n" store-indent tok-val))
+                   (let [out-idx-var (emit-expr out-lin-idx-uop store-indent tm-store-vars)
+                         final-val-var (if (= val-expr gemm-red-node)
+                                         acc-var
+                                         (emit-expr val-expr store-indent tm-store-vars))
+                         val-to-write (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
+                                        (format "f32_to_bf16(%s)" final-val-var)
+                                        final-val-var)]
+                     (.append body-sb (format "%sbuf_0[%s] = %s;\n"
+                                              store-indent out-idx-var val-to-write))
+                     (.append body-sb (format "%s}\n" indent)))))))
            (let [out-idx-var (emit-expr out-lin-idx-uop indent var-names)
                  final-val-var (emit-expr val-expr indent var-names)
                  store-indent (if (and (= target :rocm) (:has-group? kernel-entry))

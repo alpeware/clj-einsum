@@ -223,6 +223,25 @@
 ;; 3. Heuristic Hand-Coded Optimizations (tinygrad heuristic.py port)
 ;; -----------------------------------------------------------------------------
 
+(defn optimal-gemm-tile-m
+  "Finds the register tile factor TM in {4, 5, 6, 7, 8} that minimizes total launched
+   token strips `TM * ceil(tiles-16 / TM)` for a given sequence/row dimension `q-dim`.
+   If `tiles-16 <= 8`, returns `(max 1 tiles-16)` directly."
+  ^long [^long q-dim]
+  (let [tiles-16 (long (quot (+ q-dim 15) 16))]
+    (if (<= tiles-16 8)
+      (max 1 tiles-16)
+      (long
+       (second
+        (reduce (fn [[best-strips best-tm] tm]
+                  (let [g (long (quot (+ tiles-16 tm -1) tm))
+                        strips (* tm g)]
+                    (if (<= strips best-strips)
+                      [strips tm]
+                      [best-strips best-tm])))
+                [Long/MAX_VALUE 8]
+                [4 5 6 7 8]))))))
+
 (defn hand-coded-optimizations
   "Selects optimized `Opt` recipes and launch geometry based on hardware mechanical sympathy.
    Specializes for:
@@ -270,7 +289,7 @@
             batch-heads (if (>= (count non-one-leading-idxs) 2)
                           (long (quot m-total (max 1 q-dim)))
                           1)
-            tile-m (min 8 (long (quot (+ q-dim 15) 16)))
+            tile-m (optimal-gemm-tile-m q-dim)
             block-m (* 16 tile-m)
             grid-q (max 1 (long (quot (+ q-dim block-m -1) block-m)))
             grid-m (* batch-heads grid-q)
@@ -364,7 +383,7 @@
                    is-2d-gemm? (and (= (:local-size recipe) [16 16 1])
                                     (not has-group?))
                    tile-m (if (and is-2d-gemm? (not row-reduce?) (>= q-dim 16))
-                            (min 8 (long (quot (+ q-dim 15) 16)))
+                            (optimal-gemm-tile-m q-dim)
                             1)
                    block-m (* 16 tile-m)
                    grid-q (max 1 (long (quot (+ q-dim block-m -1) block-m)))
