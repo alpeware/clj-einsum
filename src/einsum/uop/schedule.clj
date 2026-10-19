@@ -107,6 +107,8 @@
     (and (not (and (param-leaf? node) (not (contains? output-ids id))))
          (or (contains? output-ids id)
              (= op :uop/reduce)
+             (= op :uop/dynamic-update-slice)
+             (= op :uop/cat)
              (and (= op :uop/index) (= :gather (:op (:arg node))))
              ;; Realize multi-consumer ALU nodes that are not trivial scalar broadcasts
              (and (contains? uop/ALU_OPS op)
@@ -167,7 +169,7 @@
                      substituted-node (if (= rewritten-srcs (:src node))
                                         node
                                         (uop/uop (:op node) (:dtype node) rewritten-srcs (:arg node) (:shape node)))]
-                 (if-let [chain (and (= (:op node) :uop/reduce)
+                 (if-let [chain (and (contains? #{:uop/reduce :uop/cat} (:op node))
                                      (find-foldable-epilogue-chain node consumers output-ids realized-map))]
                    ;; Fused Reduction + Epilogue Chain
                    (let [final-node (last chain)

@@ -164,39 +164,65 @@
 
 (defn- bind-token-ranges
   "Copies `scoped-map` and binds leading `out-ranges` to expressions using `tok-var`."
-  [^java.util.Map scoped-map out-ranges out-shape s-dim tok-var]
-  (let [m (java.util.HashMap. scoped-map)
-        n-ranges (count out-ranges)]
-    (cond
-      (== n-ranges 2)
-      (do
-        (.put m (:id (nth out-ranges 0)) tok-var)
-        m)
+  ([^java.util.Map scoped-map out-ranges out-shape s-dim tok-var]
+   (bind-token-ranges scoped-map out-ranges out-shape s-dim 1 tok-var))
+  ([^java.util.Map scoped-map out-ranges out-shape s-dim batch-heads tok-var]
+   (let [m (java.util.HashMap. scoped-map)
+         n-ranges (count out-ranges)
+         leading-shape (when (>= n-ranges 2) (subvec (vec out-shape) 0 (dec n-ranges)))
+         non-one-leading-idxs (when (>= n-ranges 2)
+                                (vec (keep-indexed (fn [idx d] (when (> (long d) 1) idx)) leading-shape)))]
+     (cond
+       (and (> (long (or batch-heads 1)) 1) (>= (count non-one-leading-idxs) 2))
+       (let [bh (long batch-heads)
+             q-range-idx (peek non-one-leading-idxs)
+             head-shape (subvec (vec out-shape) 0 q-range-idx)
+             head-ranges (subvec (vec out-ranges) 0 q-range-idx)
+             head-strides (rangeify/row-major-strides head-shape)
+             q-range (nth out-ranges q-range-idx)]
+         (doseq [[r dim stride] (map vector head-ranges head-shape head-strides)]
+           (let [d (long dim)
+                 s (long stride)]
+             (cond
+               (== 1 d) (.put m (:id r) "0")
+               (== 1 s) (.put m (:id r) (if (== d bh) "r_head" (format "(r_head %% %d)" d)))
+               :else (.put m (:id r) (if (== (* d s) bh)
+                                       (format "(r_head / %d)" s)
+                                       (format "((r_head / %d) %% %d)" s d))))))
+         (.put m (:id q-range) tok-var)
+         (doseq [r (subvec (vec out-ranges) (inc q-range-idx) (dec n-ranges))]
+           (.put m (:id r) "0"))
+         m)
 
-      (>= n-ranges 3)
-      (let [leading-shape (subvec (vec out-shape) 0 (dec n-ranges))
-            leading-ranges (subvec (vec out-ranges) 0 (dec n-ranges))
-            strides (rangeify/row-major-strides leading-shape)
-            total-rows (long (or s-dim (reduce * 1 leading-shape)))]
-        (doseq [[r dim stride] (map vector leading-ranges leading-shape strides)]
-          (let [d (long dim)
-                s (long stride)]
-            (cond
-              (== 1 d)
-              (.put m (:id r) "0")
+       (== n-ranges 2)
+       (do
+         (.put m (:id (nth out-ranges 0)) tok-var)
+         m)
 
-              (== 1 s)
-              (.put m (:id r) (if (== d total-rows)
-                                tok-var
-                                (format "(%s %% %d)" tok-var d)))
+       (>= n-ranges 3)
+       (let [leading-shape (subvec (vec out-shape) 0 (dec n-ranges))
+             leading-ranges (subvec (vec out-ranges) 0 (dec n-ranges))
+             strides (rangeify/row-major-strides leading-shape)
+             total-rows (long (or s-dim (reduce * 1 leading-shape)))]
+         (doseq [[r dim stride] (map vector leading-ranges leading-shape strides)]
+           (let [d (long dim)
+                 s (long stride)]
+             (cond
+               (== 1 d)
+               (.put m (:id r) "0")
 
-              :else
-              (.put m (:id r) (if (== (* d s) total-rows)
-                                (format "(%s / %d)" tok-var s)
-                                (format "((%s / %d) %% %d)" tok-var s d))))))
-        m)
+               (== 1 s)
+               (.put m (:id r) (if (== d total-rows)
+                                 tok-var
+                                 (format "(%s %% %d)" tok-var d)))
 
-      :else m)))
+               :else
+               (.put m (:id r) (if (== (* d s) total-rows)
+                                 (format "(%s / %d)" tok-var s)
+                                 (format "((%s / %d) %% %d)" tok-var s d))))))
+         m)
+
+       :else m))))
 
 (defn render-kernel
   "Renders an optimized kernel map (from `einsum.uop.opt/optimize-kernel` or `schedule-graph`)
@@ -251,22 +277,24 @@
          n-dim (cond
                  (or is-2d-gemm? is-2d-prefill?) (long (last out-shape))
                  :else nil)
+         leading-shape (when (>= (count out-shape) 2) (subvec (vec out-shape) 0 (dec (count out-shape))))
+         non-one-leading-idxs (when (>= (count out-shape) 2)
+                                (vec (keep-indexed (fn [idx d] (when (> (long d) 1) idx)) leading-shape)))
+         q-range-idx (if (and is-2d-gemm? (>= (count non-one-leading-idxs) 2))
+                       (peek non-one-leading-idxs)
+                       (or (peek non-one-leading-idxs) 0))
+         q-dim (if (and is-2d-gemm? (>= (count non-one-leading-idxs) 2))
+                 (long (nth leading-shape q-range-idx))
+                 (or s-dim 1))
+         batch-heads (if (and is-2d-gemm? (>= (count non-one-leading-idxs) 2))
+                       (long (quot (or s-dim 1) (max 1 q-dim)))
+                       1)
          all-red-nodes (filterv #(= (:op %) :uop/reduce-axis)
                                 (tree-seq #(seq (:src %)) :src val-expr))
          gemm-red-node (when (== 1 (count all-red-nodes))
                          (first all-red-nodes))
-         tok-range-ids (when is-2d-gemm?
-                         (let [n-ranges (count out-ranges)]
-                           (cond
-                             (== n-ranges 2)
-                             #{(:id (first out-ranges))}
-                             (>= n-ranges 3)
-                             (set (keep (fn [[r dim]]
-                                          (when (> (long dim) 1) (:id r)))
-                                        (map vector
-                                             (subvec (vec out-ranges) 0 (dec n-ranges))
-                                             (subvec (vec out-shape) 0 (dec n-ranges)))))
-                             :else #{})))
+         tok-range-ids (when (and is-2d-gemm? (seq out-ranges))
+                         #{(:id (nth out-ranges q-range-idx))})
          node-has-token-range? (fn [uop]
                                  (some (fn [node]
                                          (contains? tok-range-ids (:id node)))
@@ -278,9 +306,10 @@
                                         (boolean (some #(not (node-has-token-range? %)) loads))))
          raw-gemm-tile-m (if is-2d-gemm?
                            (long (or (:tile-m kernel-entry)
-                                     (if (and s-dim (>= s-dim 16))
-                                       (min 8 (long (quot (+ s-dim 15) 16)))
-                                       1)))
+                                     (let [target-dim (if (> batch-heads 1) q-dim s-dim)]
+                                       (if (and target-dim (>= target-dim 16))
+                                         (min 8 (long (quot (+ target-dim 15) 16)))
+                                         1))))
                            1)
          use-gemm-tile? (boolean (and (= target :rocm)
                                       is-2d-gemm?
@@ -293,8 +322,14 @@
                   is-2d-gemm? (long (quot (+ n-dim 16 -1) 16))
                   is-2d-prefill? (long (quot (+ n-dim local-rows -1) local-rows))
                   :else nil)
+         grid-q (when is-2d-gemm?
+                  (if (> batch-heads 1)
+                    (max 1 (long (quot (+ q-dim block-m -1) block-m)))
+                    1))
          grid-m (when is-2d-gemm?
-                  (long (quot (+ s-dim block-m -1) block-m)))
+                  (if (> batch-heads 1)
+                    (* batch-heads grid-q)
+                    (long (quot (+ s-dim block-m -1) block-m))))
          grid-blocks (if (= target :cpu)
                        1
                        (cond
@@ -340,21 +375,38 @@
      (if (= target :rocm)
        (cond
          is-2d-gemm?
-         (if use-gemm-tile?
-           (do
-             (.append body-sb (format "  int r_token_base = (int)(blockIdx.y * %d + threadIdx.y);\n" block-m))
-             (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
-             (.append body-sb (format "  if (r_token_base >= %d || r_channel >= %d) return;\n" s-dim n-dim))
-             (dotimes [tm gemm-tile-m]
-               (if (zero? tm)
-                 (.append body-sb "  int r_tok_0 = r_token_base;\n")
-                 (.append body-sb (format "  int r_tok_%d = (r_token_base + %d < %d) ? (r_token_base + %d) : r_token_base;\n"
-                                          tm (* tm 16) s-dim (* tm 16))))))
-           (do
-             (.append body-sb "  int r_token = (int)(blockIdx.y * 16 + threadIdx.y);\n")
-             (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
-             (.append body-sb (format "  if (r_token >= %d || r_channel >= %d) return;\n" s-dim n-dim))
-             (.append body-sb (format "  int gidx = r_token * %d + r_channel;\n" n-dim))))
+         (if (> batch-heads 1)
+           (if use-gemm-tile?
+             (do
+               (.append body-sb (format "  int r_head = (int)(blockIdx.y / %d);\n" grid-q))
+               (.append body-sb (format "  int r_token_base = (int)((blockIdx.y %% %d) * %d + threadIdx.y);\n" grid-q block-m))
+               (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
+               (.append body-sb (format "  if (r_head >= %d || r_token_base >= %d || r_channel >= %d) return;\n" batch-heads q-dim n-dim))
+               (dotimes [tm gemm-tile-m]
+                 (if (zero? tm)
+                   (.append body-sb "  int r_tok_0 = r_token_base;\n")
+                   (.append body-sb (format "  int r_tok_%d = (r_token_base + %d < %d) ? (r_token_base + %d) : r_token_base;\n"
+                                            tm (* tm 16) q-dim (* tm 16))))))
+             (do
+               (.append body-sb (format "  int r_head = (int)(blockIdx.y / %d);\n" grid-q))
+               (.append body-sb (format "  int r_token = (int)((blockIdx.y %% %d) * 16 + threadIdx.y);\n" grid-q))
+               (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
+               (.append body-sb (format "  if (r_head >= %d || r_token >= %d || r_channel >= %d) return;\n" batch-heads q-dim n-dim))))
+           (if use-gemm-tile?
+             (do
+               (.append body-sb (format "  int r_token_base = (int)(blockIdx.y * %d + threadIdx.y);\n" block-m))
+               (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
+               (.append body-sb (format "  if (r_token_base >= %d || r_channel >= %d) return;\n" s-dim n-dim))
+               (dotimes [tm gemm-tile-m]
+                 (if (zero? tm)
+                   (.append body-sb "  int r_tok_0 = r_token_base;\n")
+                   (.append body-sb (format "  int r_tok_%d = (r_token_base + %d < %d) ? (r_token_base + %d) : r_token_base;\n"
+                                            tm (* tm 16) s-dim (* tm 16))))))
+             (do
+               (.append body-sb "  int r_token = (int)(blockIdx.y * 16 + threadIdx.y);\n")
+               (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
+               (.append body-sb (format "  if (r_token >= %d || r_channel >= %d) return;\n" s-dim n-dim))
+               (.append body-sb (format "  int gidx = r_token * %d + r_channel;\n" n-dim)))))
 
          is-2d-prefill?
          (let [lds-size (* local-rows group-sz)]
@@ -401,27 +453,54 @@
                (.put var-names (:id (nth out-ranges 1)) "r_channel"))
 
              (>= n-ranges 3)
-             (let [leading-shape (subvec (vec out-shape) 0 (dec n-ranges))
-                   leading-ranges (subvec (vec out-ranges) 0 (dec n-ranges))
-                   strides (rangeify/row-major-strides leading-shape)
-                   total-rows (long (or s-dim (reduce * 1 leading-shape)))]
-               (doseq [[r dim stride] (map vector leading-ranges leading-shape strides)]
-                 (let [d (long dim)
-                       s (long stride)]
-                   (cond
-                     (== 1 d)
-                     (.put var-names (:id r) "0")
+             (if (and is-2d-gemm? (> batch-heads 1) (>= (count non-one-leading-idxs) 2))
+               (let [bh (long batch-heads)
+                     q-range-idx (peek non-one-leading-idxs)
+                     head-shape (subvec (vec out-shape) 0 q-range-idx)
+                     head-ranges (subvec (vec out-ranges) 0 q-range-idx)
+                     head-strides (rangeify/row-major-strides head-shape)
+                     q-range (nth out-ranges q-range-idx)]
+                 (doseq [[r dim stride] (map vector head-ranges head-shape head-strides)]
+                   (let [d (long dim)
+                         s (long stride)]
+                     (cond
+                       (== 1 d)
+                       (.put var-names (:id r) "0")
 
-                     (== 1 s)
-                     (.put var-names (:id r) (if (== d total-rows)
-                                               "r_token"
-                                               (format "(r_token %% %d)" d)))
+                       (== 1 s)
+                       (.put var-names (:id r) (if (== d bh)
+                                                 "r_head"
+                                                 (format "(r_head %% %d)" d)))
 
-                     :else
-                     (.put var-names (:id r) (if (== (* d s) total-rows)
-                                               (format "(r_token / %d)" s)
-                                               (format "((r_token / %d) %% %d)" s d))))))
-               (.put var-names (:id (last out-ranges)) "r_channel"))))
+                       :else
+                       (.put var-names (:id r) (if (== (* d s) bh)
+                                                 (format "(r_head / %d)" s)
+                                                 (format "((r_head / %d) %% %d)" s d))))))
+                 (.put var-names (:id q-range) "r_token")
+                 (doseq [r (subvec (vec out-ranges) (inc q-range-idx) (dec n-ranges))]
+                   (.put var-names (:id r) "0"))
+                 (.put var-names (:id (last out-ranges)) "r_channel"))
+               (let [leading-shape (subvec (vec out-shape) 0 (dec n-ranges))
+                     leading-ranges (subvec (vec out-ranges) 0 (dec n-ranges))
+                     strides (rangeify/row-major-strides leading-shape)
+                     total-rows (long (or s-dim (reduce * 1 leading-shape)))]
+                 (doseq [[r dim stride] (map vector leading-ranges leading-shape strides)]
+                   (let [d (long dim)
+                         s (long stride)]
+                     (cond
+                       (== 1 d)
+                       (.put var-names (:id r) "0")
+
+                       (== 1 s)
+                       (.put var-names (:id r) (if (== d total-rows)
+                                                 "r_token"
+                                                 (format "(r_token %% %d)" d)))
+
+                       :else
+                       (.put var-names (:id r) (if (== (* d s) total-rows)
+                                                 (format "(r_token / %d)" s)
+                                                 (format "((r_token / %d) %% %d)" s d))))))
+                 (.put var-names (:id (last out-ranges)) "r_channel")))))
 
          :else
          (let [strides (rangeify/row-major-strides out-shape)]
@@ -489,7 +568,7 @@
                                    (emit-expr inv-node pre-loop-indent inner-vars))
                                   ;; 2. Construct tm-base-vars with leading out-ranges bound to r_tok_tm
                                  (let [base-vars (mapv (fn [tm]
-                                                         (bind-token-ranges inner-vars out-ranges out-shape s-dim (str "r_tok_" tm)))
+                                                         (bind-token-ranges inner-vars out-ranges out-shape s-dim batch-heads (str "r_tok_" tm)))
                                                        (range gemm-tile-m))
                                        tok-dep-nodes (find-rk-inv-tok-dep-roots body-uop node-has-red-range? node-has-token-range?)]
                                     ;; 3. Hoist rk-invariant + token-dependent nodes per tm
@@ -660,12 +739,13 @@
                          (.put scoped-vars (:id node) v-name)
                          v-name)))))]
          (if use-gemm-tile?
-           (let [acc-name (emit-expr gemm-red-node indent var-names)]
+           (let [acc-name (emit-expr gemm-red-node indent var-names)
+                 row-bound (if (> batch-heads 1) q-dim s-dim)]
              (dotimes [tm gemm-tile-m]
                (let [row-offset (* tm 16)
                      guard-str (if (zero? row-offset)
-                                 (format "r_token_base < %d" s-dim)
-                                 (format "r_token_base + %d < %d" row-offset s-dim))
+                                 (format "r_token_base < %d" row-bound)
+                                 (format "r_token_base + %d < %d" row-offset row-bound))
                      tok-val (if (zero? row-offset)
                                "r_token_base"
                                (format "(r_token_base + %d)" row-offset))

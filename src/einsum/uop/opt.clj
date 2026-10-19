@@ -107,7 +107,7 @@
            (when (map? sig)
              (let [k-dim (long (or (first eff-red) 0))
                    num-out (count eff-out)
-                   m-dim (if (> num-out 1) (first eff-out) 1)
+                   m-dim (if (> num-out 1) (long (nth eff-out (- num-out 2))) 1)
                    n-dim (last eff-out)]
                (cond
                  ;; Single-row RMSNorm reduction (out-size == 1)
@@ -237,7 +237,11 @@
         red-shape (let [rs (or (:red-shape rk) (:red-axes ke))]
                     (if (seq rs) rs (extract-reduction-shape rk)))
         has-red? (or (true? (:has-reduce? ke)) (seq red-shape) (has-reduce-axis? rk))
-        row-reduce? (and (> (count out-shape) 1) (== 1 (long (last out-shape))))]
+        row-reduce? (and (> (count out-shape) 1) (== 1 (long (last out-shape))))
+        eff-out (non-singleton-dims out-shape)
+        num-out (count eff-out)
+        m-seq (if (> num-out 1) (long (nth eff-out (- num-out 2))) 1)
+        m-total (if (pos? (long (last out-shape))) (long (quot out-size (long (last out-shape)))) 1)]
     (cond
       (= target :cpu)
       (let [opts [[:omp-parallel 0 1]
@@ -252,19 +256,29 @@
       (and has-red?
            (not row-reduce?)
            (>= (count out-shape) 2)
-           (>= (first out-shape) 16)
+           (or (>= (first out-shape) 16)
+               (and (>= (count out-shape) 4) (>= m-seq 16)))
            (>= (last out-shape) 16)
            (>= (long (or (first red-shape) 0)) 16))
-      (let [m (long (first out-shape))
-            n (long (last out-shape))
-            tile-m (if (>= m 16) (min 8 (long (quot (+ m 15) 16))) 1)
+      (let [n (long (last out-shape))
+            leading-shape (when (>= (count out-shape) 2) (subvec (vec out-shape) 0 (dec (count out-shape))))
+            non-one-leading-idxs (when (>= (count out-shape) 2)
+                                   (vec (keep-indexed (fn [idx d] (when (> (long d) 1) idx)) leading-shape)))
+            q-dim (if (>= (count non-one-leading-idxs) 2)
+                    (long (nth leading-shape (peek non-one-leading-idxs)))
+                    m-total)
+            batch-heads (if (>= (count non-one-leading-idxs) 2)
+                          (long (quot m-total (max 1 q-dim)))
+                          1)
+            tile-m (min 8 (long (quot (+ q-dim 15) 16)))
             block-m (* 16 tile-m)
-            grid-m (max 1 (long (quot (+ m block-m -1) block-m)))
+            grid-q (max 1 (long (quot (+ q-dim block-m -1) block-m)))
+            grid-m (* batch-heads grid-q)
             grid-n (max 1 (long (quot (+ n 16 -1) 16)))]
         (assoc ke
                :target :rocm
                :gemm-2d? true
-               :s-dim m
+               :s-dim m-total
                :n-dim n
                :tile-m tile-m
                :unroll-factor 4
@@ -337,19 +351,29 @@
                    local-rows (or (:amount (first (filter #(= (:op %) :local) (:opts recipe)))) 1)
                    unroll-factor (or (:amount (first (filter #(= (:op %) :unroll) (:opts recipe)))) 4)
                    n (long (last out-shape))
-                   m (if (and (pos? n) (pos? out-size)) (long (quot out-size n)) 1)
+                   m-total (if (and (pos? n) (pos? out-size)) (long (quot out-size n)) 1)
+                   leading-shape (when (>= (count out-shape) 2) (subvec (vec out-shape) 0 (dec (count out-shape))))
+                   non-one-leading-idxs (when (>= (count out-shape) 2)
+                                          (vec (keep-indexed (fn [idx d] (when (> (long d) 1) idx)) leading-shape)))
+                   q-dim (if (>= (count non-one-leading-idxs) 2)
+                           (long (nth leading-shape (peek non-one-leading-idxs)))
+                           m-total)
+                   batch-heads (if (>= (count non-one-leading-idxs) 2)
+                                 (long (quot m-total (max 1 q-dim)))
+                                 1)
                    is-2d-gemm? (and (= (:local-size recipe) [16 16 1])
                                     (not has-group?))
-                   tile-m (if (and is-2d-gemm? (not row-reduce?) (>= m 16))
-                            (min 8 (long (quot (+ m 15) 16)))
+                   tile-m (if (and is-2d-gemm? (not row-reduce?) (>= q-dim 16))
+                            (min 8 (long (quot (+ q-dim 15) 16)))
                             1)
                    block-m (* 16 tile-m)
-                   grid-m-gemm (max 1 (long (quot (+ m block-m -1) block-m)))
+                   grid-q (max 1 (long (quot (+ q-dim block-m -1) block-m)))
+                   grid-m-gemm (* batch-heads grid-q)
                    grid-n-gemm (max 1 (long (quot (+ n 16 -1) 16)))
                    grid-blocks (max 1 (quot (+ out-size local-rows -1) local-rows))]
                (assoc base-ke
                       :gemm-2d? is-2d-gemm?
-                      :s-dim (when is-2d-gemm? m)
+                      :s-dim (when is-2d-gemm? m-total)
                       :n-dim (when is-2d-gemm? n)
                       :has-group? has-group?
                       :group-size group-sz

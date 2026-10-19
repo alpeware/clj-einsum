@@ -295,8 +295,26 @@
                            :uop/reshape
                            (let [in-node (first src)
                                  in-shape (:shape in-node)]
-                             (if (= in-shape shape)
+                             (cond
+                               (= in-shape shape)
                                (lower-at in-node coords)
+
+                               ;; Squeeze / unsqueeze of size-1 axes: preserve coordinate identities without flattening!
+                               (and (= (vec (filter #(> (long %) 1) in-shape))
+                                       (vec (filter #(> (long %) 1) shape)))
+                                    (= (count coords) (count shape)))
+                               (let [active-coords (atom (vec (keep (fn [[c d]] (when (> (long d) 1) c))
+                                                                    (map vector coords shape))))
+                                     in-coords (mapv (fn [d]
+                                                       (if (== 1 (long d))
+                                                         (uop/uop-const :i32 0)
+                                                         (let [c (first @active-coords)]
+                                                           (swap! active-coords subvec 1)
+                                                           c)))
+                                                     in-shape)]
+                                 (lower-at in-node in-coords))
+
+                               :else
                                (let [lin-idx (coords->linear-index coords shape)
                                      in-coords (linear-index->coords lin-idx in-shape)]
                                  (lower-at in-node in-coords))))

@@ -377,5 +377,99 @@
                                     (seq opt-out)
                                     (seq ref-out)))))))
 
+(deftest test-4d-batched-attention-gemm-tiling
+  (testing "4D batched attention GEMM routes to 2D GEMM tiling, decomposes r_head and r_token without inner div/mod, and hoists invariant K load"
+    (let [b 1 h 8 s 32 n 48 k 64
+          q (uop/uop-param 0 :bf16 [b h s k])
+          k-param (uop/uop-param 1 :bf16 [b n 1 k])
+          e-q (-> q
+                  (uop/uop-cast :f32)
+                  (uop/uop-reshape [b h s 1 k])
+                  (uop/uop-expand [b h s n k]))
+          e-k (-> k-param
+                  (uop/uop-cast :f32)
+                  (uop/uop-reshape [1 1 1 n k])
+                  (uop/uop-expand [b h s n k]))
+          prod (uop/uop-alu :uop/mul e-q e-k)
+          red (uop/uop-reduce prod :add [4] false)
+          rk (rangeify/rangeify-kernel red {:out-slot 2})
+          opt-k (opt/optimize-kernel {:name "k_batched_attn" :rangeified rk} {:target :rocm})
+          hip (render/render-kernel opt-k {:target :rocm})
+          src (:source hip)
+          loop-idx (.indexOf src "for (int rk_")
+          inner-src (if (pos? loop-idx) (subs src loop-idx) "")]
+      (is (true? (:gemm-2d? opt-k)))
+      (is (= [16 16 1] (:local-size hip)))
+      (is (= 2 (:tile-m opt-k)))
+      (is (= [3 8 1] (:global-size hip)))
+      (is (str/includes? src "int r_head = (int)(blockIdx.y / 1);"))
+      (is (str/includes? src "int r_token_base = (int)((blockIdx.y % 1) * 32 + threadIdx.y);"))
+      (is (let [k-idx (.indexOf src "buf_2[" loop-idx)
+                tok0-idx (.indexOf src "int r_token = r_tok_0;" loop-idx)]
+            (and (pos? k-idx) (pos? tok0-idx) (< k-idx tok0-idx))))
+      (is (not (str/includes? inner-src "/ 32")))
+      (is (not (str/includes? inner-src "% 32"))))))
+
+(defspec prop-4d-batched-attention-gemm-tiling
+  20
+  (prop/for-all [h (gen/choose 2 4)
+                 s (gen/choose 16 36)
+                 n (gen/choose 16 32)
+                 k (gen/choose 16 32)]
+                (let [b 1
+                      q-data (float-array (repeatedly (* b h s k) #(- (rand 2.0) 1.0)))
+                      k-data (float-array (repeatedly (* b n 1 k) #(- (rand 2.0) 1.0)))
+                      q (uop/uop-param 0 :f32 [b h s k])
+                      k-param (uop/uop-param 1 :f32 [b n 1 k])
+                      e-q (-> q
+                              (uop/uop-reshape [b h s 1 k])
+                              (uop/uop-expand [b h s n k]))
+                      e-k (-> k-param
+                              (uop/uop-reshape [1 1 1 n k])
+                              (uop/uop-expand [b h s n k]))
+                      prod (uop/uop-alu :uop/mul e-q e-k)
+                      red (uop/uop-reduce prod :add [4] false)
+                      rk (rangeify/rangeify-kernel red {:out-slot 2})
+                      opt-k (opt/optimize-kernel {:name "k_batched_attn_gen" :rangeified rk} {:target :rocm})
+                      opt-rk (:rangeified opt-k)
+                      hip (render/render-kernel opt-k {:target :rocm})
+                      raw-out ^floats (rangeify/eval-rangeified-kernel rk {0 q-data 1 k-data})
+                      opt-out ^floats (rangeify/eval-rangeified-kernel opt-rk {0 q-data 1 k-data})
+                      tile-m (:tile-m opt-k)
+                      expected-tile-m (min 8 (long (quot (+ s 15) 16)))
+                      expected-grid-n (max 1 (long (quot (+ n 16 -1) 16)))
+                      block-m (* 16 tile-m)
+                      expected-grid-q (max 1 (long (quot (+ s block-m -1) block-m)))
+                      expected-grid-m (* h expected-grid-q)]
+                  (and (true? (:gemm-2d? opt-k))
+                       (= [16 16 1] (:local-size hip))
+                       (= expected-tile-m tile-m)
+                       (= [expected-grid-n expected-grid-m 1] (:global-size hip))
+                       (= (alength raw-out) (alength opt-out))
+                       (every? true?
+                               (map (fn [x y] (< (Math/abs (- (double x) (double y))) 1e-4))
+                                    (seq raw-out)
+                                    (seq opt-out)))))))
+
+(deftest test-4d-gemm-with-singleton-axis-before-channel
+  (testing "Output shape [1, 32, 1, 64] with a singleton axis before n-dim gets batch-heads = 1, tile-m = 2, global-size = [4 1 1]"
+    (let [b 1 s 32 n 64 k 64
+          x (uop/uop-param 0 :f32 [b s 1 k])
+          w (uop/uop-param 1 :f32 [k n])
+          e-x (-> x
+                  (uop/uop-reshape [b s 1 1 k])
+                  (uop/uop-expand [b s 1 n k]))
+          e-w (-> w
+                  (uop/uop-reshape [1 1 1 n k])
+                  (uop/uop-expand [b s 1 n k]))
+          prod (uop/uop-alu :uop/mul e-x e-w)
+          red (uop/uop-reduce prod :add [4] false)
+          rk (rangeify/rangeify-kernel red {:out-slot 2})
+          opt-k (opt/optimize-kernel {:name "k_singleton_gemm" :rangeified rk} {:target :rocm})
+          hip (render/render-kernel opt-k {:target :rocm})]
+      (is (true? (:gemm-2d? opt-k)))
+      (is (= 2 (:tile-m opt-k)))
+      (is (= [4 1 1] (:global-size hip))))))
+
 
 
