@@ -224,7 +224,7 @@
               ;; Path C: Chunked prefill (with sequential fallback for tail)
               :else
               (let [initial-kv (kernels/allocate-kv-cache-buffers session seq-len session-arena)
-                    target-chunk-sz (min prefill-limit (long (or (:chunk-size config) 128)))
+                    target-chunk-sz (min prefill-limit (long (or (:chunk-size config) 512)))
                     chunk-exec (or (:chunked-prefill-executable session)
                                    (when (pos? target-chunk-sz)
                                      (kernels/compile-gemma4-chunked-prefill-executable session seq-len target-chunk-sz)))
@@ -533,7 +533,7 @@
 
                ;; Path C: Chunked prefill (with parallel tail chunk or sequential fallback)
                :else
-               (let [target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size config) 128)))
+               (let [target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size config) 512)))
                      chunk-exec (or (:chunked-prefill-executable session)
                                     (when (pos? target-chunk-sz)
                                       (kernels/compile-gemma4-chunked-prefill-executable session seq-len target-chunk-sz)))
@@ -908,7 +908,7 @@
                           (profile/with-profile metrics-atom "graph_compilation"
                             (kernels/compile-gemma4-kv-executable session max-seq-len)))))
           prompt-count (count prompt-ids)
-          target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size (:config session)) 128)))
+          target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size (:config session)) 512)))
           num-full-chunks (if (pos? target-chunk-sz) (quot prompt-count target-chunk-sz) 0)
           tail-len (- prompt-count (* num-full-chunks target-chunk-sz))
           chunked-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
