@@ -35,7 +35,7 @@
         (fn [m child]
           (update m (:id child) (fnil conj []) node))
         acc
-        (distinct (:src node))))
+        (:src node)))
      {}
      nodes)))
 

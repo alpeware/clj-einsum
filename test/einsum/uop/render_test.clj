@@ -608,6 +608,7 @@
                   floats-rocm (uop-rt/device->host-floats rocm-ctx buf-rocm (* 136 256))
                   max-err (reduce max 0.0 (map (fn [x y] (Math/abs (- (double x) (double y))))
                                                (seq floats-cpu) (seq floats-rocm)))]
+              (println "test-2d-lds-gemm-wmma-bf16-tiling max-err:" max-err)
               (is (< max-err 1e-2)))
             (finally
               (uop-rt/destroy-uop-executable! cpu-ctx exec-cpu)
