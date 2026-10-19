@@ -35,7 +35,7 @@
         (fn [m child]
           (update m (:id child) (fnil conj []) node))
         acc
-        (:src node)))
+        (distinct (:src node))))
      {}
      nodes)))
 
@@ -49,6 +49,91 @@
     (contains? uop/MOVEMENT_OPS (:op node)) (param-leaf? (first (:src node)))
     :else false))
 
+(defn- effective-consumer-count
+  "Counts downstream non-movement consumer references reachable from `node`
+   by looking through chains of pure view/movement ops (`:uop/reshape`, `:uop/expand`,
+   `:uop/permute`, `:uop/shrink`, `:uop/pad`, `:uop/flip`)."
+  [node consumers]
+  (let [pure-view-ops (disj uop/MOVEMENT_OPS :uop/cat)
+        cs (get consumers (:id node) [])]
+    (reduce
+     (fn [acc c]
+       (+ acc (if (contains? pure-view-ops (:op c))
+                (effective-consumer-count c consumers)
+                1)))
+     0
+     cs)))
+
+(defn- valid-epilogue-alu-node?
+  [node target-shape internal-ids realized-map]
+  (and (or (contains? uop/ALU_OPS (:op node)) (= (:op node) :uop/cast))
+       (= (:shape node) target-shape)
+       (let [other-srcs (remove #(contains? internal-ids (:id %)) (:src node))]
+         (every? (fn [s]
+                   (or (contains? realized-map (:id s))
+                       (param-leaf? s)
+                       (empty? (filter #(= (:op %) :uop/reduce) (uop/toposort [s])))))
+                 other-srcs))))
+
+(defn- collect-same-shape-descendants
+  "Collects the set of node IDs reachable forward from `start-node` via `consumers`
+   within `max-depth` hops that preserve `(:shape start-node)`."
+  [start-node consumers max-depth]
+  (let [target-shape (:shape start-node)]
+    (loop [queue (vec (get consumers (:id start-node) []))
+           depth 0
+           acc #{}]
+      (if (or (empty? queue) (>= depth max-depth))
+        acc
+        (let [same-sh (filter #(= (:shape %) target-shape) queue)
+              new-ids (into acc (map :id same-sh))
+              next-q (vec (distinct
+                           (remove #(contains? new-ids (:id %))
+                                   (mapcat #(get consumers (:id %) []) same-sh))))]
+          (recur next-q (inc depth) new-ids))))))
+
+(defn- find-reconvergent-epilogue-subchain
+  "When `curr` fans out to multiple consumers (e.g., `:act :gelu` or `:act :silu`),
+   checks if all paths from `curr` reconverge into a single elementwise sink node
+   of the same shape without escaping. Returns the topological vector of nodes
+   `(conj subchain sink)` from `curr` (exclusive) to `sink` (inclusive), or nil."
+  [curr consumers output-ids realized-map]
+  (let [target-shape (:shape curr)
+        cs (get consumers (:id curr) [])
+        desc-ids (collect-same-shape-descendants curr consumers 24)]
+    (when (> (count cs) 1)
+      (loop [visited-ids #{(:id curr)}
+             frontier-map (into {} (map (fn [n] [(:id n) n]) cs))
+             subchain []
+             steps 0]
+        (when (and (seq frontier-map) (< steps 64))
+          (let [ready-node (some (fn [[_ u]]
+                                   (when (every? (fn [s]
+                                                   (or (not (contains? desc-ids (:id s)))
+                                                       (contains? visited-ids (:id s))))
+                                                 (:src u))
+                                     u))
+                                 frontier-map)]
+            (when ready-node
+              (if (== 1 (count frontier-map))
+                (when (valid-epilogue-alu-node? ready-node target-shape visited-ids realized-map)
+                  (conj subchain ready-node))
+                (let [rid (:id ready-node)
+                      rcs (get consumers rid [])]
+                  (when (and (valid-epilogue-alu-node? ready-node target-shape visited-ids realized-map)
+                             (not (contains? output-ids rid))
+                             (seq rcs))
+                    (let [next-visited (conj visited-ids rid)
+                          next-frontier (into (dissoc frontier-map rid)
+                                              (keep (fn [c]
+                                                      (when-not (contains? next-visited (:id c))
+                                                        [(:id c) c]))
+                                                    rcs))]
+                      (recur next-visited
+                             next-frontier
+                             (conj subchain ready-node)
+                             (inc steps)))))))))))))
+
 (defn- find-foldable-epilogue-chain
   "Given a `:uop/reduce` node, checks if its consumer is a chain of contiguous `:uop/reshape` movement ops
    and elementwise ALU/cast operations that can be folded directly into the reduction kernel's store and output buffer.
@@ -57,8 +142,10 @@
   (when-not (contains? output-ids (:id red-node))
     (loop [curr red-node
            chain []]
-      (let [cs (get consumers (:id curr) [])]
-        (if (== 1 (count cs))
+      (let [cs (get consumers (:id curr) [])
+            internal-ids (into #{(:id red-node)} (cons (:id curr) (map :id chain)))]
+        (cond
+          (== 1 (count cs))
           (let [consumer (first cs)
                 op (:op consumer)]
             (cond
@@ -75,21 +162,24 @@
                     (conj chain consumer)
                     (recur consumer (conj chain consumer)))))
 
-              (and (or (contains? uop/ALU_OPS op) (= op :uop/cast))
-                   (= (:shape consumer) (:shape curr))
-                   ;; Ensure all other inputs to consumer do not contain an un-realized reduction
-                   (let [other-srcs (remove #(= (:id %) (:id curr)) (:src consumer))]
-                     (every? (fn [s]
-                               (or (contains? realized-map (:id s))
-                                   (param-leaf? s)
-                                   (empty? (filter #(= (:op %) :uop/reduce) (uop/toposort [s])))))
-                             other-srcs)))
+              (valid-epilogue-alu-node? consumer (:shape curr) internal-ids realized-map)
               (if (contains? output-ids (:id consumer))
                 (conj chain consumer)
                 (recur consumer (conj chain consumer)))
 
               :else
               (when (seq chain) chain)))
+
+          (> (count cs) 1)
+          (if-let [subchain (find-reconvergent-epilogue-subchain curr consumers output-ids realized-map)]
+            (let [sink (last subchain)
+                  next-chain (into chain subchain)]
+              (if (contains? output-ids (:id sink))
+                next-chain
+                (recur sink next-chain)))
+            (when (seq chain) chain))
+
+          :else
           (when (seq chain) chain))))))
 
 (defn- should-realize?
@@ -100,10 +190,10 @@
       preventing exponential recomputation across residual branches (e.g., `res1` or `x_norm1` in Transformers).
    4. Any explicit output target root.
    Note: parameter leaves or pure casts/views on parameters are never materialized as intermediate buffers."
-  [node consumer-counts output-ids]
+  [node _consumer-counts consumers output-ids]
   (let [id (:id node)
         op (:op node)
-        n-consumers (get consumer-counts id 0)]
+        eff-consumers (effective-consumer-count node consumers)]
     (and (not (and (param-leaf? node) (not (contains? output-ids id))))
          (or (contains? output-ids id)
              (= op :uop/reduce)
@@ -112,7 +202,8 @@
              (and (= op :uop/index) (= :gather (:op (:arg node))))
              ;; Realize multi-consumer ALU nodes that are not trivial scalar broadcasts
              (and (contains? uop/ALU_OPS op)
-                  (> n-consumers 1)
+                  (contains? #{:f16 :bf16 :f32 :f64} (:dtype node))
+                  (> eff-consumers 1)
                   (seq (:shape node))
                   (> (long (reduce * 1 (:shape node))) 1))))))
 
@@ -175,18 +266,18 @@
                    (let [final-node (last chain)
                          final-id (:id final-node)
                          target-shape (vec (:shape final-node))
-                         [folded-root _]
+                         chain-env
                          (reduce
-                          (fn [[curr-expr prev-node] chain-node]
+                          (fn [env chain-node]
                             (let [rewritten-srcs (mapv (fn [src-uop]
-                                                         (if (= (:id src-uop) (:id prev-node))
-                                                           curr-expr
-                                                           (get realized-map (:id src-uop) src-uop)))
+                                                         (or (get env (:id src-uop))
+                                                             (get realized-map (:id src-uop) src-uop)))
                                                        (:src chain-node))
                                   next-expr (uop/uop (:op chain-node) (:dtype chain-node) rewritten-srcs (:arg chain-node) (:shape chain-node))]
-                              [next-expr chain-node]))
-                          [substituted-node node]
+                              (assoc env (:id chain-node) next-expr)))
+                          {(:id node) substituted-node}
                           chain)
+                         folded-root (get chain-env final-id)
                          slot (swap! next-slot inc)
                          dt (:dtype final-node)
                          sz (long (reduce * 1 target-shape))
@@ -224,7 +315,7 @@
                       :node->slot (merge node->slot node->slot-updates)})
 
                    ;; Standard realization boundary selection
-                   (if (and (should-realize? node consumer-counts output-ids)
+                   (if (and (should-realize? node consumer-counts consumers output-ids)
                             (not (contains? uop/SOURCE_OPS (:op node))))
                      (let [slot (swap! next-slot inc)
                            sh (vec (or (:shape substituted-node) []))

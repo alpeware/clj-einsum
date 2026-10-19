@@ -301,7 +301,7 @@
                        (long (quot (or s-dim 1) (max 1 q-dim)))
                        1)
          all-red-nodes (filterv #(= (:op %) :uop/reduce-axis)
-                                (tree-seq #(seq (:src %)) :src val-expr))
+                                (uop/toposort [val-expr]))
          gemm-red-node (when (== 1 (count all-red-nodes))
                          (first all-red-nodes))
          tok-range-ids (when (and is-2d-gemm? (seq out-ranges))
@@ -324,9 +324,18 @@
                              (min (long ke-tm) opt-tm)
                              opt-tm)
                            1)
+         gemm-k-const (when (and gemm-red-node (seq (rest (:src gemm-red-node))))
+                        (let [b (first (:src (first (rest (:src gemm-red-node)))))]
+                          (when (= :uop/const (:op b)) (long (:arg b)))))
+         can-tile-n? (boolean (and (== 1 batch-heads)
+                                   n-dim
+                                   (>= (long n-dim) 64)
+                                   (zero? (mod (long n-dim) 64))
+                                   gemm-k-const
+                                   (>= (long gemm-k-const) 256)))
          use-gemm-tile? (boolean (and (= target :rocm)
                                       is-2d-gemm?
-                                      (> raw-gemm-tile-m 1)
+                                      (or (> raw-gemm-tile-m 1) can-tile-n?)
                                       (some? gemm-red-node)
                                       has-invariant-weight-load?))
          gemm-tile-m (if use-gemm-tile? raw-gemm-tile-m 1)
@@ -351,15 +360,7 @@
 
                                 :else nil)))
          use-lds-gemm? (some? lds-gemm-factors)
-         gemm-k-const (when (and gemm-red-node (seq (rest (:src gemm-red-node))))
-                        (let [b (first (:src (first (rest (:src gemm-red-node)))))]
-                          (when (= :uop/const (:op b)) (long (:arg b)))))
-         gemm-tile-n (if (and use-lds-gemm?
-                              (== 1 batch-heads)
-                              (>= (long n-dim) 64)
-                              (zero? (mod (long n-dim) 64))
-                              gemm-k-const
-                              (>= (long gemm-k-const) 256))
+         gemm-tile-n (if (and use-lds-gemm? can-tile-n?)
                        4
                        1)
          block-n (* 16 gemm-tile-n)

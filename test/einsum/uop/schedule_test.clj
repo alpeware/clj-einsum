@@ -1,12 +1,15 @@
 (ns einsum.uop.schedule-test
   "Unit and generative tests for UOp Kernel Scheduler (`schedule.clj`), verifying realization boundary cutting,
    post-reduction reshape folding, single-kernel matmul emission, and end-to-end evaluation parity."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [einsum.uop.core :as uop]
             [einsum.uop.lower :as lower]
+            [einsum.uop.opt :as opt]
+            [einsum.uop.render :as render]
             [einsum.uop.rewrite :as rewrite]
             [einsum.uop.schedule :as schedule]))
 
@@ -126,4 +129,96 @@
       (is (= 2 (count kernels)))
       (is (= [1 16 4 32] (:out-shape k1)))
       (is (= :out (:out-var k1))))))
+
+(deftest test-rms-norm-realized-across-projections
+  (testing "RMSNorm feeding into multiple projection contractions is realized as an intermediate buffer and not recomputed"
+    (let [s 4
+          d 16
+          ast [[:rms-norm [:x_norm :b :p :d] [:x :b :p :d] [:w_norm :d] {:eps 1e-6}]
+               [:= [:q :b :p :d] [:x_norm :b :p :k] [:w_q :d :k]]
+               [:= [:k_proj :b :p :d] [:x_norm :b :p :k] [:w_k :d :k]]]
+          invars [[:x [:tensor [1 s d] :f32]]
+                  [:w_norm [:tensor [d] :f32]]
+                  [:w_q [:tensor [d d] :f32]]
+                  [:w_k [:tensor [d d] :f32]]]
+          outvars [:q :k_proj]
+          ug (lower/ast->uop-graph "rms_multi_proj_test" invars ast outvars)
+          sched (schedule/schedule-graph ug)
+          buffers (:buffers sched)
+          kernels (:kernels sched)
+          inter-bufs (filter #(= (:role %) :intermediate) (vals buffers))
+          norm-buf (first (filter #(= (:shape %) [1 s d]) inter-bufs))]
+      (is (some? norm-buf) "x_norm must be realized into an intermediate buffer of shape [1 S D]")
+      (is (= :intermediate (:role norm-buf)))
+      ;; Neither q nor k should contain the rms-norm reduction inside their root-uop
+      (let [q-kernel (first (filter #(= (:out-var %) :q) kernels))
+            k-kernel (first (filter #(= (:out-var %) :k_proj) kernels))]
+        (is (some? q-kernel))
+        (is (some? k-kernel))
+        (let [q-reductions (filter #(= (:op %) :uop/reduce) (uop/toposort [(:root-uop q-kernel)]))
+              k-reductions (filter #(= (:op %) :uop/reduce) (uop/toposort [(:root-uop k-kernel)]))]
+          (is (= 1 (count q-reductions)) "q kernel must contain exactly 1 reduction (the dot product)")
+          (is (= 1 (count k-reductions)) "k kernel must contain exactly 1 reduction (the dot product)"))))))
+
+(deftest test-geglu-epilogue-fusion
+  (testing "GeGLU MLP folds :act :gelu directly into gate reduction kernel and folds mlp_act into up epilogue"
+    (let [b 1
+          p 4
+          d 16
+          inter 32
+          ast [[:= [:gate :b :p :inter] {:act :gelu} [:x :b :p :d] [:w_gate :d :inter]]
+               [:= [:up :b :p :inter] [:x :b :p :d] [:w_up :d :inter]]
+               [:= [:mlp_act :b :p :inter] [:gate :b :p :inter] [:up :b :p :inter]]]
+          invars [[:x [:tensor [b p d] :f32]]
+                  [:w_gate [:tensor [d inter] :f32]]
+                  [:w_up [:tensor [d inter] :f32]]]
+          outvars [:mlp_act]
+          ug (lower/ast->uop-graph "geglu_test" invars ast outvars)
+          sched (schedule/schedule-graph ug)
+          kernels (:kernels sched)
+          buffers (:buffers sched)]
+      ;; Exactly 2 kernels: gate reduction with folded GELU, and up reduction with folded mlp_act
+      (is (= 2 (count kernels)))
+      (let [k0 (first kernels)
+            k1 (second kernels)]
+        (is (= [1 4 32] (:out-shape k0)))
+        (is (= [1 4 32] (:out-shape k1)))
+        (is (= :mlp_act (:out-var k1)))
+        ;; Verify both kernels contain exactly 1 reduction
+        (is (= 1 (count (filter #(= (:op %) :uop/reduce) (uop/toposort [(:root-uop k0)])))))
+        (is (= 1 (count (filter #(= (:op %) :uop/reduce) (uop/toposort [(:root-uop k1)]))))))
+      ;; Check intermediate buffer for gate_act
+      (let [inter-bufs (filter #(= (:role %) :intermediate) (vals buffers))]
+        (is (= 1 (count inter-bufs)))
+        (is (= [1 4 32] (:shape (first inter-bufs)))))
+      ;; Numerical verification via schedule/eval-scheduled-graph
+      (let [x-data (float-array (repeatedly (* b p d) (fn [] (float (- (rand 2.0) 1.0)))))
+            wg-data (float-array (repeatedly (* d inter) (fn [] (float (- (rand 2.0) 1.0)))))
+            wu-data (float-array (repeatedly (* d inter) (fn [] (float (- (rand 2.0) 1.0)))))
+            input-map {:x x-data :w_gate wg-data :w_up wu-data}
+            res (schedule/eval-scheduled-graph sched input-map)
+            out ^floats (get res :mlp_act)]
+        (is (some? out))
+        (is (= (* b p inter) (alength out)))
+        (is (every? #(not (Double/isNaN (double %))) (seq out))))))
+  (testing "Preserves 2D LDS GEMM tiling when gate kernel with folded GELU epilogue is compiled for ROCm"
+    (let [b 1
+          p 16
+          d 256
+          inter 64
+          ast [[:= [:gate :b :p :inter] {:act :gelu} [:x :b :p :d] [:w_gate :d :inter]]
+               [:= [:up :b :p :inter] [:x :b :p :d] [:w_up :d :inter]]
+               [:= [:mlp_act :b :p :inter] [:gate :b :p :inter] [:up :b :p :inter]]]
+          invars [[:x [:tensor [b p d] :f32]]
+                  [:w_gate [:tensor [d inter] :f32]]
+                  [:w_up [:tensor [d inter] :f32]]]
+          outvars [:mlp_act]
+          ug (lower/ast->uop-graph "geglu_lds_test" invars ast outvars)
+          sched (schedule/schedule-graph ug)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:use-beam? false})
+          rendered (render/render-kernel opt-k0 {:target :rocm})]
+      (is (some? rendered))
+      (is (str/includes? (:source rendered) "__shared__ float s_W")))))
+
 
