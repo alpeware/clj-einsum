@@ -30,6 +30,7 @@
 (def ^:private ^Class BYTE-ARRAY-CLASS (Class/forName "[B"))
 (def ^:private ^Class DOUBLE-ARRAY-CLASS (Class/forName "[D"))
 (def ^:private ^Class LONG-ARRAY-CLASS (Class/forName "[J"))
+(def ^:private ^"[Ljava.lang.Object;" EMPTY-OBJECT-ARRAY (object-array 0))
 
 (defn dtype-byte-size
   "Returns byte width for a UOp compute dtype."
@@ -793,22 +794,41 @@
                                                  :owned? false)]))
                                 (:output-slots sched)))]
         exec-turn (atom 0)
+        num-slots (inc (long (reduce max 0 (keys (:buffers sched)))))
+        slot-ptrs (make-array MemorySegment num-slots)
         ;; Pre-allocate native argument pointer tables per kernel in a shared arena
         exec-arena (Arena/ofShared)
         prepared-kernels (mapv (fn [rk]
                                  (let [slots (:buffer-slots rk)
                                        n-args (count slots)
+                                       slot-arr (int-array slots)
+                                       [gx gy gz] (:global-size rk)
+                                       [lx ly lz] (:local-size rk)
+                                       fn-handle (get fn-handles (:canonical-fn-name rk))
                                        ;; arg-vals holds the actual buffer pointers (void* / hipDeviceptr_t)
                                        arg-vals-seg (.allocate exec-arena ValueLayout/ADDRESS n-args)
                                        ;; kernel-params holds pointers TO each entry in arg-vals-seg (for hipModuleLaunchKernel)
-                                       kernel-params-seg (.allocate exec-arena ValueLayout/ADDRESS n-args)]
+                                       kernel-params-seg (.allocate exec-arena ValueLayout/ADDRESS n-args)
+                                       launch-args (when (= uop-target :rocm)
+                                                     (object-array [fn-handle
+                                                                    (int gx) (int gy) (int gz)
+                                                                    (int lx) (int ly) (int lz)
+                                                                    (int 0)
+                                                                    MemorySegment/NULL
+                                                                    kernel-params-seg
+                                                                    MemorySegment/NULL]))
+                                       cpu-launch-args (when (not= uop-target :rocm)
+                                                         (object-array [arg-vals-seg]))]
                                    (dotimes [i n-args]
                                      (.setAtIndex kernel-params-seg ValueLayout/ADDRESS (long i)
                                                   (.asSlice arg-vals-seg (* i 8) 8)))
                                    (assoc rk
-                                          :fn-handle (get fn-handles (:canonical-fn-name rk))
+                                          :fn-handle fn-handle
+                                          :slot-arr slot-arr
                                           :arg-vals-seg arg-vals-seg
-                                          :kernel-params-seg kernel-params-seg)))
+                                          :kernel-params-seg kernel-params-seg
+                                          :launch-args launch-args
+                                          :cpu-launch-args cpu-launch-args)))
                                rendered-kernels)]
     {:uop-executable? true
      :name name-str
@@ -819,6 +839,8 @@
      :schedule sched
      :module compiled-mod
      :prepared-kernels prepared-kernels
+     :num-slots num-slots
+     :slot-ptrs slot-ptrs
      :intermediate-buffers intermediate-buffers
      :output-pool output-pool
      :exec-turn exec-turn
@@ -862,58 +884,74 @@
                                       [slot (allocate-device-buffer ctx (:shape b-info) (:dtype b-info))]))
                                   output-slots)))
             ;; 2. Build slot -> MemorySegment pointer lookup table
-            slot->ptr (java.util.HashMap.)]
-        (doseq [[slot u-buf] (map-indexed vector input-buffers)]
-          (let [dev-b (if (uop-buffer? u-buf)
+            ^"[Ljava.lang.foreign.MemorySegment;" slot-ptrs (:slot-ptrs uop-exec)]
+        (java.util.Arrays/fill slot-ptrs nil)
+        (dotimes [slot (count input-buffers)]
+          (let [u-buf (nth input-buffers slot)
+                dev-b (if (uop-buffer? u-buf)
                         u-buf
                         (let [b-info (get buffers-meta slot)]
                           (host->device ctx u-buf (:shape b-info) (:dtype b-info))))]
-            (.put slot->ptr (long slot) (:ptr dev-b))))
+            (aset slot-ptrs (int slot) ^MemorySegment (:ptr dev-b))))
         (doseq [[slot b] inter-bufs]
-          (.put slot->ptr (long slot) (:ptr b)))
+          (aset slot-ptrs (int slot) ^MemorySegment (:ptr b)))
         (doseq [[slot b] out-bufs]
-          (.put slot->ptr (long slot) (:ptr b)))
+          (aset slot-ptrs (int slot) ^MemorySegment (:ptr b)))
 
         ;; 3. Dispatch all scheduled kernels sequentially
         (if (= uop-target :rocm)
           (let [hip (or (:hip ctx) (init-hip-bindings!))
                 ^MethodHandle launch-mh (:hipModuleLaunchKernel hip)
                 ^MethodHandle sync-mh (:hipDeviceSynchronize hip)
-                sync-every? (boolean (System/getenv "UOP_SYNC_EVERY_KERNEL"))]
-            (doseq [[k-idx {:keys [fn-handle buffer-slots arg-vals-seg kernel-params-seg global-size local-size canonical-fn-name]}] (map-indexed vector (:prepared-kernels uop-exec))]
-              (dotimes [i (count buffer-slots)]
-                (let [slot (long (nth buffer-slots i))
-                      ^MemorySegment ptr (.get slot->ptr slot)]
-                  (when (nil? ptr)
-                    (throw (ex-info (format "UOp kernel %d (%s) arg %d (slot %d) has NIL pointer in slot->ptr!"
-                                            (int k-idx) (str canonical-fn-name) (int i) slot)
-                                    {:kernel-idx k-idx :canonical-fn-name canonical-fn-name :slot slot})))
-                  (.setAtIndex ^MemorySegment arg-vals-seg ValueLayout/ADDRESS (long i) ptr)))
-              (let [[gx gy gz] global-size
-                    [lx ly lz] local-size
-                    rc (int (.invokeWithArguments launch-mh
-                                                  (into-array Object [fn-handle
-                                                                      (int gx) (int gy) (int gz)
-                                                                      (int lx) (int ly) (int lz)
-                                                                      (int 0)
-                                                                      MemorySegment/NULL
-                                                                      kernel-params-seg
-                                                                      MemorySegment/NULL])))]
-                (check-hip! rc (format "hipModuleLaunchKernel for kernel %d (%s) grid=[%d %d %d] block=[%d %d %d]"
-                                       k-idx canonical-fn-name (int gx) (int gy) (int gz) (int lx) (int ly) (int lz))))
-              (when sync-every?
-                (let [rc-sync (int (.invokeWithArguments sync-mh (into-array Object [])))]
-                  (check-hip! rc-sync (format "hipDeviceSynchronize after kernel %d (%s)" k-idx canonical-fn-name)))))
+                sync-every? (boolean (System/getenv "UOP_SYNC_EVERY_KERNEL"))
+                empty-obj-arr EMPTY-OBJECT-ARRAY
+                pks (:prepared-kernels uop-exec)
+                n-pks (count pks)]
+            (dotimes [k-idx n-pks]
+              (let [pk (nth pks k-idx)
+                    ^ints slot-arr (:slot-arr pk)
+                    n-slots (alength slot-arr)
+                    ^MemorySegment arg-vals-seg (:arg-vals-seg pk)]
+                (dotimes [i n-slots]
+                  (let [slot (aget slot-arr i)
+                        ^MemorySegment ptr (aget slot-ptrs slot)]
+                    (when (nil? ptr)
+                      (throw (ex-info (format "UOp kernel %d (%s) arg %d (slot %d) has NIL pointer in slot-ptrs!"
+                                              (int k-idx) (str (:canonical-fn-name pk)) (int i) (int slot))
+                                      {:kernel-idx k-idx :canonical-fn-name (:canonical-fn-name pk) :slot slot})))
+                    (.setAtIndex arg-vals-seg ValueLayout/ADDRESS (long i) ptr)))
+                (let [rc (int (.invokeWithArguments launch-mh ^"[Ljava.lang.Object;" (:launch-args pk)))]
+                  (when-not (zero? rc)
+                    (let [[gx gy gz] (:global-size pk)
+                          [lx ly lz] (:local-size pk)]
+                      (check-hip! rc (format "hipModuleLaunchKernel for kernel %d (%s) grid=[%d %d %d] block=[%d %d %d]"
+                                             k-idx (:canonical-fn-name pk) (int gx) (int gy) (int gz) (int lx) (int ly) (int lz))))))
+                (when sync-every?
+                  (let [rc-sync (int (.invokeWithArguments sync-mh empty-obj-arr))]
+                    (when-not (zero? rc-sync)
+                      (check-hip! rc-sync (format "hipDeviceSynchronize after kernel %d (%s)" k-idx (:canonical-fn-name pk))))))))
             (when-not sync-every?
-              (let [rc-sync (int (.invokeWithArguments sync-mh (into-array Object [])))]
-                (check-hip! rc-sync "hipDeviceSynchronize after enqueuing uop kernel graph"))))
+              (let [rc-sync (int (.invokeWithArguments sync-mh empty-obj-arr))]
+                (when-not (zero? rc-sync)
+                  (check-hip! rc-sync "hipDeviceSynchronize after enqueuing uop kernel graph")))))
           ;; CPU execution
-          (doseq [{:keys [fn-handle buffer-slots arg-vals-seg]} (:prepared-kernels uop-exec)]
-            (dotimes [i (count buffer-slots)]
-              (let [slot (long (nth buffer-slots i))
-                    ^MemorySegment ptr (.get slot->ptr slot)]
-                (.setAtIndex ^MemorySegment arg-vals-seg ValueLayout/ADDRESS (long i) ptr)))
-            (.invokeWithArguments ^MethodHandle fn-handle (into-array Object [arg-vals-seg]))))
+          (let [pks (:prepared-kernels uop-exec)
+                n-pks (count pks)]
+            (dotimes [k-idx n-pks]
+              (let [pk (nth pks k-idx)
+                    ^ints slot-arr (:slot-arr pk)
+                    n-slots (alength slot-arr)
+                    ^MemorySegment arg-vals-seg (:arg-vals-seg pk)
+                    ^MethodHandle fn-handle (:fn-handle pk)]
+                (dotimes [i n-slots]
+                  (let [slot (aget slot-arr i)
+                        ^MemorySegment ptr (aget slot-ptrs slot)]
+                    (when (nil? ptr)
+                      (throw (ex-info (format "UOp kernel %d (%s) arg %d (slot %d) has NIL pointer in slot-ptrs!"
+                                              (int k-idx) (str (:canonical-fn-name pk)) (int i) (int slot))
+                                      {:kernel-idx k-idx :canonical-fn-name (:canonical-fn-name pk) :slot slot})))
+                    (.setAtIndex arg-vals-seg ValueLayout/ADDRESS (long i) ptr)))
+                (.invokeWithArguments fn-handle ^"[Ljava.lang.Object;" (:cpu-launch-args pk))))))
 
         ;; 4. Return `{out-kw -> UOpBuffer}` map
         (into {}
