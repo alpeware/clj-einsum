@@ -363,6 +363,10 @@
          gemm-tile-n (if (and use-lds-gemm? can-tile-n?)
                        4
                        1)
+         use-wmma-gemm? (boolean (and use-lds-gemm?
+                                      (== 4 gemm-tile-n)
+                                      (some #(= :bf16 (:dtype %)) slot-infos)))
+         wmma-m-steps (long (quot (+ gemm-tile-m 1) 2))
          block-n (* 16 gemm-tile-n)
          grid-n (cond
                   is-2d-gemm? (long (quot (+ n-dim block-n -1) block-n))
@@ -444,8 +448,17 @@
                                             tm (* tm 16) q-dim (* tm 16))))))
              (if (> gemm-tile-n 1)
                (do
-                 (.append body-sb (format "  __shared__ float s_W[%d][16][17];\n" gemm-tile-n))
-                 (.append body-sb (format "  __shared__ float s_X[%d][16][17];\n" gemm-tile-m))
+                 (if use-wmma-gemm?
+                   (do
+                     (.append body-sb (format "  __shared__ short s_W[%d][16][18];\n" gemm-tile-n))
+                     (.append body-sb (format "  __shared__ short s_X[%d][16][18];\n" gemm-tile-m))
+                     (.append body-sb "  int wmma_wave_id = (int)threadIdx.y >> 1;\n")
+                     (.append body-sb "  int wmma_half_id = (int)threadIdx.y & 1;\n")
+                     (.append body-sb "  int wmma_wn = wmma_wave_id & 3;\n")
+                     (.append body-sb "  int wmma_wm = wmma_wave_id >> 2;\n"))
+                   (do
+                     (.append body-sb (format "  __shared__ float s_W[%d][16][17];\n" gemm-tile-n))
+                     (.append body-sb (format "  __shared__ float s_X[%d][16][17];\n" gemm-tile-m))))
                  (.append body-sb (format "  int block_token_base = (int)(blockIdx.y * %d);\n" block-m))
                  (.append body-sb (format "  int block_channel_base = (int)(blockIdx.x * %d);\n" block-n))
                  (.append body-sb (format "  if (block_token_base >= %d || block_channel_base >= %d) return;\n"
@@ -662,15 +675,20 @@
                                                    (boolean (some #(contains? red-range-ids (:id %))
                                                                   (tree-seq #(seq (:src %)) :src uop))))
                              is-gemm-red? (boolean (and use-gemm-tile? (= node gemm-red-node)))
-                             is-lds-gemm? (boolean (and use-lds-gemm? (= node gemm-red-node)))]
-                         (if (and is-gemm-red? (> gemm-tile-n 1))
-                           (dotimes [tm gemm-tile-m]
-                             (dotimes [tn gemm-tile-n]
-                               (.append body-sb (format "%s%s %s_%d_%d = %s;\n" cur-indent c-type acc-name tm tn init-lit))))
-                           (if is-gemm-red?
+                             is-lds-gemm? (boolean (and use-lds-gemm? (= node gemm-red-node)))
+                             is-wmma-gemm? (boolean (and use-wmma-gemm? (= node gemm-red-node)))]
+                         (if is-wmma-gemm?
+                           (dotimes [ms wmma-m-steps]
+                             (.append body-sb (format "%sfloat8 %s_%d = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};\n"
+                                                      cur-indent acc-name ms)))
+                           (if (and is-gemm-red? (> gemm-tile-n 1))
                              (dotimes [tm gemm-tile-m]
-                               (.append body-sb (format "%s%s %s_%d = %s;\n" cur-indent c-type acc-name tm init-lit)))
-                             (.append body-sb (format "%s%s %s = %s;\n" cur-indent c-type acc-name init-lit))))
+                               (dotimes [tn gemm-tile-n]
+                                 (.append body-sb (format "%s%s %s_%d_%d = %s;\n" cur-indent c-type acc-name tm tn init-lit))))
+                             (if is-gemm-red?
+                               (dotimes [tm gemm-tile-m]
+                                 (.append body-sb (format "%s%s %s_%d = %s;\n" cur-indent c-type acc-name tm init-lit)))
+                               (.append body-sb (format "%s%s %s = %s;\n" cur-indent c-type acc-name init-lit)))))
                          (when has-guard?
                            (.append body-sb (format "%sif (valid_gidx) {\n" cur-indent)))
 
@@ -711,7 +729,16 @@
                                        k-const (when (= :uop/const (:op bound-node)) (long (:arg bound-node)))
                                        k-aligned? (and (number? k-const) (zero? (mod k-const 16)))
                                        tile-indent (str cur-indent "  ")
-                                       r-var (str "rk_" (swap! rk-counter inc))]
+                                       r-var (str "rk_" (swap! rk-counter inc))
+                                       emit-factor-store (fn [factor-uop load-indent scoped-vars]
+                                                           (if use-wmma-gemm?
+                                                             (if (and (= :uop/cast (:op factor-uop))
+                                                                      (= :bf16 (:dtype (first (:src factor-uop)))))
+                                                               (let [raw-var (emit-expr (first (:src factor-uop)) load-indent scoped-vars)]
+                                                                 (format "(short)%s" raw-var))
+                                                               (let [val-var (emit-expr factor-uop load-indent scoped-vars)]
+                                                                 (format "(short)f32_to_bf16(%s)" val-var)))
+                                                             (emit-expr factor-uop load-indent scoped-vars)))]
                                    (.append body-sb (format "%sfor (int rk_tile = 0; rk_tile < %s; rk_tile += 16) {\n"
                                                             cur-indent bound-expr))
                                    (.append body-sb (format "%sint %s = rk_tile + (int)threadIdx.x;\n" tile-indent r-var))
@@ -728,11 +755,11 @@
                                        (dotimes [tn gemm-tile-n]
                                          (let [w-scoped-vars (doto (java.util.HashMap. (nth tn-w-base-vars tn))
                                                                (.put (:id r-uop) r-var))
-                                               w-val (emit-expr w-factor load-indent w-scoped-vars)]
+                                               w-val (emit-factor-store w-factor load-indent w-scoped-vars)]
                                            (.append body-sb (format "%ss_W[%d][threadIdx.y][threadIdx.x] = %s;\n" load-indent tn w-val))))
                                        (let [w-scoped-vars (doto (java.util.HashMap. (first tn-w-base-vars))
                                                              (.put (:id r-uop) r-var))
-                                             w-val (emit-expr w-factor load-indent w-scoped-vars)]
+                                             w-val (emit-factor-store w-factor load-indent w-scoped-vars)]
                                          (.append body-sb (format "%ss_W[threadIdx.y][threadIdx.x] = %s;\n" load-indent w-val))))
 
                                       ;; Hoist token-invariant load roots of x-factor into x-shared-vars
@@ -743,45 +770,73 @@
                                      (dotimes [tm gemm-tile-m]
                                        (let [tm-vars (doto (java.util.HashMap. x-shared-vars)
                                                        (.putAll ^java.util.Map (nth tm-base-vars tm)))
-                                             x-val (emit-expr x-factor load-indent tm-vars)]
+                                             x-val (emit-factor-store x-factor load-indent tm-vars)]
                                          (.append body-sb (format "%ss_X[%d][threadIdx.y][threadIdx.x] = %s;\n"
                                                                   load-indent tm x-val))))
 
                                      (when-not k-aligned?
-                                       (let [else-indent (str tile-indent "  ")]
+                                       (let [else-indent (str tile-indent "  ")
+                                             zero-lit (if use-wmma-gemm? "(short)0" "0.0f")]
                                          (.append body-sb (format "%s} else {\n" tile-indent))
                                          (if (> gemm-tile-n 1)
                                            (dotimes [tn gemm-tile-n]
-                                             (.append body-sb (format "%ss_W[%d][threadIdx.y][threadIdx.x] = 0.0f;\n" else-indent tn)))
-                                           (.append body-sb (format "%ss_W[threadIdx.y][threadIdx.x] = 0.0f;\n" else-indent)))
+                                             (.append body-sb (format "%ss_W[%d][threadIdx.y][threadIdx.x] = %s;\n" else-indent tn zero-lit)))
+                                           (.append body-sb (format "%ss_W[threadIdx.y][threadIdx.x] = %s;\n" else-indent zero-lit)))
                                          (dotimes [tm gemm-tile-m]
-                                           (.append body-sb (format "%ss_X[%d][threadIdx.y][threadIdx.x] = 0.0f;\n" else-indent tm)))
+                                           (.append body-sb (format "%ss_X[%d][threadIdx.y][threadIdx.x] = %s;\n" else-indent tm zero-lit)))
                                          (.append body-sb (format "%s}\n" tile-indent)))))
 
                                     ;; Synchronize before FMA
                                    (.append body-sb (format "%s__syncthreads();\n" tile-indent))
 
-                                    ;; Unrolled 16-step FMA accumulation
-                                   (.append body-sb (format "%s#pragma unroll 16\n" tile-indent))
-                                   (.append body-sb (format "%sfor (int k_sub = 0; k_sub < 16; ++k_sub) {\n" tile-indent))
-                                   (let [fma-indent (str tile-indent "  ")]
-                                     (if (> gemm-tile-n 1)
-                                       (do
-                                         (dotimes [tn gemm-tile-n]
-                                           (.append body-sb (format "%sfloat w_reg_%d = s_W[%d][threadIdx.x][k_sub];\n"
-                                                                    fma-indent tn tn)))
-                                         (dotimes [tm gemm-tile-m]
-                                           (.append body-sb (format "%sfloat x_reg_%d = s_X[%d][threadIdx.y][k_sub];\n"
-                                                                    fma-indent tm tm))
-                                           (dotimes [tn gemm-tile-n]
-                                             (.append body-sb (format "%s%s_%d_%d += x_reg_%d * w_reg_%d;\n"
-                                                                      fma-indent acc-name tm tn tm tn)))))
-                                       (do
-                                         (.append body-sb (format "%sfloat w_reg = s_W[threadIdx.x][k_sub];\n" fma-indent))
-                                         (dotimes [tm gemm-tile-m]
-                                           (.append body-sb (format "%s%s_%d += s_X[%d][threadIdx.y][k_sub] * w_reg;\n"
-                                                                    fma-indent acc-name tm tm)))))
-                                     (.append body-sb (format "%s}\n" tile-indent)))
+                                   (if use-wmma-gemm?
+                                     (do
+                                       (.append body-sb (format "%sshort16 w_frag;\n" tile-indent))
+                                       (.append body-sb (format "%s#pragma unroll 16\n" tile-indent))
+                                       (.append body-sb (format "%sfor (int k_sub = 0; k_sub < 16; ++k_sub) {\n" tile-indent))
+                                       (.append body-sb (format "%s  w_frag[k_sub] = s_W[wmma_wn][threadIdx.x][k_sub];\n" tile-indent))
+                                       (.append body-sb (format "%s}\n" tile-indent))
+                                       (dotimes [ms wmma-m-steps]
+                                         (let [odd-tail? (and (odd? gemm-tile-m) (== ms (dec wmma-m-steps)))
+                                               ms-indent (if odd-tail? (str tile-indent "  ") tile-indent)
+                                               tm-idx-expr (if odd-tail?
+                                                             (str (* 2 ms))
+                                                             (format "%d + wmma_wm" (* 2 ms)))]
+                                           (when odd-tail?
+                                             (.append body-sb (format "%sif (wmma_wm == 0) {\n" tile-indent)))
+                                           (.append body-sb (format "%sshort16 x_frag_%d;\n" ms-indent ms))
+                                           (.append body-sb (format "%s#pragma unroll 16\n" ms-indent))
+                                           (.append body-sb (format "%sfor (int k_sub = 0; k_sub < 16; ++k_sub) {\n" ms-indent))
+                                           (.append body-sb (format "%s  x_frag_%d[k_sub] = s_X[%s][threadIdx.x][k_sub];\n"
+                                                                    ms-indent ms tm-idx-expr))
+                                           (.append body-sb (format "%s}\n" ms-indent))
+                                           (.append body-sb (format "%s%s_%d = rdna3_wmma_bf16_16x16x16(x_frag_%d, w_frag, %s_%d);\n"
+                                                                    ms-indent acc-name ms ms acc-name ms))
+                                           (when odd-tail?
+                                             (.append body-sb (format "%s}\n" tile-indent))))))
+
+                                     (do
+                                       ;; Unrolled 16-step FMA accumulation
+                                       (.append body-sb (format "%s#pragma unroll 16\n" tile-indent))
+                                       (.append body-sb (format "%sfor (int k_sub = 0; k_sub < 16; ++k_sub) {\n" tile-indent))
+                                       (let [fma-indent (str tile-indent "  ")]
+                                         (if (> gemm-tile-n 1)
+                                           (do
+                                             (dotimes [tn gemm-tile-n]
+                                               (.append body-sb (format "%sfloat w_reg_%d = s_W[%d][threadIdx.x][k_sub];\n"
+                                                                        fma-indent tn tn)))
+                                             (dotimes [tm gemm-tile-m]
+                                               (.append body-sb (format "%sfloat x_reg_%d = s_X[%d][threadIdx.y][k_sub];\n"
+                                                                        fma-indent tm tm))
+                                               (dotimes [tn gemm-tile-n]
+                                                 (.append body-sb (format "%s%s_%d_%d += x_reg_%d * w_reg_%d;\n"
+                                                                          fma-indent acc-name tm tn tm tn)))))
+                                           (do
+                                             (.append body-sb (format "%sfloat w_reg = s_W[threadIdx.x][k_sub];\n" fma-indent))
+                                             (dotimes [tm gemm-tile-m]
+                                               (.append body-sb (format "%s%s_%d += s_X[%d][threadIdx.y][k_sub] * w_reg;\n"
+                                                                        fma-indent acc-name tm tm)))))
+                                         (.append body-sb (format "%s}\n" tile-indent)))))
 
                                     ;; Synchronize before next tile load to avoid race on shared memory
                                    (.append body-sb (format "%s__syncthreads();\n" tile-indent))
@@ -968,67 +1023,105 @@
          (if use-gemm-tile?
            (let [acc-name (emit-expr gemm-red-node indent var-names)
                  row-bound (if (> batch-heads 1) q-dim s-dim)]
-             (if (> gemm-tile-n 1)
-               (dotimes [tm gemm-tile-m]
-                 (let [row-offset (* tm 16)
-                       guard-str (if (zero? row-offset)
-                                   (format "raw_token_base < %d" row-bound)
-                                   (format "raw_token_base + %d < %d" row-offset row-bound))
-                       tok-val (if (zero? row-offset)
-                                 "raw_token_base"
-                                 (format "(raw_token_base + %d)" row-offset))
-                       store-indent (str indent "  ")]
-                   (.append body-sb (format "%sif (%s) {\n" indent guard-str))
-                   (.append body-sb (format "%sint r_token = %s;\n" store-indent tok-val))
-                   (dotimes [tn gemm-tile-n]
-                     (let [acc-var (format "%s_%d_%d" acc-name tm tn)
-                           inner-indent (str store-indent "  ")
-                           tn-store-vars (doto (java.util.HashMap. var-names)
-                                           (.put (:id gemm-red-node) acc-var)
-                                           (.put chan-range-id (format "r_channel_%d" tn)))]
-                       (.append body-sb (format "%s{\n" store-indent))
-                       (.append body-sb (format "%sint r_channel = r_channel_%d;\n" inner-indent tn))
-                       (let [out-idx-var (emit-expr out-lin-idx-uop inner-indent tn-store-vars)
-                             final-val-var (if (= val-expr gemm-red-node)
-                                             acc-var
-                                             (emit-expr val-expr inner-indent tn-store-vars))
-                             val-to-write (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
-                                            (format "f32_to_bf16(%s)" final-val-var)
-                                            final-val-var)]
-                         (.append body-sb (format "%sbuf_0[%s] = %s;\n"
-                                                  inner-indent out-idx-var val-to-write)))
-                       (.append body-sb (format "%s}\n" store-indent))))
-                   (.append body-sb (format "%s}\n" indent))))
-               (dotimes [tm gemm-tile-m]
-                 (let [row-offset (* tm 16)
-                       guard-str (if use-lds-gemm?
-                                   (if (zero? row-offset)
-                                     (format "raw_channel < %d && raw_token_base < %d" n-dim row-bound)
-                                     (format "raw_channel < %d && raw_token_base + %d < %d" n-dim row-offset row-bound))
-                                   (if (zero? row-offset)
-                                     (format "r_token_base < %d" row-bound)
-                                     (format "r_token_base + %d < %d" row-offset row-bound)))
-                       tok-val (if (zero? row-offset)
-                                 (if use-lds-gemm? "raw_token_base" "r_token_base")
-                                 (if use-lds-gemm?
-                                   (format "(raw_token_base + %d)" row-offset)
-                                   (format "(r_token_base + %d)" row-offset)))
-                       acc-var (format "%s_%d" acc-name tm)
-                       store-indent (str indent "  ")
-                       tm-store-vars (doto (java.util.HashMap. var-names)
-                                       (.put (:id gemm-red-node) acc-var))]
-                   (.append body-sb (format "%sif (%s) {\n" indent guard-str))
-                   (.append body-sb (format "%sint r_token = %s;\n" store-indent tok-val))
-                   (let [out-idx-var (emit-expr out-lin-idx-uop store-indent tm-store-vars)
-                         final-val-var (if (= val-expr gemm-red-node)
-                                         acc-var
-                                         (emit-expr val-expr store-indent tm-store-vars))
-                         val-to-write (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
-                                        (format "f32_to_bf16(%s)" final-val-var)
-                                        final-val-var)]
-                     (.append body-sb (format "%sbuf_0[%s] = %s;\n"
-                                              store-indent out-idx-var val-to-write))
-                     (.append body-sb (format "%s}\n" indent)))))))
+             (if use-wmma-gemm?
+               (do
+                 (.append body-sb (format "%sr_channel = block_channel_base + wmma_wn * 16 + (int)threadIdx.x;\n" indent))
+                 (dotimes [ms wmma-m-steps]
+                   (let [odd-tail? (and (odd? gemm-tile-m) (== ms (dec wmma-m-steps)))
+                         ms-indent (if odd-tail? (str indent "  ") indent)
+                         loop-indent (str ms-indent "  ")
+                         store-indent (str loop-indent "  ")
+                         tm-expr (if odd-tail?
+                                   (str (* 2 ms))
+                                   (format "(%d + wmma_wm)" (* 2 ms)))
+                         acc-scalar-var (format "acc_scalar_%d" ms)
+                         wmma-store-vars (doto (java.util.HashMap. var-names)
+                                           (.put (:id gemm-red-node) acc-scalar-var)
+                                           (.put chan-range-id "r_channel"))]
+                     (when odd-tail?
+                       (.append body-sb (format "%sif (wmma_wm == 0) {\n" indent)))
+                     (.append body-sb (format "%s#pragma unroll 8\n" ms-indent))
+                     (.append body-sb (format "%sfor (int wmma_i = 0; wmma_i < 8; ++wmma_i) {\n" ms-indent))
+                     (.append body-sb (format "%sint r_token = block_token_base + %s * 16 + 2 * wmma_i + wmma_half_id;\n"
+                                              loop-indent tm-expr))
+                     (.append body-sb (format "%sif (r_token < %d && r_channel < %d) {\n"
+                                              loop-indent row-bound n-dim))
+                     (.append body-sb (format "%sfloat %s = %s_%d[wmma_i];\n"
+                                              store-indent acc-scalar-var acc-name ms))
+                     (let [out-idx-var (emit-expr out-lin-idx-uop store-indent wmma-store-vars)
+                           final-val-var (if (= val-expr gemm-red-node)
+                                           acc-scalar-var
+                                           (emit-expr val-expr store-indent wmma-store-vars))
+                           val-to-write (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
+                                          (format "f32_to_bf16(%s)" final-val-var)
+                                          final-val-var)]
+                       (.append body-sb (format "%sbuf_0[%s] = %s;\n"
+                                                store-indent out-idx-var val-to-write)))
+                     (.append body-sb (format "%s}\n" loop-indent))
+                     (.append body-sb (format "%s}\n" ms-indent))
+                     (when odd-tail?
+                       (.append body-sb (format "%s}\n" indent))))))
+               (if (> gemm-tile-n 1)
+                 (dotimes [tm gemm-tile-m]
+                   (let [row-offset (* tm 16)
+                         guard-str (if (zero? row-offset)
+                                     (format "raw_token_base < %d" row-bound)
+                                     (format "raw_token_base + %d < %d" row-offset row-bound))
+                         tok-val (if (zero? row-offset)
+                                   "raw_token_base"
+                                   (format "(raw_token_base + %d)" row-offset))
+                         store-indent (str indent "  ")]
+                     (.append body-sb (format "%sif (%s) {\n" indent guard-str))
+                     (.append body-sb (format "%sint r_token = %s;\n" store-indent tok-val))
+                     (dotimes [tn gemm-tile-n]
+                       (let [acc-var (format "%s_%d_%d" acc-name tm tn)
+                             inner-indent (str store-indent "  ")
+                             tn-store-vars (doto (java.util.HashMap. var-names)
+                                             (.put (:id gemm-red-node) acc-var)
+                                             (.put chan-range-id (format "r_channel_%d" tn)))]
+                         (.append body-sb (format "%s{\n" store-indent))
+                         (.append body-sb (format "%sint r_channel = r_channel_%d;\n" inner-indent tn))
+                         (let [out-idx-var (emit-expr out-lin-idx-uop inner-indent tn-store-vars)
+                               final-val-var (if (= val-expr gemm-red-node)
+                                               acc-var
+                                               (emit-expr val-expr inner-indent tn-store-vars))
+                               val-to-write (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
+                                              (format "f32_to_bf16(%s)" final-val-var)
+                                              final-val-var)]
+                           (.append body-sb (format "%sbuf_0[%s] = %s;\n"
+                                                    inner-indent out-idx-var val-to-write)))
+                         (.append body-sb (format "%s}\n" store-indent))))
+                     (.append body-sb (format "%s}\n" indent))))
+                 (dotimes [tm gemm-tile-m]
+                   (let [row-offset (* tm 16)
+                         guard-str (if use-lds-gemm?
+                                     (if (zero? row-offset)
+                                       (format "raw_channel < %d && raw_token_base < %d" n-dim row-bound)
+                                       (format "raw_channel < %d && raw_token_base + %d < %d" n-dim row-offset row-bound))
+                                     (if (zero? row-offset)
+                                       (format "r_token_base < %d" row-bound)
+                                       (format "r_token_base + %d < %d" row-offset row-bound)))
+                         tok-val (if (zero? row-offset)
+                                   (if use-lds-gemm? "raw_token_base" "r_token_base")
+                                   (if use-lds-gemm?
+                                     (format "(raw_token_base + %d)" row-offset)
+                                     (format "(r_token_base + %d)" row-offset)))
+                         acc-var (format "%s_%d" acc-name tm)
+                         store-indent (str indent "  ")
+                         tm-store-vars (doto (java.util.HashMap. var-names)
+                                         (.put (:id gemm-red-node) acc-var))]
+                     (.append body-sb (format "%sif (%s) {\n" indent guard-str))
+                     (.append body-sb (format "%sint r_token = %s;\n" store-indent tok-val))
+                     (let [out-idx-var (emit-expr out-lin-idx-uop store-indent tm-store-vars)
+                           final-val-var (if (= val-expr gemm-red-node)
+                                           acc-var
+                                           (emit-expr val-expr store-indent tm-store-vars))
+                           val-to-write (if (and (= out-dtype :bf16) (= (:dtype val-expr) :f32))
+                                          (format "f32_to_bf16(%s)" final-val-var)
+                                          final-val-var)]
+                       (.append body-sb (format "%sbuf_0[%s] = %s;\n"
+                                                store-indent out-idx-var val-to-write))
+                       (.append body-sb (format "%s}\n" indent))))))))
            (let [out-idx-var (emit-expr out-lin-idx-uop indent var-names)
                  final-val-var (emit-expr val-expr indent var-names)
                  store-indent (if (and (= target :rocm) (:has-group? kernel-entry))

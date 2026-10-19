@@ -205,6 +205,11 @@
       (reset! hip-runtime-state state)
       (when (:available? state) state))))
 
+(defn rocm-available?
+  "Returns true if ROCm HIP runtime bindings are available on this system."
+  []
+  (boolean (:available? (init-hip-bindings!))))
+
 (defn check-hip! [^long rc ^String op-name]
   (when-not (zero? rc)
     (throw (ex-info (format "HIP runtime error in %s: error code %d" op-name rc)
@@ -667,9 +672,11 @@
                         (let [log-sz-slot (.allocate arena ValueLayout/JAVA_LONG)
                               _ (.invokeWithArguments hiprtcGetProgramLogSize (into-array Object [prog log-sz-slot]))
                               log-sz (.get log-sz-slot ValueLayout/JAVA_LONG 0)
-                              log-seg (.allocate arena (max 1 log-sz))
+                              log-seg (.allocate arena (inc (max 1 log-sz)))
                               _ (.invokeWithArguments hiprtcGetProgramLog (into-array Object [prog log-seg]))
-                              log-str (.getString log-seg 0)]
+                              log-bytes (byte-array (int log-sz))
+                              _ (MemorySegment/copy log-seg ValueLayout/JAVA_BYTE 0 log-bytes 0 (int log-sz))
+                              log-str (String. log-bytes java.nio.charset.StandardCharsets/UTF_8)]
                           (.invokeWithArguments hiprtcDestroyProgram (into-array Object [prog-slot]))
                           (throw (ex-info (str "HIPRTC kernel compilation failed:\n" log-str)
                                           {:rc rc-comp :log log-str :source full-src}))))

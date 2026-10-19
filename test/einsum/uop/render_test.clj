@@ -12,6 +12,7 @@
             [einsum.uop.opt :as opt]
             [einsum.uop.rangeify :as rangeify]
             [einsum.uop.render :as render]
+            [einsum.uop.runtime :as uop-rt]
             [einsum.uop.schedule :as schedule]))
 
 (deftest test-opt-and-render-c99-and-hip-kernels
@@ -565,3 +566,49 @@
       (is (str/includes? src "int r_channel = r_channel_0;"))
       (is (str/includes? src "int r_channel = r_channel_3;"))
       (is (str/includes? src "buf_0[")))))
+
+(deftest test-2d-lds-gemm-wmma-bf16-tiling
+  (testing "RDNA3 Wave32 BF16 WMMA Tensor Core GEMM (tile-n = 4, wmma-m-steps = 3) on RDNA3"
+    (let [invars [[:A [:tensor [136 256] :bf16]]
+                  [:B [:tensor [256 256] :bf16]]]
+          ast [:= [:C :p :d] [:A :p :k] [:B :d :k]]
+          uop-graph (uop-lower/ast->uop-graph "gemm_2d_wmma" invars ast [:C])
+          sched (schedule/schedule-graph uop-graph)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:target :rocm})
+          hip-prog (render/render-kernel opt-k0 {:target :rocm})
+          src (:source hip-prog)]
+      ;; Structural assertions
+      (is (true? (:gemm-2d? opt-k0)))
+      (is (= 5 (:tile-m opt-k0)))
+      (is (= [16 16 1] (:local-size hip-prog)))
+      (is (= [4 2 1] (:global-size hip-prog)))
+      (is (str/includes? src "__shared__ short s_W[4][16][18];"))
+      (is (str/includes? src "__shared__ short s_X[5][16][18];"))
+      (is (str/includes? src "int wmma_wave_id = (int)threadIdx.y >> 1;"))
+      (is (str/includes? src "float8 acc_1_0"))
+      (is (str/includes? src "float8 acc_1_2"))
+      (is (str/includes? src "rdna3_wmma_bf16_16x16x16(x_frag_0, w_frag, acc_1_0)"))
+      (is (str/includes? src "if (wmma_wm == 0)"))
+
+      ;; End-to-end GPU execution test on :uop-rocm vs :uop-cpu
+      (when (uop-rt/rocm-available?)
+        (let [cpu-ctx (uop-rt/init-uop-context! :uop-cpu)
+              rocm-ctx (uop-rt/init-uop-context! :uop-rocm)
+              a-data (short-array (repeatedly (* 136 256) #(short (bit-shift-right (Float/floatToIntBits (float (- (rand 2.0) 1.0))) 16))))
+              b-data (short-array (repeatedly (* 256 256) #(short (bit-shift-right (Float/floatToIntBits (float (- (rand 2.0) 1.0))) 16))))
+              exec-cpu (uop-rt/compile-uop-executable cpu-ctx "gemm_2d_wmma" invars ast [:C])
+              exec-rocm (uop-rt/compile-uop-executable rocm-ctx "gemm_2d_wmma" invars ast [:C])]
+          (try
+            (let [res-cpu (uop-rt/execute-uop-executable cpu-ctx exec-cpu [a-data b-data])
+                  res-rocm (uop-rt/execute-uop-executable rocm-ctx exec-rocm [a-data b-data])
+                  buf-cpu (get res-cpu :C)
+                  buf-rocm (get res-rocm :C)
+                  floats-cpu (uop-rt/device->host-floats cpu-ctx buf-cpu (* 136 256))
+                  floats-rocm (uop-rt/device->host-floats rocm-ctx buf-rocm (* 136 256))
+                  max-err (reduce max 0.0 (map (fn [x y] (Math/abs (- (double x) (double y))))
+                                               (seq floats-cpu) (seq floats-rocm)))]
+              (is (< max-err 1e-2)))
+            (finally
+              (uop-rt/destroy-uop-executable! cpu-ctx exec-cpu)
+              (uop-rt/destroy-uop-executable! rocm-ctx exec-rocm))))))))
