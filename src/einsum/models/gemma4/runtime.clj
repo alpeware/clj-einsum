@@ -476,6 +476,30 @@
          kv-buffers-atom (atom initial-kv)
          x-arr (int-array 1)
          pos-arr (int-array 1)
+         target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size config) 512)))
+         chunk-exec (or (:chunked-prefill-executable session)
+                        (when (and (or uop? (nil? prefill-exec) (> seq-len (cfg/max-safe-prefill-seq-len config)))
+                                   (pos? target-chunk-sz))
+                          (kernels/compile-gemma4-chunked-prefill-executable session seq-len target-chunk-sz)))
+         _ (when (and uop? (= (:uop-target ctx) :rocm))
+             (xla/with-device-arena [warmup-arena session-arena]
+               (let [zero-pos (int-array 1)
+                     pos-b (xla/device-buffer warmup-arena zero-pos [1] :i32)]
+                 (when (and chunk-exec
+                            (pos? target-chunk-sz)
+                            (:warmed-up? chunk-exec)
+                            (compare-and-set! (:warmed-up? chunk-exec) false true))
+                   (let [zero-chunk (int-array target-chunk-sz)
+                         x-b (xla/device-buffer warmup-arena zero-chunk [1 target-chunk-sz] :i32)
+                         step-inputs (into [x-b pos-b] (concat initial-kv device-weights))]
+                     (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-outs)))
+                 (when (and exec
+                            (:warmed-up? exec)
+                            (compare-and-set! (:warmed-up? exec) false true))
+                   (let [zero-tok (int-array 1)
+                         x-b (xla/device-buffer warmup-arena zero-tok [1 1] :i32)
+                         step-inputs (into [x-b pos-b] (concat initial-kv device-weights))]
+                     (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))))))
          t0 (System/nanoTime)]
      (try
        ;; Phase 1: Prefill prompt tokens into KV cache
@@ -533,11 +557,7 @@
 
                ;; Path C: Chunked prefill (with parallel tail chunk or sequential fallback)
                :else
-               (let [target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size config) 512)))
-                     chunk-exec (or (:chunked-prefill-executable session)
-                                    (when (pos? target-chunk-sz)
-                                      (kernels/compile-gemma4-chunked-prefill-executable session seq-len target-chunk-sz)))
-                     chunk-sz target-chunk-sz
+               (let [chunk-sz target-chunk-sz
                      num-full-chunks (if (and chunk-exec (pos? chunk-sz)) (quot prompt-count chunk-sz) 0)
                      chunk-end (* num-full-chunks chunk-sz)
                      exact-chunks? (and (pos? num-full-chunks) (= chunk-end prompt-count))

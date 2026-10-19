@@ -845,6 +845,7 @@
      :output-pool output-pool
      :exec-turn exec-turn
      :exec-arena exec-arena
+     :warmed-up? (atom false)
      :lock (ReentrantLock.)}))
 
 (defn destroy-uop-executable!
