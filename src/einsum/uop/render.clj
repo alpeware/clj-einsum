@@ -318,6 +318,26 @@
                                       has-invariant-weight-load?))
          gemm-tile-m (if use-gemm-tile? raw-gemm-tile-m 1)
          block-m (* 16 gemm-tile-m)
+         chan-range-id (when (seq out-ranges) (:id (last out-ranges)))
+         node-has-chan-range? (fn [uop] (boolean (and chan-range-id (some #(= chan-range-id (:id %)) (tree-seq #(seq (:src %)) :src uop)))))
+         lds-gemm-factors (when (and use-gemm-tile?
+                                     (= :add (:op (:arg gemm-red-node)))
+                                     (== 1 (count (rest (:src gemm-red-node))))
+                                     (let [b (first (:src (first (rest (:src gemm-red-node)))))]
+                                       (and (= :uop/const (:op b)) (>= (long (:arg b)) 16)))
+                                     (= :uop/mul (:op (first (:src gemm-red-node)))))
+                            (let [[f0 f1] (:src (first (:src gemm-red-node)))]
+                              (cond
+                                (and (not (node-has-chan-range? f0))
+                                     (not (node-has-token-range? f1)))
+                                {:x-factor f0 :w-factor f1}
+
+                                (and (not (node-has-chan-range? f1))
+                                     (not (node-has-token-range? f0)))
+                                {:x-factor f1 :w-factor f0}
+
+                                :else nil)))
+         use-lds-gemm? (some? lds-gemm-factors)
          grid-n (cond
                   is-2d-gemm? (long (quot (+ n-dim 16 -1) 16))
                   is-2d-prefill? (long (quot (+ n-dim local-rows -1) local-rows))
@@ -375,38 +395,77 @@
      (if (= target :rocm)
        (cond
          is-2d-gemm?
-         (if (> batch-heads 1)
-           (if use-gemm-tile?
+         (if use-lds-gemm?
+           (if (> batch-heads 1)
              (do
+               (.append body-sb "  __shared__ float s_W[16][17];\n")
+               (.append body-sb (format "  __shared__ float s_X[%d][16][17];\n" gemm-tile-m))
                (.append body-sb (format "  int r_head = (int)(blockIdx.y / %d);\n" grid-q))
-               (.append body-sb (format "  int r_token_base = (int)((blockIdx.y %% %d) * %d + threadIdx.y);\n" grid-q block-m))
-               (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
-               (.append body-sb (format "  if (r_head >= %d || r_token_base >= %d || r_channel >= %d) return;\n" batch-heads q-dim n-dim))
+               (.append body-sb (format "  int block_token_base = (int)((blockIdx.y %% %d) * %d);\n" grid-q block-m))
+               (.append body-sb "  int block_channel_base = (int)(blockIdx.x * 16);\n")
+               (.append body-sb (format "  if (r_head >= %d || block_token_base >= %d || block_channel_base >= %d) return;\n"
+                                        batch-heads q-dim n-dim))
+               (.append body-sb "  int raw_token_base = block_token_base + (int)threadIdx.y;\n")
+               (.append body-sb "  int raw_channel = block_channel_base + (int)threadIdx.x;\n")
+               (.append body-sb "  int raw_channel_w = block_channel_base + (int)threadIdx.y;\n")
+               (.append body-sb (format "  int r_token_base = (raw_token_base < %d) ? raw_token_base : 0;\n" q-dim))
+               (.append body-sb (format "  int r_channel = (raw_channel < %d) ? raw_channel : 0;\n" n-dim))
+               (.append body-sb (format "  int r_channel_w = (raw_channel_w < %d) ? raw_channel_w : 0;\n" n-dim))
                (dotimes [tm gemm-tile-m]
                  (if (zero? tm)
                    (.append body-sb "  int r_tok_0 = r_token_base;\n")
-                   (.append body-sb (format "  int r_tok_%d = (r_token_base + %d < %d) ? (r_token_base + %d) : r_token_base;\n"
+                   (.append body-sb (format "  int r_tok_%d = (raw_token_base + %d < %d) ? (raw_token_base + %d) : r_token_base;\n"
                                             tm (* tm 16) q-dim (* tm 16))))))
              (do
-               (.append body-sb (format "  int r_head = (int)(blockIdx.y / %d);\n" grid-q))
-               (.append body-sb (format "  int r_token = (int)((blockIdx.y %% %d) * 16 + threadIdx.y);\n" grid-q))
-               (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
-               (.append body-sb (format "  if (r_head >= %d || r_token >= %d || r_channel >= %d) return;\n" batch-heads q-dim n-dim))))
-           (if use-gemm-tile?
-             (do
-               (.append body-sb (format "  int r_token_base = (int)(blockIdx.y * %d + threadIdx.y);\n" block-m))
-               (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
-               (.append body-sb (format "  if (r_token_base >= %d || r_channel >= %d) return;\n" s-dim n-dim))
+               (.append body-sb "  __shared__ float s_W[16][17];\n")
+               (.append body-sb (format "  __shared__ float s_X[%d][16][17];\n" gemm-tile-m))
+               (.append body-sb (format "  int block_token_base = (int)(blockIdx.y * %d);\n" block-m))
+               (.append body-sb "  int block_channel_base = (int)(blockIdx.x * 16);\n")
+               (.append body-sb (format "  if (block_token_base >= %d || block_channel_base >= %d) return;\n"
+                                        s-dim n-dim))
+               (.append body-sb "  int raw_token_base = block_token_base + (int)threadIdx.y;\n")
+               (.append body-sb "  int raw_channel = block_channel_base + (int)threadIdx.x;\n")
+               (.append body-sb "  int raw_channel_w = block_channel_base + (int)threadIdx.y;\n")
+               (.append body-sb (format "  int r_token_base = (raw_token_base < %d) ? raw_token_base : 0;\n" s-dim))
+               (.append body-sb (format "  int r_channel = (raw_channel < %d) ? raw_channel : 0;\n" n-dim))
+               (.append body-sb (format "  int r_channel_w = (raw_channel_w < %d) ? raw_channel_w : 0;\n" n-dim))
                (dotimes [tm gemm-tile-m]
                  (if (zero? tm)
                    (.append body-sb "  int r_tok_0 = r_token_base;\n")
-                   (.append body-sb (format "  int r_tok_%d = (r_token_base + %d < %d) ? (r_token_base + %d) : r_token_base;\n"
-                                            tm (* tm 16) s-dim (* tm 16))))))
-             (do
-               (.append body-sb "  int r_token = (int)(blockIdx.y * 16 + threadIdx.y);\n")
-               (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
-               (.append body-sb (format "  if (r_token >= %d || r_channel >= %d) return;\n" s-dim n-dim))
-               (.append body-sb (format "  int gidx = r_token * %d + r_channel;\n" n-dim)))))
+                   (.append body-sb (format "  int r_tok_%d = (raw_token_base + %d < %d) ? (raw_token_base + %d) : r_token_base;\n"
+                                            tm (* tm 16) s-dim (* tm 16)))))))
+           (if (> batch-heads 1)
+             (if use-gemm-tile?
+               (do
+                 (.append body-sb (format "  int r_head = (int)(blockIdx.y / %d);\n" grid-q))
+                 (.append body-sb (format "  int r_token_base = (int)((blockIdx.y %% %d) * %d + threadIdx.y);\n" grid-q block-m))
+                 (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
+                 (.append body-sb (format "  if (r_head >= %d || r_token_base >= %d || r_channel >= %d) return;\n" batch-heads q-dim n-dim))
+                 (dotimes [tm gemm-tile-m]
+                   (if (zero? tm)
+                     (.append body-sb "  int r_tok_0 = r_token_base;\n")
+                     (.append body-sb (format "  int r_tok_%d = (r_token_base + %d < %d) ? (r_token_base + %d) : r_token_base;\n"
+                                              tm (* tm 16) q-dim (* tm 16))))))
+               (do
+                 (.append body-sb (format "  int r_head = (int)(blockIdx.y / %d);\n" grid-q))
+                 (.append body-sb (format "  int r_token = (int)((blockIdx.y %% %d) * 16 + threadIdx.y);\n" grid-q))
+                 (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
+                 (.append body-sb (format "  if (r_head >= %d || r_token >= %d || r_channel >= %d) return;\n" batch-heads q-dim n-dim))))
+             (if use-gemm-tile?
+               (do
+                 (.append body-sb (format "  int r_token_base = (int)(blockIdx.y * %d + threadIdx.y);\n" block-m))
+                 (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
+                 (.append body-sb (format "  if (r_token_base >= %d || r_channel >= %d) return;\n" s-dim n-dim))
+                 (dotimes [tm gemm-tile-m]
+                   (if (zero? tm)
+                     (.append body-sb "  int r_tok_0 = r_token_base;\n")
+                     (.append body-sb (format "  int r_tok_%d = (r_token_base + %d < %d) ? (r_token_base + %d) : r_token_base;\n"
+                                              tm (* tm 16) s-dim (* tm 16))))))
+               (do
+                 (.append body-sb "  int r_token = (int)(blockIdx.y * 16 + threadIdx.y);\n")
+                 (.append body-sb "  int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);\n")
+                 (.append body-sb (format "  if (r_token >= %d || r_channel >= %d) return;\n" s-dim n-dim))
+                 (.append body-sb (format "  int gidx = r_token * %d + r_channel;\n" n-dim))))))
 
          is-2d-prefill?
          (let [lds-size (* local-rows group-sz)]
@@ -552,7 +611,8 @@
                              node-has-red-range? (fn [uop]
                                                    (boolean (some #(contains? red-range-ids (:id %))
                                                                   (tree-seq #(seq (:src %)) :src uop))))
-                             is-gemm-red? (boolean (and use-gemm-tile? (= node gemm-red-node)))]
+                             is-gemm-red? (boolean (and use-gemm-tile? (= node gemm-red-node)))
+                             is-lds-gemm? (boolean (and use-lds-gemm? (= node gemm-red-node)))]
                          (if is-gemm-red?
                            (dotimes [tm gemm-tile-m]
                              (.append body-sb (format "%s%s %s_%d = %s;\n" cur-indent c-type acc-name tm init-lit)))
@@ -560,116 +620,202 @@
                          (when has-guard?
                            (.append body-sb (format "%sif (valid_gidx) {\n" cur-indent)))
 
-                          ;; Hoist rk-invariant expressions before loop opening
-                         (let [tm-base-vars
-                               (when is-gemm-red?
+                         (if is-lds-gemm?
+                            ;; --- Cooperative LDS GEMM ---
+                           (let [{:keys [x-factor w-factor]} lds-gemm-factors
+                                 node-has-token-or-chan? #(or (node-has-token-range? %) (node-has-chan-range? %))]
+                              ;; 1. Hoist body-uop roots invariant to rk, token, and channel into inner-vars
+                             (doseq [inv-node (find-rk-inv-tok-inv-roots body-uop node-has-red-range? node-has-token-or-chan?)]
+                               (emit-expr inv-node cur-indent inner-vars))
+
+                              ;; 2. Hoist rk-invariant roots of w-factor into w-base-vars
+                             (let [w-base-vars (doto (java.util.HashMap. inner-vars)
+                                                 (.put chan-range-id "r_channel_w"))]
+                               (doseq [inv-node (find-rk-invariant-roots w-factor node-has-red-range?)]
+                                 (emit-expr inv-node cur-indent w-base-vars))
+
+                                ;; 3. Construct tm-base-vars and hoist rk-invariant, token-dependent roots of x-factor
+                               (let [tm-base-vars (mapv (fn [tm]
+                                                          (bind-token-ranges inner-vars out-ranges out-shape s-dim batch-heads (format "r_tok_%d" tm)))
+                                                        (range gemm-tile-m))
+                                     tok-dep-nodes (find-rk-inv-tok-dep-roots x-factor node-has-red-range? node-has-token-range?)]
+                                 (dotimes [tm gemm-tile-m]
+                                   (let [vars (nth tm-base-vars tm)]
+                                     (doseq [dep-node tok-dep-nodes]
+                                       (emit-expr dep-node cur-indent vars))))
+
+                                  ;; 4. Reduction tile loop (stepping by 16)
+                                 (let [r-uop (first r-uops)
+                                       bound-node (first (:src r-uop))
+                                       bound-expr (emit-expr bound-node cur-indent inner-vars)
+                                       k-const (when (= :uop/const (:op bound-node)) (long (:arg bound-node)))
+                                       k-aligned? (and (number? k-const) (zero? (mod k-const 16)))
+                                       tile-indent (str cur-indent "  ")
+                                       r-var (str "rk_" (swap! rk-counter inc))]
+                                   (.append body-sb (format "%sfor (int rk_tile = 0; rk_tile < %s; rk_tile += 16) {\n"
+                                                            cur-indent bound-expr))
+                                   (.append body-sb (format "%sint %s = rk_tile + (int)threadIdx.x;\n" tile-indent r-var))
+
+                                    ;; Cooperative load into s_W and s_X
+                                   (let [load-indent (if k-aligned? tile-indent (str tile-indent "  "))
+                                         w-scoped-vars (doto (java.util.HashMap. w-base-vars)
+                                                         (.put (:id r-uop) r-var))
+                                         x-shared-vars (doto (java.util.HashMap. inner-vars)
+                                                         (.put (:id r-uop) r-var))]
+                                     (when-not k-aligned?
+                                       (.append body-sb (format "%sif (%s < %s) {\n" tile-indent r-var bound-expr)))
+
+                                      ;; Load w-factor
+                                     (let [w-val (emit-expr w-factor load-indent w-scoped-vars)]
+                                       (.append body-sb (format "%ss_W[threadIdx.y][threadIdx.x] = %s;\n" load-indent w-val)))
+
+                                      ;; Hoist token-invariant load roots of x-factor into x-shared-vars
+                                     (doseq [inv-node (find-invariant-load-roots x-factor node-has-token-range?)]
+                                       (emit-expr inv-node load-indent x-shared-vars))
+
+                                      ;; Load x-factor for each tm
+                                     (dotimes [tm gemm-tile-m]
+                                       (let [tm-vars (doto (java.util.HashMap. x-shared-vars)
+                                                       (.putAll ^java.util.Map (nth tm-base-vars tm)))
+                                             x-val (emit-expr x-factor load-indent tm-vars)]
+                                         (.append body-sb (format "%ss_X[%d][threadIdx.y][threadIdx.x] = %s;\n"
+                                                                  load-indent tm x-val))))
+
+                                     (when-not k-aligned?
+                                       (let [else-indent (str tile-indent "  ")]
+                                         (.append body-sb (format "%s} else {\n" tile-indent))
+                                         (.append body-sb (format "%ss_W[threadIdx.y][threadIdx.x] = 0.0f;\n" else-indent))
+                                         (dotimes [tm gemm-tile-m]
+                                           (.append body-sb (format "%ss_X[%d][threadIdx.y][threadIdx.x] = 0.0f;\n" else-indent tm)))
+                                         (.append body-sb (format "%s}\n" tile-indent)))))
+
+                                    ;; Synchronize before FMA
+                                   (.append body-sb (format "%s__syncthreads();\n" tile-indent))
+
+                                    ;; Unrolled 16-step FMA accumulation
+                                   (.append body-sb (format "%s#pragma unroll 16\n" tile-indent))
+                                   (.append body-sb (format "%sfor (int k_sub = 0; k_sub < 16; ++k_sub) {\n" tile-indent))
+                                   (let [fma-indent (str tile-indent "  ")]
+                                     (.append body-sb (format "%sfloat w_reg = s_W[threadIdx.x][k_sub];\n" fma-indent))
+                                     (dotimes [tm gemm-tile-m]
+                                       (.append body-sb (format "%s%s_%d += s_X[%d][threadIdx.y][k_sub] * w_reg;\n"
+                                                                fma-indent acc-name tm tm)))
+                                     (.append body-sb (format "%s}\n" tile-indent)))
+
+                                    ;; Synchronize before next tile load to avoid race on shared memory
+                                   (.append body-sb (format "%s__syncthreads();\n" tile-indent))
+                                   (.append body-sb (format "%s}\n" cur-indent))))))
+
+                            ;; --- Standard reduction loops (non-LDS GEMM tile and general reductions) ---
+                           (let [tm-base-vars
+                                 (when is-gemm-red?
                                   ;; 1. Hoist rk-invariant + token-invariant nodes to inner-vars
-                                 (doseq [inv-node (find-rk-inv-tok-inv-roots body-uop node-has-red-range? node-has-token-range?)]
-                                   (emit-expr inv-node pre-loop-indent inner-vars))
+                                   (doseq [inv-node (find-rk-inv-tok-inv-roots body-uop node-has-red-range? node-has-token-range?)]
+                                     (emit-expr inv-node pre-loop-indent inner-vars))
                                   ;; 2. Construct tm-base-vars with leading out-ranges bound to r_tok_tm
-                                 (let [base-vars (mapv (fn [tm]
-                                                         (bind-token-ranges inner-vars out-ranges out-shape s-dim batch-heads (str "r_tok_" tm)))
-                                                       (range gemm-tile-m))
-                                       tok-dep-nodes (find-rk-inv-tok-dep-roots body-uop node-has-red-range? node-has-token-range?)]
+                                   (let [base-vars (mapv (fn [tm]
+                                                           (bind-token-ranges inner-vars out-ranges out-shape s-dim batch-heads (str "r_tok_" tm)))
+                                                         (range gemm-tile-m))
+                                         tok-dep-nodes (find-rk-inv-tok-dep-roots body-uop node-has-red-range? node-has-token-range?)]
                                     ;; 3. Hoist rk-invariant + token-dependent nodes per tm
-                                   (dotimes [tm gemm-tile-m]
-                                     (let [vars (nth base-vars tm)]
-                                       (doseq [dep-node tok-dep-nodes]
-                                         (emit-expr dep-node pre-loop-indent vars))))
-                                   base-vars))]
-                           (when-not is-gemm-red?
+                                     (dotimes [tm gemm-tile-m]
+                                       (let [vars (nth base-vars tm)]
+                                         (doseq [dep-node tok-dep-nodes]
+                                           (emit-expr dep-node pre-loop-indent vars))))
+                                     base-vars))]
+                             (when-not is-gemm-red?
                               ;; For non-GEMM tile, hoist all rk-invariant nodes to inner-vars
-                             (doseq [inv-node (find-rk-invariant-roots body-uop node-has-red-range?)]
-                               (emit-expr inv-node pre-loop-indent inner-vars)))
+                               (doseq [inv-node (find-rk-invariant-roots body-uop node-has-red-range?)]
+                                 (emit-expr inv-node pre-loop-indent inner-vars)))
 
                             ;; Open nested reduction loops
-                           (let [vectorized-depths (atom {})]
-                             (doseq [[depth r] (map-indexed vector r-uops)]
-                               (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
-                                                      (apply str (repeat depth "  ")))
-                                     r-var (str "rk_" (swap! rk-counter inc))
-                                     bound-node (first (:src r))
-                                     bound-expr (emit-expr bound-node loop-indent inner-vars)
-                                     k-const (when (= :uop/const (:op bound-node)) (:arg bound-node))
-                                     group-sz (long (or (:group-size kernel-entry) 64))
-                                     vec-sz (when (and (number? k-const)
-                                                       (= target :rocm)
-                                                       (:has-group? kernel-entry)
-                                                       (= depth (dec (count r-uops))))
-                                              (let [k (long k-const)]
-                                                (cond
-                                                  (and (>= k (* group-sz 8)) (zero? (mod k (* group-sz 8)))) 8
-                                                  (and (>= k (* group-sz 4)) (zero? (mod k (* group-sz 4)))) 4
-                                                  (and (>= k (* group-sz 2)) (zero? (mod k (* group-sz 2)))) 2
-                                                  :else nil)))]
-                                 (.put inner-vars (:id r) r-var)
-                                 (when (and (pos? unroll-factor) (not vec-sz))
-                                   (.append body-sb (format "%s#pragma unroll %d\n" loop-indent unroll-factor)))
-                                 (cond
-                                   vec-sz
-                                   (let [step (* group-sz (long vec-sz))
-                                         chunk-var (str r-var "_chunk")
-                                         base-var (str r-var "_base")
-                                         lane-var (str r-var "_lane")]
-                                     (swap! vectorized-depths assoc depth vec-sz)
-                                     (.append body-sb (format "%sfor (int %s = 0; %s < %s; %s += %d) {\n"
-                                                              loop-indent chunk-var chunk-var bound-expr chunk-var step))
-                                     (.append body-sb (format "%s  int %s = %s + (int)threadIdx.x * %d;\n"
-                                                              loop-indent base-var chunk-var (long vec-sz)))
-                                     (.append body-sb (format "%s  #pragma unroll\n" loop-indent))
-                                     (.append body-sb (format "%s  for (int %s = 0; %s < %d; ++%s) {\n"
-                                                              loop-indent lane-var lane-var (long vec-sz) lane-var))
-                                     (.append body-sb (format "%s    int %s = %s + %s;\n"
-                                                              loop-indent r-var base-var lane-var)))
+                             (let [vectorized-depths (atom {})]
+                               (doseq [[depth r] (map-indexed vector r-uops)]
+                                 (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
+                                                        (apply str (repeat depth "  ")))
+                                       r-var (str "rk_" (swap! rk-counter inc))
+                                       bound-node (first (:src r))
+                                       bound-expr (emit-expr bound-node loop-indent inner-vars)
+                                       k-const (when (= :uop/const (:op bound-node)) (:arg bound-node))
+                                       group-sz (long (or (:group-size kernel-entry) 64))
+                                       vec-sz (when (and (number? k-const)
+                                                         (= target :rocm)
+                                                         (:has-group? kernel-entry)
+                                                         (= depth (dec (count r-uops))))
+                                                (let [k (long k-const)]
+                                                  (cond
+                                                    (and (>= k (* group-sz 8)) (zero? (mod k (* group-sz 8)))) 8
+                                                    (and (>= k (* group-sz 4)) (zero? (mod k (* group-sz 4)))) 4
+                                                    (and (>= k (* group-sz 2)) (zero? (mod k (* group-sz 2)))) 2
+                                                    :else nil)))]
+                                   (.put inner-vars (:id r) r-var)
+                                   (when (and (pos? unroll-factor) (not vec-sz))
+                                     (.append body-sb (format "%s#pragma unroll %d\n" loop-indent unroll-factor)))
+                                   (cond
+                                     vec-sz
+                                     (let [step (* group-sz (long vec-sz))
+                                           chunk-var (str r-var "_chunk")
+                                           base-var (str r-var "_base")
+                                           lane-var (str r-var "_lane")]
+                                       (swap! vectorized-depths assoc depth vec-sz)
+                                       (.append body-sb (format "%sfor (int %s = 0; %s < %s; %s += %d) {\n"
+                                                                loop-indent chunk-var chunk-var bound-expr chunk-var step))
+                                       (.append body-sb (format "%s  int %s = %s + (int)threadIdx.x * %d;\n"
+                                                                loop-indent base-var chunk-var (long vec-sz)))
+                                       (.append body-sb (format "%s  #pragma unroll\n" loop-indent))
+                                       (.append body-sb (format "%s  for (int %s = 0; %s < %d; ++%s) {\n"
+                                                                loop-indent lane-var lane-var (long vec-sz) lane-var))
+                                       (.append body-sb (format "%s    int %s = %s + %s;\n"
+                                                                loop-indent r-var base-var lane-var)))
 
-                                   (and (= target :rocm) (:has-group? kernel-entry) (= depth (dec (count r-uops))))
-                                   (.append body-sb (format "%sfor (int %s = (int)threadIdx.x; %s < %s; %s += %d) {\n"
-                                                            loop-indent r-var r-var bound-expr r-var group-sz))
+                                     (and (= target :rocm) (:has-group? kernel-entry) (= depth (dec (count r-uops))))
+                                     (.append body-sb (format "%sfor (int %s = (int)threadIdx.x; %s < %s; %s += %d) {\n"
+                                                              loop-indent r-var r-var bound-expr r-var group-sz))
 
-                                   :else
-                                   (.append body-sb (format "%sfor (int %s = 0; %s < %s; ++%s) {\n"
-                                                            loop-indent r-var r-var bound-expr r-var)))))
+                                     :else
+                                     (.append body-sb (format "%sfor (int %s = 0; %s < %s; ++%s) {\n"
+                                                              loop-indent r-var r-var bound-expr r-var)))))
                               ;; Emit reduction body inside innermost loop using lexical `inner-vars`
-                             (let [extra-indent (if (get @vectorized-depths (dec (count r-uops))) "    " "")
-                                   inner-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
-                                                     (apply str (repeat (count r-uops) "  "))
-                                                     extra-indent)]
-                               (if is-gemm-red?
-                                 (do
-                                    ;; Hoist invariant weight loads and their casts into inner-vars
-                                   (doseq [inv-node (find-invariant-load-roots body-uop node-has-token-range?)]
-                                     (emit-expr inv-node inner-indent inner-vars))
-                                    ;; Unrolled branchless scoped token accumulation blocks
-                                   (dotimes [tm gemm-tile-m]
-                                     (let [tm-indent (str inner-indent "  ")
-                                           tm-vars (doto (java.util.HashMap. inner-vars)
-                                                     (.putAll ^java.util.Map (nth tm-base-vars tm)))]
-                                       (.append body-sb (format "%s{\n" inner-indent))
-                                       (.append body-sb (format "%sint r_token = r_tok_%d;\n" tm-indent tm))
-                                       (let [body-val (emit-expr body-uop tm-indent tm-vars)]
-                                         (case red-op
-                                           :max (.append body-sb (format "%s%s_%d = (%s > %s_%d) ? %s : %s_%d;\n"
-                                                                         tm-indent acc-name tm body-val acc-name tm body-val acc-name tm))
-                                           :min (.append body-sb (format "%s%s_%d = (%s < %s_%d) ? %s : %s_%d;\n"
-                                                                         tm-indent acc-name tm body-val acc-name tm body-val acc-name tm))
-                                           (.append body-sb (format "%s%s_%d += %s;\n" tm-indent acc-name tm body-val))))
-                                       (.append body-sb (format "%s}\n" inner-indent)))))
-                                 (let [body-val (emit-expr body-uop inner-indent inner-vars)]
-                                   (case red-op
-                                     :max (.append body-sb (format "%s%s = (%s > %s) ? %s : %s;\n"
-                                                                   inner-indent acc-name body-val acc-name body-val acc-name))
-                                     :min (.append body-sb (format "%s%s = (%s < %s) ? %s : %s;\n"
-                                                                   inner-indent acc-name body-val acc-name body-val acc-name))
-                                     (.append body-sb (format "%s%s += %s;\n" inner-indent acc-name body-val))))))
-                              ;; Close reduction loops
-                             (doseq [depth (reverse (range (count r-uops)))]
-                               (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
-                                                      (apply str (repeat depth "  ")))]
-                                 (if (get @vectorized-depths depth)
+                               (let [extra-indent (if (get @vectorized-depths (dec (count r-uops))) "    " "")
+                                     inner-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
+                                                       (apply str (repeat (count r-uops) "  "))
+                                                       extra-indent)]
+                                 (if is-gemm-red?
                                    (do
-                                     (.append body-sb (format "%s  }\n" loop-indent))
-                                     (.append body-sb (format "%s}\n" loop-indent)))
-                                   (.append body-sb (format "%s}\n" loop-indent)))))))
+                                    ;; Hoist invariant weight loads and their casts into inner-vars
+                                     (doseq [inv-node (find-invariant-load-roots body-uop node-has-token-range?)]
+                                       (emit-expr inv-node inner-indent inner-vars))
+                                    ;; Unrolled branchless scoped token accumulation blocks
+                                     (dotimes [tm gemm-tile-m]
+                                       (let [tm-indent (str inner-indent "  ")
+                                             tm-vars (doto (java.util.HashMap. inner-vars)
+                                                       (.putAll ^java.util.Map (nth tm-base-vars tm)))]
+                                         (.append body-sb (format "%s{\n" inner-indent))
+                                         (.append body-sb (format "%sint r_token = r_tok_%d;\n" tm-indent tm))
+                                         (let [body-val (emit-expr body-uop tm-indent tm-vars)]
+                                           (case red-op
+                                             :max (.append body-sb (format "%s%s_%d = (%s > %s_%d) ? %s : %s_%d;\n"
+                                                                           tm-indent acc-name tm body-val acc-name tm body-val acc-name tm))
+                                             :min (.append body-sb (format "%s%s_%d = (%s < %s_%d) ? %s : %s_%d;\n"
+                                                                           tm-indent acc-name tm body-val acc-name tm body-val acc-name tm))
+                                             (.append body-sb (format "%s%s_%d += %s;\n" tm-indent acc-name tm body-val))))
+                                         (.append body-sb (format "%s}\n" inner-indent)))))
+                                   (let [body-val (emit-expr body-uop inner-indent inner-vars)]
+                                     (case red-op
+                                       :max (.append body-sb (format "%s%s = (%s > %s) ? %s : %s;\n"
+                                                                     inner-indent acc-name body-val acc-name body-val acc-name))
+                                       :min (.append body-sb (format "%s%s = (%s < %s) ? %s : %s;\n"
+                                                                     inner-indent acc-name body-val acc-name body-val acc-name))
+                                       (.append body-sb (format "%s%s += %s;\n" inner-indent acc-name body-val))))))
+                              ;; Close reduction loops
+                               (doseq [depth (reverse (range (count r-uops)))]
+                                 (let [loop-indent (str (if has-guard? (str cur-indent "  ") cur-indent)
+                                                        (apply str (repeat depth "  ")))]
+                                   (if (get @vectorized-depths depth)
+                                     (do
+                                       (.append body-sb (format "%s  }\n" loop-indent))
+                                       (.append body-sb (format "%s}\n" loop-indent)))
+                                     (.append body-sb (format "%s}\n" loop-indent))))))))
                          (when has-guard?
                            (.append body-sb (format "%s}\n" cur-indent)))
                          ;; If cooperative group reduction is enabled, perform tree reduction in LDS!
@@ -743,12 +889,18 @@
                  row-bound (if (> batch-heads 1) q-dim s-dim)]
              (dotimes [tm gemm-tile-m]
                (let [row-offset (* tm 16)
-                     guard-str (if (zero? row-offset)
-                                 (format "r_token_base < %d" row-bound)
-                                 (format "r_token_base + %d < %d" row-offset row-bound))
+                     guard-str (if use-lds-gemm?
+                                 (if (zero? row-offset)
+                                   (format "raw_channel < %d && raw_token_base < %d" n-dim row-bound)
+                                   (format "raw_channel < %d && raw_token_base + %d < %d" n-dim row-offset row-bound))
+                                 (if (zero? row-offset)
+                                   (format "r_token_base < %d" row-bound)
+                                   (format "r_token_base + %d < %d" row-offset row-bound)))
                      tok-val (if (zero? row-offset)
-                               "r_token_base"
-                               (format "(r_token_base + %d)" row-offset))
+                               (if use-lds-gemm? "raw_token_base" "r_token_base")
+                               (if use-lds-gemm?
+                                 (format "(raw_token_base + %d)" row-offset)
+                                 (format "(r_token_base + %d)" row-offset)))
                      acc-var (format "%s_%d" acc-name tm)
                      store-indent (str indent "  ")
                      tm-store-vars (doto (java.util.HashMap. var-names)

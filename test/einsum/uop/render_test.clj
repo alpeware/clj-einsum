@@ -208,7 +208,8 @@
                        (= [16 16 1] (:local-size hip-prog))
                        (or (str/includes? (:source hip-prog) "int r_token = (int)(blockIdx.y * 16 + threadIdx.y);")
                            (str/includes? (:source hip-prog) "r_token_base"))
-                       (str/includes? (:source hip-prog) "int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);")))))
+                       (or (str/includes? (:source hip-prog) "int r_channel = (int)(blockIdx.x * 16 + threadIdx.x);")
+                           (str/includes? (:source hip-prog) "raw_channel"))))))
 
 (deftest test-render-multi-row-upcast-prefill-gemm
   (testing "Multi-row register-upcast prefill GEMM emits tile-m accumulators, hoisted weights, and workgroup store"
@@ -225,6 +226,10 @@
       (is (= 2 (:tile-m opt-k0)))
       (is (= [16 16 1] (:local-size hip-prog)))
       (is (= [16 1 1] (:global-size hip-prog)))
+      (is (str/includes? src "__shared__ float s_W[16][17];"))
+      (is (str/includes? src "__shared__ float s_X[2][16][17];"))
+      (is (str/includes? src "s_W[threadIdx.y][threadIdx.x]"))
+      (is (str/includes? src "s_W[threadIdx.x][k_sub]"))
       (is (str/includes? src "r_token_base"))
       (is (str/includes? src "r_tok_0"))
       (is (str/includes? src "r_tok_1"))
@@ -232,10 +237,10 @@
       (is (str/includes? src "acc_1_1"))
       (let [loop-idx (.indexOf src "for (int rk_")
             idx-buf2 (.indexOf src "buf_2" loop-idx)
-            idx-tok0 (.indexOf src "r_tok_0" loop-idx)]
+            idx-buf1 (.indexOf src "buf_1" loop-idx)]
         (is (pos? idx-buf2))
-        (is (pos? idx-tok0))
-        (is (< idx-buf2 idx-tok0))))))
+        (is (pos? idx-buf1))
+        (is (< idx-buf2 idx-buf1))))))
 
 (deftest test-multi-row-rmsnorm-routing
   (testing "3D and 4D multi-row RMSNorm sum-sq reductions route to :gemma4-gemv (group 64, local-rows 4)"
@@ -402,11 +407,16 @@
       (is (= [16 16 1] (:local-size hip)))
       (is (= 2 (:tile-m opt-k)))
       (is (= [3 8 1] (:global-size hip)))
+      (is (str/includes? src "__shared__ float s_W[16][17];"))
+      (is (str/includes? src "__shared__ float s_X[2][16][17];"))
+      (is (str/includes? src "s_W[threadIdx.y][threadIdx.x]"))
+      (is (str/includes? src "s_W[threadIdx.x][k_sub]"))
       (is (str/includes? src "int r_head = (int)(blockIdx.y / 1);"))
-      (is (str/includes? src "int r_token_base = (int)((blockIdx.y % 1) * 32 + threadIdx.y);"))
+      (is (str/includes? src "int block_token_base = (int)((blockIdx.y % 1) * 32);"))
+      (is (str/includes? src "int raw_token_base = block_token_base + (int)threadIdx.y;"))
       (is (let [k-idx (.indexOf src "buf_2[" loop-idx)
-                tok0-idx (.indexOf src "int r_token = r_tok_0;" loop-idx)]
-            (and (pos? k-idx) (pos? tok0-idx) (< k-idx tok0-idx))))
+                q-idx (.indexOf src "buf_1[" loop-idx)]
+            (and (pos? k-idx) (pos? q-idx) (< k-idx q-idx))))
       (is (not (str/includes? inner-src "/ 32")))
       (is (not (str/includes? inner-src "% 32"))))))
 
@@ -471,5 +481,35 @@
       (is (= 2 (:tile-m opt-k)))
       (is (= [4 1 1] (:global-size hip))))))
 
-
-
+(defspec prop-lds-gemm-unaligned-parity
+  20
+  (prop/for-all [s (gen/choose 17 35)
+                 n (gen/choose 16 35)
+                 k (gen/choose 16 35)]
+                (let [a-data (float-array (repeatedly (* s k) #(- (rand 2.0) 1.0)))
+                      b-data (float-array (repeatedly (* k n) #(- (rand 2.0) 1.0)))
+                      p0 (uop/uop-param 0 :f32 [1 s k])
+                      p1 (uop/uop-param 1 :f32 [k n])
+                      e0 (uop/uop-expand (uop/uop-reshape p0 [1 s 1 k]) [1 s n k])
+                      e1 (-> p1
+                             (uop/uop-permute [1 0])
+                             (uop/uop-reshape [1 1 n k])
+                             (uop/uop-expand [1 s n k]))
+                      prod (uop/uop-alu :uop/mul e0 e1)
+                      red (uop/uop-reshape (uop/uop-reduce prod :add [3] false) [1 s n])
+                      rk (rangeify/rangeify-kernel red {:out-slot 2})
+                      opt-k (opt/optimize-kernel {:name "k_lds_unaligned" :rangeified rk} {:target :rocm})
+                      opt-rk (:rangeified opt-k)
+                      hip-prog (render/render-kernel opt-k {:target :rocm})
+                      src (:source hip-prog)
+                      raw-out ^floats (rangeify/eval-rangeified-kernel rk {0 a-data 1 b-data})
+                      opt-out ^floats (rangeify/eval-rangeified-kernel opt-rk {0 a-data 1 b-data})]
+                  (and (true? (:gemm-2d? opt-k))
+                       (= [16 16 1] (:local-size hip-prog))
+                       (str/includes? src "__shared__ float s_W[16][17];")
+                       (str/includes? src "s_W[threadIdx.x][k_sub]")
+                       (= (alength raw-out) (alength opt-out))
+                       (every? true?
+                               (map (fn [x y] (< (Math/abs (- (double x) (double y))) 1e-4))
+                                    (seq raw-out)
+                                    (seq opt-out)))))))
