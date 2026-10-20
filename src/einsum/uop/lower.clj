@@ -664,6 +664,112 @@
             out (uop/uop-permute out-trans [0 2 1 3])]
         (if out-shape (uop/uop-reshape out (vec out-shape)) out)))))
 
+(defn- lower-int4-unpack
+  "Lowers `[:int4-unpack head packed scale]` into pure view + ALU UOps without `:uop/cat`.
+   Unpacks each byte of `packed` (`[rows, half-cols] :i8`) into two 4-bit nibbles (low nibble = even col,
+   high nibble = odd col), subtracts zero-point 8.0f, and multiplies by `scale` (`[rows, num-groups]` or `[rows]`)."
+  [packed-uop scale-uop]
+  (let [sh (:shape packed-uop)
+        rows (long (first sh))
+        half-cols (long (second sh))
+        cols (* 2 half-cols)
+        shape-3d [rows half-cols 2]
+        packed-i32 (-> (uop/uop-cast packed-uop :i32)
+                       (uop/uop-reshape [rows half-cols 1])
+                       (uop/uop-expand shape-3d))
+        nibble-idx (uop/uop-iota shape-3d 2)
+        shift-amt (uop/uop-alu :uop/mul nibble-idx (uop/uop-const :i32 4 shape-3d))
+        shifted (uop/uop-alu :uop/shr packed-i32 shift-amt)
+        masked (uop/uop-alu :uop/and shifted (uop/uop-const :i32 15 shape-3d))
+        centered (uop/uop-alu :uop/sub
+                              (uop/uop-cast masked :f32)
+                              (uop/uop-const :f32 8.0 shape-3d))
+        unscaled-2d (uop/uop-reshape centered [rows cols])]
+    (if scale-uop
+      (let [scale-f32 (if (= (:dtype scale-uop) :f32)
+                        scale-uop
+                        (uop/uop-cast scale-uop :f32))
+            scale-sh (:shape scale-f32)
+            block-wise? (and (= 2 (count scale-sh)) (> (long (second scale-sh)) 1))
+            scale-2d (cond
+                       (= scale-sh [rows cols])
+                       scale-f32
+
+                       block-wise?
+                       (let [num-groups (long (second scale-sh))
+                             group-size (quot cols num-groups)]
+                         (-> scale-f32
+                             (uop/uop-reshape [rows num-groups 1])
+                             (uop/uop-expand [rows num-groups group-size])
+                             (uop/uop-reshape [rows cols])))
+
+                       (= 1 (count scale-sh))
+                       (-> scale-f32
+                           (uop/uop-reshape [rows 1])
+                           (uop/uop-expand [rows cols]))
+
+                       (= scale-sh [rows 1])
+                       (uop/uop-expand scale-f32 [rows cols])
+
+                       :else
+                       (broadcast-shape-suffix scale-f32 [rows cols]))]
+        (uop/uop-alu :uop/mul unscaled-2d scale-2d))
+      unscaled-2d)))
+
+(defn- lower-ternary-unpack
+  "Lowers `[:ternary-unpack head packed scale]` into pure view + ALU UOps without `:uop/cat`.
+   Unpacks each byte of `packed` (`[rows, quarter-cols]` or `[quarter-cols] :i8`) into four 2-bit trits
+   (bits 0..1, 2..3, 4..5, 6..7), subtracts 1.0f, and multiplies by optional `scale`."
+  [packed-uop scale-uop]
+  (let [sh (:shape packed-uop)
+        rank (count sh)
+        rows (if (= rank 2) (long (first sh)) 1)
+        quarter-cols (if (= rank 2) (long (second sh)) (long (first sh)))
+        cols (* 4 quarter-cols)
+        out-shape (if (= rank 2) [rows cols] [cols])
+        shape-3d [rows quarter-cols 4]
+        packed-i32 (-> (uop/uop-cast packed-uop :i32)
+                       (uop/uop-reshape [rows quarter-cols 1])
+                       (uop/uop-expand shape-3d))
+        trit-idx (uop/uop-iota shape-3d 2)
+        shift-amt (uop/uop-alu :uop/mul trit-idx (uop/uop-const :i32 2 shape-3d))
+        shifted (uop/uop-alu :uop/shr packed-i32 shift-amt)
+        masked (uop/uop-alu :uop/and shifted (uop/uop-const :i32 3 shape-3d))
+        centered (uop/uop-alu :uop/sub
+                              (uop/uop-cast masked :f32)
+                              (uop/uop-const :f32 1.0 shape-3d))
+        unscaled (uop/uop-reshape centered out-shape)]
+    (if scale-uop
+      (let [scale-f32 (if (= (:dtype scale-uop) :f32)
+                        scale-uop
+                        (uop/uop-cast scale-uop :f32))
+            scale-sh (:shape scale-f32)
+            block-wise? (and (= 2 (count scale-sh)) (> (long (second scale-sh)) 1))
+            scale-aligned (cond
+                            (= scale-sh out-shape)
+                            scale-f32
+
+                            block-wise?
+                            (let [num-groups (long (second scale-sh))
+                                  group-size (quot cols num-groups)]
+                              (-> scale-f32
+                                  (uop/uop-reshape [rows num-groups 1])
+                                  (uop/uop-expand [rows num-groups group-size])
+                                  (uop/uop-reshape out-shape)))
+
+                            (and (= rank 2) (= 1 (count scale-sh)))
+                            (-> scale-f32
+                                (uop/uop-reshape [rows 1])
+                                (uop/uop-expand [rows cols]))
+
+                            (and (= rank 2) (= scale-sh [rows 1]))
+                            (uop/uop-expand scale-f32 [rows cols])
+
+                            :else
+                            (broadcast-shape-suffix scale-f32 out-shape))]
+        (uop/uop-alu :uop/mul unscaled scale-aligned))
+      unscaled)))
+
 ;; -----------------------------------------------------------------------------
 ;; 4. Public AST -> UOp Graph Compiler
 ;; -----------------------------------------------------------------------------
@@ -774,6 +880,16 @@
                     (= op :rope)
                     (let [x-uop (get env (first (first body)))]
                       (lower-rope x-uop attrs env))
+
+                    (= op :int4-unpack)
+                    (let [packed-uop (get env (first (first body)))
+                          scale-uop (when (second body) (get env (first (second body))))]
+                      (lower-int4-unpack packed-uop scale-uop))
+
+                    (or (= op :ternary-unpack) (= op :ternary-dequant))
+                    (let [packed-uop (get env (first (first body)))
+                          scale-uop (when (second body) (get env (first (second body))))]
+                      (lower-ternary-unpack packed-uop scale-uop))
 
                     (or (= op :+) (= op :add))
                     (let [a (get env (first (first body)))

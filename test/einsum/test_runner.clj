@@ -88,6 +88,7 @@
             [einsum.tools.download-hf-test]
             [einsum.tools.fetch-pjrt-test]
             [einsum.uop.core-test]
+            [einsum.uop.lower-test]
             [einsum.uop.gemma4-ast-test]
             [einsum.uop.opt-test]
             [einsum.uop.beam-test]
@@ -144,6 +145,7 @@
    'experiments.gate1-compression.tiered-turbo-kv-test
    'einsum.logic.gather-test
    'einsum.uop.core-test
+   'einsum.uop.lower-test
    'einsum.uop.gemma4-ast-test
    'einsum.uop.opt-test
    'einsum.uop.beam-test

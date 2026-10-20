@@ -110,6 +110,9 @@
                            :uop/const
                            (uop/uop-const dtype arg [])
 
+                           :uop/iota
+                           (nth coords (:axis arg))
+
                            ;; 2. Vector Constants (e.g. RoPE cos/sin tables, causal mask)
                            :uop/vconst
                            (let [slot (or (get @vconst-Atom (:id node))
@@ -403,6 +406,7 @@
 (defn- read-buf-elem [buf idx]
   (let [i (int idx)]
     (cond
+      (instance? (Class/forName "[B") buf) (long (aget ^bytes buf i))
       (instance? (Class/forName "[F") buf) (double (aget ^floats buf i))
       (instance? (Class/forName "[I") buf) (long (aget ^ints buf i))
       (instance? (Class/forName "[D") buf) (double (aget ^doubles buf i))

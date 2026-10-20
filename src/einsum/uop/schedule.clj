@@ -40,13 +40,17 @@
      nodes)))
 
 (defn- param-leaf?
-  "Returns true if `node` is an underlying parameter leaf or a pure cast/view directly wrapping a parameter leaf."
+  "Returns true if `node` is an underlying parameter/constant leaf or a pure cast/view/dequant ALU chain
+   rooted solely in parameter/constant leaves (containing no reductions, gathers, or concatenations)."
   [node]
   (cond
     (nil? node) false
-    (contains? #{:uop/param :uop/buffer :uop/vconst} (:op node)) true
+    (contains? #{:uop/param :uop/buffer :uop/const :uop/vconst :uop/iota} (:op node)) true
     (contains? #{:uop/cast :uop/bitcast} (:op node)) (param-leaf? (first (:src node)))
-    (contains? uop/MOVEMENT_OPS (:op node)) (param-leaf? (first (:src node)))
+    (and (contains? uop/MOVEMENT_OPS (:op node)) (not= :uop/cat (:op node)))
+    (every? param-leaf? (:src node))
+    (contains? uop/ALU_OPS (:op node))
+    (and (seq (:src node)) (every? param-leaf? (:src node)))
     :else false))
 
 (defn- effective-consumer-count

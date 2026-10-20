@@ -352,6 +352,9 @@
           (= storage-dt :bf16)
           (dotimes [i n]
             (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (aget arr i)))))
+          (= storage-dt :i8)
+          (dotimes [i n]
+            (.set dst-seg ValueLayout/JAVA_BYTE (long i) (byte (aget arr i))))
           :else
           (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_INT 0 n)))
 
@@ -413,6 +416,9 @@
           (= storage-dt :bf16)
           (dotimes [i n]
             (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (nth v i)))))
+          (= storage-dt :i8)
+          (dotimes [i n]
+            (.set dst-seg ValueLayout/JAVA_BYTE (long i) (byte (nth v i))))
           :else
           (dotimes [i n]
             (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (float (nth v i))))))

@@ -41,7 +41,14 @@
          :uop/max (max (first vals) (second vals))
          :uop/min (min (first vals) (second vals))
          :uop/shl (bit-shift-left (long (first vals)) (long (second vals)))
-         :uop/shr (unsigned-bit-shift-right (long (first vals)) (long (second vals)))
+         :uop/shr (let [in-dt (:dtype (first src))
+                        v0 (long (first vals))
+                        v0-masked (case in-dt
+                                    (:i8 :u8) (bit-and v0 0xFF)
+                                    (:i16 :u16) (bit-and v0 0xFFFF)
+                                    (:i32 :u32) (bit-and v0 0xFFFFFFFF)
+                                    v0)]
+                    (unsigned-bit-shift-right v0-masked (long (second vals))))
          :uop/and (if (or (boolean? (first vals)) (boolean? (second vals)))
                     (and (boolean (first vals)) (boolean (second vals)))
                     (bit-and (long (first vals)) (long (second vals))))

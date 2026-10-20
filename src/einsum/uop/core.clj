@@ -14,7 +14,7 @@
 
 (def SOURCE_OPS
   "Leaf / source UOps."
-  #{:uop/buffer :uop/buffer-view :uop/param :uop/const :uop/vconst :uop/define-local :uop/special})
+  #{:uop/buffer :uop/buffer-view :uop/param :uop/const :uop/vconst :uop/define-local :uop/special :uop/iota})
 
 (def MOVEMENT_OPS
   "Pure view / layout movement UOps (zero-compute coordinate transformations)."
@@ -153,6 +153,14 @@
                     (contains? #{:bool :i1} dtype) (boolean val)
                     :else (long val))]
      (uop :uop/const dtype [] norm-val (vec shape)))))
+
+(defn uop-iota
+  "Creates a coordinate index UOp of `shape` (:i32) whose value at index vector `coords` is `(nth coords axis)`."
+  [shape axis]
+  (let [sh (mapv long shape)
+        ax (long axis)
+        ax-norm (if (neg? ax) (+ (count sh) ax) ax)]
+    (uop :uop/iota :i32 [] {:axis ax-norm} sh)))
 
 (defn uop-buffer
   "Creates a global persistent Buffer UOp of 1D size `n-elements`."
@@ -359,6 +367,9 @@
             :uop/const
             (format "%%%d = const %s : dtype=%s"
                     idx (str arg) (name dtype))
+
+            :uop/iota
+            (format "%%%d = iota(axis=%d) : %s %s" idx (:axis arg) (name dtype) (pr-str shape))
 
             (:uop/reshape :uop/expand :uop/permute :uop/shrink :uop/pad)
             (format "%%%d = %s %s %s"

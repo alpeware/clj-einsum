@@ -993,7 +993,13 @@
                                         :uop/max (format "((%s > %s) ? %s : %s)" e0 e1 e0 e1)
                                         :uop/min (format "((%s < %s) ? %s : %s)" e0 e1 e0 e1)
                                         :uop/shl (format "(%s << %s)" e0 e1)
-                                        :uop/shr (format "((unsigned int)%s >> %s)" e0 e1)
+                                        :uop/shr (let [in-dt (:dtype (first src))]
+                                                   (case in-dt
+                                                     :i8  (format "((unsigned int)((unsigned char)%s) >> %s)" e0 e1)
+                                                     :u8  (format "((unsigned int)((unsigned char)%s) >> %s)" e0 e1)
+                                                     :i16 (format "((unsigned int)((unsigned short)%s) >> %s)" e0 e1)
+                                                     :u16 (format "((unsigned int)((unsigned short)%s) >> %s)" e0 e1)
+                                                     (format "((unsigned int)%s >> %s)" e0 e1)))
                                         :uop/and (if (contains? #{:bool :i1} (:dtype (first src)))
                                                    (format "(%s && %s)" e0 e1)
                                                    (format "(%s & %s)" e0 e1))
