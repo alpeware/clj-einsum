@@ -613,3 +613,161 @@
             (finally
               (uop-rt/destroy-uop-executable! cpu-ctx exec-cpu)
               (uop-rt/destroy-uop-executable! rocm-ctx exec-rocm))))))))
+
+;; -----------------------------------------------------------------------------
+;; 7. Phase 7C: Fused INT4 GEMV & WMMA GEMM Hardware Parity
+;; -----------------------------------------------------------------------------
+
+(defn- f32->bf16
+  [f]
+  (short (bit-shift-right (Float/floatToIntBits (float f)) 16)))
+
+(defn- bf16->f32
+  [s]
+  (Float/intBitsToFloat (unchecked-int (bit-shift-left (bit-and (int s) 0xffff) 16))))
+
+(defn- reference-int4-unpack-gemm
+  [^shorts x-data ^bytes w-packed ^shorts w-scale m n k group-size]
+  (let [half-k (quot k 2)
+        num-groups (max 1 (quot k group-size))
+        out (float-array (* m n))]
+    (dotimes [i m]
+      (dotimes [j n]
+        (let [acc (double-array 1 0.0)]
+          (dotimes [col k]
+            (let [byte-idx (+ (* j half-k) (quot col 2))
+                  b (aget w-packed byte-idx)
+                  nibble (if (even? col)
+                           (bit-and (int b) 0x0F)
+                           (bit-and (unsigned-bit-shift-right (bit-and (int b) 0xFF) 4) 0x0F))
+                  unscaled (- (double nibble) 8.0)
+                  g (quot col group-size)
+                  scale-bits (aget w-scale (+ (* j num-groups) g))
+                  scale-val (bf16->f32 scale-bits)
+                  w-val (* unscaled scale-val)
+                  x-bits (aget x-data (+ (* i k) col))
+                  x-val (bf16->f32 x-bits)]
+              (aset acc 0 (+ (aget acc 0) (* (double x-val) (double w-val))))))
+          (aset out (+ (* i n) j) (float (aget acc 0))))))
+    out))
+
+(defspec prop-int4-unpack-gemv-and-wmma-gemm-parity
+  20
+  (prop/for-all [m (gen/elements [1 16])
+                 n (gen/elements [16 32])]
+                (let [k 128
+                      group-size 128
+                      x-data (short-array (repeatedly (* m k) #(f32->bf16 (- (rand 2.0) 1.0))))
+                      w-packed (byte-array (repeatedly (* n 64) #(byte (- (rand-int 256) 128))))
+                      w-scale (short-array (repeatedly (* n 1) #(f32->bf16 (+ 0.01 (rand 0.19)))))
+                      invars [[:X [:tensor [m k] :bf16]]
+                              [:W_packed [:tensor [n 64] :i8]]
+                              [:W_scale [:tensor [n 1] :bf16]]]
+                      ast [:steps
+                           [:int4-unpack [:W_u :n :k] [:W_packed :n :kh] [:W_scale :n :kg] {:group-size 128}]
+                           [:= [:Y :m :n] [:float32 [:* [:X :m :k] [:W_u :n :k]]]]]
+                      uop-graph (uop-lower/ast->uop-graph "prop_int4_gemv_wmma" invars ast [:Y])
+                      sched (schedule/schedule-graph uop-graph)
+                      cpu-ctx (uop-rt/init-uop-context! :uop-cpu)
+                      exec-cpu (uop-rt/compile-uop-executable cpu-ctx "prop_int4_gemv_wmma" invars ast [:Y])]
+                  (try
+                    (let [res (uop-rt/execute-uop-executable cpu-ctx exec-cpu [x-data w-packed w-scale])
+                          buf (get res :Y)
+                          floats-cpu (uop-rt/device->host-floats cpu-ctx buf (* m n))
+                          ref-floats (reference-int4-unpack-gemm x-data w-packed w-scale m n k group-size)
+                          diffs (map (fn [a b] (Math/abs (- (double a) (double b))))
+                                     (seq floats-cpu)
+                                     (seq ref-floats))
+                          max-err (reduce max 0.0 diffs)]
+                      (and (== 1 (count (:kernels sched)))
+                           (< max-err 1e-2)))
+                    (finally
+                      (uop-rt/destroy-uop-executable! cpu-ctx exec-cpu))))))
+
+(deftest test-int4-unpack-rocm-gemv-and-wmma-gemm-parity
+  (testing "Subtest A — Decode Cooperative GEMV (M = 1, N = 256, K = 256, group-size = 128)"
+    (let [m 1 n 256 k 256
+          invars [[:X [:tensor [1 256] :bf16]]
+                  [:W_packed [:tensor [256 128] :i8]]
+                  [:W_scale [:tensor [256 2] :bf16]]]
+          ast [:steps
+               [:int4-unpack [:W_u :n :k] [:W_packed :n :kh] [:W_scale :n :kg] {:group-size 128}]
+               [:= [:Y :m :n] [:float32 [:* [:X :m :k] [:W_u :n :k]]]]]
+          uop-graph (uop-lower/ast->uop-graph "gemv_int4" invars ast [:Y])
+          sched (schedule/schedule-graph uop-graph)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:target :rocm})
+          hip-prog (render/render-kernel opt-k0 {:target :rocm})]
+      (is (== 1 (count (:kernels sched))))
+      (is (true? (:has-group? opt-k0)))
+      (is (str/includes? (:source hip-prog) "(unsigned char)"))
+
+      (when (uop-rt/rocm-available?)
+        (let [cpu-ctx (uop-rt/init-uop-context! :uop-cpu)
+              rocm-ctx (uop-rt/init-uop-context! :uop-rocm)
+              x-data (short-array (repeatedly (* m k) #(f32->bf16 (- (rand 2.0) 1.0))))
+              w-packed (byte-array (repeatedly (* n 128) #(byte (- (rand-int 256) 128))))
+              w-scale (short-array (repeatedly (* n 2) #(f32->bf16 (+ 0.01 (rand 0.19)))))
+              exec-cpu (uop-rt/compile-uop-executable cpu-ctx "gemv_int4" invars ast [:Y])
+              exec-rocm (uop-rt/compile-uop-executable rocm-ctx "gemv_int4" invars ast [:Y])]
+          (try
+            (let [res-cpu (uop-rt/execute-uop-executable cpu-ctx exec-cpu [x-data w-packed w-scale])
+                  res-rocm (uop-rt/execute-uop-executable rocm-ctx exec-rocm [x-data w-packed w-scale])
+                  buf-cpu (get res-cpu :Y)
+                  buf-rocm (get res-rocm :Y)
+                  floats-cpu (uop-rt/device->host-floats cpu-ctx buf-cpu (* m n))
+                  floats-rocm (uop-rt/device->host-floats rocm-ctx buf-rocm (* m n))
+                  diffs (map (fn [a b] (Math/abs (- (double a) (double b))))
+                             (seq floats-cpu)
+                             (seq floats-rocm))
+                  max-err (reduce max 0.0 diffs)]
+              (println "test-int4-unpack-rocm-gemv max-err:" max-err)
+              (is (< max-err 1e-2)))
+            (finally
+              (uop-rt/destroy-uop-executable! cpu-ctx exec-cpu)
+              (uop-rt/destroy-uop-executable! rocm-ctx exec-rocm)))))))
+
+  (testing "Subtest B — Prefill Wave32 WMMA GEMM (M = 32, N = 256, K = 256, group-size = 128)"
+    (let [m 32 n 256 k 256
+          invars [[:X [:tensor [32 256] :bf16]]
+                  [:W_packed [:tensor [256 128] :i8]]
+                  [:W_scale [:tensor [256 2] :bf16]]]
+          ast [:steps
+               [:int4-unpack [:W_u :n :k] [:W_packed :n :kh] [:W_scale :n :kg] {:group-size 128}]
+               [:= [:Y :m :n] [:float32 [:* [:X :m :k] [:W_u :n :k]]]]]
+          uop-graph (uop-lower/ast->uop-graph "wmma_gemm_int4" invars ast [:Y])
+          sched (schedule/schedule-graph uop-graph)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:target :rocm})
+          hip-prog (render/render-kernel opt-k0 {:target :rocm})
+          src (:source hip-prog)]
+      (is (== 1 (count (:kernels sched))))
+      (is (true? (:gemm-2d? opt-k0)))
+      (is (str/includes? src "__shared__ short s_W[4][16][18];"))
+      (is (str/includes? src "(unsigned char)"))
+      (is (str/includes? src "rdna3_wmma_bf16_16x16x16"))
+
+      (when (uop-rt/rocm-available?)
+        (let [cpu-ctx (uop-rt/init-uop-context! :uop-cpu)
+              rocm-ctx (uop-rt/init-uop-context! :uop-rocm)
+              x-data (short-array (repeatedly (* m k) #(f32->bf16 (- (rand 2.0) 1.0))))
+              w-packed (byte-array (repeatedly (* n 128) #(byte (- (rand-int 256) 128))))
+              w-scale (short-array (repeatedly (* n 2) #(f32->bf16 (+ 0.01 (rand 0.19)))))
+              exec-cpu (uop-rt/compile-uop-executable cpu-ctx "wmma_gemm_int4" invars ast [:Y])
+              exec-rocm (uop-rt/compile-uop-executable rocm-ctx "wmma_gemm_int4" invars ast [:Y])]
+          (try
+            (let [res-cpu (uop-rt/execute-uop-executable cpu-ctx exec-cpu [x-data w-packed w-scale])
+                  res-rocm (uop-rt/execute-uop-executable rocm-ctx exec-rocm [x-data w-packed w-scale])
+                  buf-cpu (get res-cpu :Y)
+                  buf-rocm (get res-rocm :Y)
+                  floats-cpu (uop-rt/device->host-floats cpu-ctx buf-cpu (* m n))
+                  floats-rocm (uop-rt/device->host-floats rocm-ctx buf-rocm (* m n))
+                  diffs (map (fn [a b] (Math/abs (- (double a) (double b))))
+                             (seq floats-cpu)
+                             (seq floats-rocm))
+                  max-err (reduce max 0.0 diffs)]
+              (println "test-int4-unpack-rocm-wmma max-err:" max-err)
+              (is (< max-err 0.08)))
+            (finally
+              (uop-rt/destroy-uop-executable! cpu-ctx exec-cpu)
+              (uop-rt/destroy-uop-executable! rocm-ctx exec-rocm))))))))

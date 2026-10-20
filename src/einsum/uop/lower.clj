@@ -674,12 +674,12 @@
         half-cols (long (second sh))
         cols (* 2 half-cols)
         shape-3d [rows half-cols 2]
-        packed-i32 (-> (uop/uop-cast packed-uop :i32)
+        packed-exp (-> packed-uop
                        (uop/uop-reshape [rows half-cols 1])
                        (uop/uop-expand shape-3d))
         nibble-idx (uop/uop-iota shape-3d 2)
         shift-amt (uop/uop-alu :uop/mul nibble-idx (uop/uop-const :i32 4 shape-3d))
-        shifted (uop/uop-alu :uop/shr packed-i32 shift-amt)
+        shifted (uop/uop-alu :uop/shr packed-exp shift-amt)
         masked (uop/uop-alu :uop/and shifted (uop/uop-const :i32 15 shape-3d))
         centered (uop/uop-alu :uop/sub
                               (uop/uop-cast masked :f32)
@@ -712,8 +712,11 @@
                        (uop/uop-expand scale-f32 [rows cols])
 
                        :else
-                       (broadcast-shape-suffix scale-f32 [rows cols]))]
-        (uop/uop-alu :uop/mul unscaled-2d scale-2d))
+                       (broadcast-shape-suffix scale-f32 [rows cols]))
+            scaled (uop/uop-alu :uop/mul unscaled-2d scale-2d)]
+        (if (contains? #{:bf16 :f16} (:dtype scale-uop))
+          (uop/uop-cast scaled (:dtype scale-uop))
+          scaled))
       unscaled-2d)))
 
 (defn- lower-ternary-unpack

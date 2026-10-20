@@ -182,7 +182,37 @@
               (recur (conj acc eqn) synth-head rest-remaining))))))))
 
 (defmethod expand-node := [node ctx]
-  (decompose-n-ary-eqn node ctx))
+  (let [head (ast/head node)
+        attrs (ast/attrs node)
+        body (ast/body-terms node)
+        first-b (first body)]
+    (cond
+      ;; Explicit cast + product contraction: [:= head [:float32 [:* term1 term2]]]
+      (and (= 1 (count body))
+           (vector? first-b)
+           (contains? #{:float32 :f32 :bf16} (first first-b))
+           (vector? (second first-b))
+           (contains? #{:* :multiply} (first (second first-b))))
+      (if attrs
+        (into [:= head attrs] (rest (second first-b)))
+        (into [:= head] (rest (second first-b))))
+
+      ;; Direct product contraction: [:= head [:* term1 term2]]
+      (and (= 1 (count body))
+           (vector? first-b)
+           (contains? #{:* :multiply} (first first-b)))
+      (if attrs
+        (into [:= head attrs] (rest first-b))
+        (into [:= head] (rest first-b)))
+
+      :else
+      (decompose-n-ary-eqn node ctx))))
+
+(defmethod expand-node :steps [node _ctx]
+  (let [children (if (map? (second node))
+                   (drop 2 node)
+                   (rest node))]
+    (vec children)))
 
 (defmethod expand-node :block [node _ctx]
   (let [attrs (when (map? (second node)) (second node))
