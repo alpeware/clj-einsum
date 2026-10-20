@@ -1,6 +1,7 @@
 (ns einsum.compiler.pjrt
   "Project Panama FFM native bindings to OpenXLA PJRT C API (pjrt_c_api.h)."
-  (:require [clojure.java.io :as io])
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str])
   (:import [java.lang.foreign Arena FunctionDescriptor Linker Linker$Option MemoryLayout MemorySegment SymbolLookup ValueLayout]
            [java.lang.invoke MethodHandle]))
 
@@ -177,7 +178,7 @@
   [f]
   (let [name (if (string? f) f (.getName ^java.io.File f))]
     (and (boolean (re-find #"\.so(\.\d+)*$" name))
-         (not (boolean (re-find #"rocprofiler" name)))
+         (not (boolean (re-find #"rocprofiler|aqlprofile" name)))
          (not (boolean (re-find #"^(xla_cpu|pjrt_plugin|libpjrt)" name))))))
 
 (defonce ^:private gpu-keepalive-started? (atom false))
@@ -207,47 +208,49 @@
 (defn load-plugin!
   "Loads the PJRT shared object from `lib-path` and initializes the PJRT plugin."
   [lib-path]
-  (ensure-gpu-keepalive!)
-  (preload-libpython!)
-  (ensure-hsaco-cache-dir!)
-  (let [arena (Arena/global)
-        abs-file (io/file lib-path)
-        abs-path (.toAbsolutePath (.toPath abs-file))
-        ;; Pre-load companion libraries from bin/lib/ if present
-        bin-lib-dir (io/file (.getParent abs-file) "lib")
-        _ (when (.exists bin-lib-dir)
-            (let [linker (Linker/nativeLinker)
-                  stdlib (.defaultLookup linker)
-                  ^MemorySegment dlopen-seg (.get (.find stdlib "dlopen"))
-                  ^FunctionDescriptor desc (FunctionDescriptor/of ValueLayout/ADDRESS (into-array MemoryLayout [ValueLayout/ADDRESS ValueLayout/JAVA_INT]))
-                  dlopen-fn (.downcallHandle linker dlopen-seg desc (make-array Linker$Option 0))]
-              (dotimes [_ 5]
-                (doseq [f (file-seq bin-lib-dir)]
-                  (when (and (.isFile f) (companion-lib? f))
-                    (try
-                      (let [p-seg (.allocateFrom arena (.getAbsolutePath f))]
-                        (.invokeWithArguments dlopen-fn [p-seg (Integer/valueOf 258)]))
-                      (catch Exception _ nil)))))))
-        lookup (SymbolLookup/libraryLookup abs-path arena)
-        ^MemorySegment get-api (.orElseThrow (.find lookup "GetPjrtApi"))
-        linker (Linker/nativeLinker)
-        ^FunctionDescriptor fd (FunctionDescriptor/of ValueLayout/ADDRESS NO_LAYOUTS)
-        ^MethodHandle handle (.downcallHandle linker get-api fd NO_OPTIONS)
-        raw-api (.invokeWithArguments handle [])
-        ^MemorySegment api-ptr (.reinterpret ^MemorySegment raw-api 984)
-        api-ctx {:api-ptr api-ptr :linker linker :arena arena}]
+  (let [cpu-plugin? (str/includes? (str lib-path) "cpu")]
+    (when-not cpu-plugin?
+      (ensure-gpu-keepalive!)
+      (ensure-hsaco-cache-dir!))
+    (preload-libpython!)
+    (let [arena (Arena/global)
+          abs-file (io/file lib-path)
+          abs-path (.toAbsolutePath (.toPath abs-file))
+          ;; Pre-load companion libraries from bin/lib/ if present
+          bin-lib-dir (io/file (.getParent abs-file) "lib")
+          _ (when (and (not cpu-plugin?) (.exists bin-lib-dir))
+              (let [linker (Linker/nativeLinker)
+                    stdlib (.defaultLookup linker)
+                    ^MemorySegment dlopen-seg (.get (.find stdlib "dlopen"))
+                    ^FunctionDescriptor desc (FunctionDescriptor/of ValueLayout/ADDRESS (into-array MemoryLayout [ValueLayout/ADDRESS ValueLayout/JAVA_INT]))
+                    dlopen-fn (.downcallHandle linker dlopen-seg desc (make-array Linker$Option 0))]
+                (dotimes [_ 5]
+                  (doseq [f (file-seq bin-lib-dir)]
+                    (when (and (.isFile f) (companion-lib? f))
+                      (try
+                        (let [p-seg (.allocateFrom arena (.getAbsolutePath f))]
+                          (.invokeWithArguments dlopen-fn [p-seg (Integer/valueOf 258)]))
+                        (catch Exception _ nil)))))))
+          lookup (SymbolLookup/libraryLookup abs-path arena)
+          ^MemorySegment get-api (.orElseThrow (.find lookup "GetPjrtApi"))
+          linker (Linker/nativeLinker)
+          ^FunctionDescriptor fd (FunctionDescriptor/of ValueLayout/ADDRESS NO_LAYOUTS)
+          ^MethodHandle handle (.downcallHandle linker get-api fd NO_OPTIONS)
+          raw-api (.invokeWithArguments handle [])
+          ^MemorySegment api-ptr (.reinterpret ^MemorySegment raw-api 984)
+          api-ctx {:api-ptr api-ptr :linker linker :arena arena}]
 
-    ;; Call PJRT_Plugin_Initialize
-    (let [init-handle (downcall-ptr linker api-ptr OFFSET_PLUGIN_INITIALIZE ValueLayout/ADDRESS [ValueLayout/ADDRESS])
-          init-args (.allocate arena (long 16))]
-      (.set ^MemorySegment init-args ValueLayout/JAVA_LONG (long 0) (long 16))
-      (let [err (.invokeWithArguments ^MethodHandle init-handle [init-args])]
-        (check-error! api-ctx err)))
+      ;; Call PJRT_Plugin_Initialize
+      (let [init-handle (downcall-ptr linker api-ptr OFFSET_PLUGIN_INITIALIZE ValueLayout/ADDRESS [ValueLayout/ADDRESS])
+            init-args (.allocate arena (long 16))]
+        (.set ^MemorySegment init-args ValueLayout/JAVA_LONG (long 0) (long 16))
+        (let [err (.invokeWithArguments ^MethodHandle init-handle [init-args])]
+          (check-error! api-ctx err)))
 
-    (let [[major minor] (api-version api-ctx)]
-      (when-not (Boolean/getBoolean "clj-xla.quiet")
-        (println (format "PJRT Plugin loaded [%s] (API Version: %d.%d)" lib-path major minor))))
-    api-ctx))
+      (let [[major minor] (api-version api-ctx)]
+        (when-not (Boolean/getBoolean "clj-xla.quiet")
+          (println (format "PJRT Plugin loaded [%s] (API Version: %d.%d)" lib-path major minor))))
+      api-ctx)))
 
 (defn- build-named-values [^Arena arena opts]
   (if (empty? opts)

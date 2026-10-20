@@ -304,7 +304,9 @@
          use-w4a16? (boolean (and layer-is-int4?
                                   (if (some? (:use-w4a16-gemv config))
                                     (:use-w4a16-gemv config)
-                                    (or (= (:backend config) :rocm) (= (:target config) :rocm)))))
+                                    (and (or (= (:backend config) :rocm) (= (:target config) :rocm))
+                                         (not (contains? #{:uop :uop-rocm :uop-cpu} (:backend config)))
+                                         (not (contains? #{:uop :uop-rocm :uop-cpu} (:target config)))))))
          proj-attrs {:use-w4a16-gemv? use-w4a16?}
          norm-dtype (get config :norm-dtype (if (or is-int8? is-int4? is-ternary?) :bf16 (get config :weight-dtype :bf16)))
 
@@ -636,7 +638,9 @@
          use-w4a16? (boolean (and layer-is-int4?
                                   (if (some? (:use-w4a16-gemv config))
                                     (:use-w4a16-gemv config)
-                                    (or (= (:backend config) :rocm) (= (:target config) :rocm)))))
+                                    (and (or (= (:backend config) :rocm) (= (:target config) :rocm))
+                                         (not (contains? #{:uop :uop-rocm :uop-cpu} (:backend config)))
+                                         (not (contains? #{:uop :uop-rocm :uop-cpu} (:target config)))))))
          proj-attrs {:use-w4a16-gemv? use-w4a16?}
          norm-dtype (get config :norm-dtype (if (or is-int8? is-int4? is-ternary?) :bf16 (get config :weight-dtype :bf16)))
          turboquant? (boolean (or (:turboquant-kv? config)
@@ -817,6 +821,13 @@
                                 {:softcap (double final-logit-softcap)}
                                 {})
         [:normed :b :p :d] [:embed_tokens :v :d]])]))
+
+(defn build-gemma4-kv-ast
+  "Builds Gemma 4 KV model AST for given config and optional max-seq-len."
+  ([config]
+   (gemma4-kv-model-ast config))
+  ([config max-seq-len]
+   (gemma4-kv-model-ast (assoc config :max-seq-len max-seq-len))))
 
 ;; ==============================================================================
 ;; 2. Canonical Signature Builders (Invars and Outvars)

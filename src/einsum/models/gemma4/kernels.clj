@@ -23,7 +23,9 @@
         use-w4a16? (and int4?
                         (if (some? (:use-w4a16-gemv config))
                           (boolean (:use-w4a16-gemv config))
-                          (or (= backend :rocm) (= target :rocm))))
+                          (and (or (= backend :rocm) (= target :rocm))
+                               (not (contains? #{:uop :uop-rocm :uop-cpu} backend))
+                               (not (contains? #{:uop :uop-rocm :uop-cpu} target)))))
         scale-groups-fn (fn [in-dim]
                           (if (and group-size (zero? (mod in-dim group-size)))
                             (quot in-dim group-size)

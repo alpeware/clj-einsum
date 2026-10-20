@@ -234,6 +234,8 @@
    Registers buffers in session-arena and populates weight-store device-buffers map."
   [{:keys [ctx weights-mmap config session-arena weight-store] :as _session}]
   (let [target-arena (or session-arena arena/*active-arena*)
+        header (or (:header weights-mmap) {})
+        tensors (or (:tensors weights-mmap) {})
         register-store-entry! (fn [k buf]
                                 (when (and weight-store buf)
                                   (swap! (:device-buffers weight-store) assoc k buf))
@@ -244,7 +246,9 @@
             use-w4a16? (and int4?
                             (if (some? (:use-w4a16-gemv config))
                               (boolean (:use-w4a16-gemv config))
-                              (or (= backend :rocm) (= target :rocm))))
+                              (and (or (= backend :rocm) (= target :rocm))
+                                   (not (contains? #{:uop :uop-rocm :uop-cpu} backend))
+                                   (not (contains? #{:uop :uop-rocm :uop-cpu} target)))))
             has-ple? (pos? total-pl-dim)
             load-fn (fn
                       ([name shape enum] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum 0.0 target-arena))
@@ -285,7 +289,18 @@
                                                                        (load-fn (:layer-scalar-w kmap) [1] norm-enum 1.0))
                                        q-bufs (load-linear-fn (:q-w kmap) [q-dim hidden-dim] (keyword (str "q_w_" i)) (keyword (str "q_scale_" i)))
                                        k-bufs (load-linear-fn (:k-w kmap) [kv-dim hidden-dim] (keyword (str "k_w_" i)) (keyword (str "k_scale_" i)))
-                                       v-bufs (load-linear-fn (:v-w kmap) [kv-dim hidden-dim] (keyword (str "v_w_" i)) (keyword (str "v_scale_" i)))
+                                       k-shares-v? (and (not (contains? header (:v-w kmap)))
+                                                        (not (contains? tensors (:v-w kmap)))
+                                                        (or (contains? header (:k-w kmap))
+                                                            (contains? tensors (:k-w kmap))))
+                                       v-bufs (if k-shares-v?
+                                                (do
+                                                  (if quantized?
+                                                    (do (register-store-entry! (keyword (str "v_w_" i)) (first k-bufs))
+                                                        (register-store-entry! (keyword (str "v_scale_" i)) (second k-bufs)))
+                                                    (register-store-entry! (keyword (str "v_w_" i)) (first k-bufs)))
+                                                  k-bufs)
+                                                (load-linear-fn (:v-w kmap) [kv-dim hidden-dim] (keyword (str "v_w_" i)) (keyword (str "v_scale_" i))))
                                        o-bufs (load-linear-fn (:o-w kmap) [hidden-dim q-dim] (keyword (str "o_w_" i)) (keyword (str "o_scale_" i)))
                                        qn (register-store-entry! (keyword (str "q_norm_w_" i))
                                                                  (load-fn (:q-norm-w kmap) [head-dim] norm-enum 0.0))

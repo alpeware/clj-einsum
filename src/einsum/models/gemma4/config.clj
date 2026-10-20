@@ -14,11 +14,19 @@
    ".models/gemma-4-12B-it-qat-int4"
    ".models/gemma-4-12B-it"
    ".models/gemma-4-12b-it"
+   ".models/gemma-4-31b-it-int4"
+   ".models/gemma-4-31B-it-int4"
    ".models/gemma-4-31B-it"
    ".models/gemma-4-31b-it"
    ".models/gemma4-2b"
    ".models/gemma-2b"
    ".models/gemma4"])
+
+(defn uop-backend?
+  "Returns true if `b` or `t` specifies a UOp backend (`:uop`, `:uop-rocm`, `:uop-cpu`)."
+  [b t]
+  (or (contains? #{:uop :uop-rocm :uop-cpu} b)
+      (contains? #{:uop :uop-rocm :uop-cpu} t)))
 
 (defn find-model-dir
   "Finds the first existing model directory from candidate paths."
@@ -60,7 +68,8 @@
   (let [use-w4a16? (and (:is-int4 config)
                         (if (some? (:use-w4a16-gemv config))
                           (boolean (:use-w4a16-gemv config))
-                          (or (= (:backend config) :rocm) (= (:target config) :rocm))))]
+                          (and (or (= (:backend config) :rocm) (= (:target config) :rocm))
+                               (not (uop-backend? (:backend config) (:target config))))))]
     (cond
       use-w4a16?
       0

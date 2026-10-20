@@ -11,7 +11,9 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [einsum.core :as xla]))
+            [einsum.core :as xla]
+            [einsum.models.gemma4 :as gemma4]
+            [einsum.models.gemma4.kernels :as kernels]))
 
 ;; -----------------------------------------------------------------------------
 ;; 1. Proportional RoPE (:rope-proportion)
@@ -184,3 +186,52 @@
                                         (range head-dim)))
                   mean-sq (/ sum-sq (double head-dim))]
               (is (<= (Math/abs (- mean-sq 1.0)) 1e-3)))))))))
+
+;; -----------------------------------------------------------------------------
+;; 6. Gemma 4 31B INT4 UOp ROCm Routing & Invars Invariants
+;; -----------------------------------------------------------------------------
+
+(deftest test-gemma4-31b-int4-uop-rocm-routing
+  (testing "Gemma 4 31B INT4 routes to pure UOp int4-unpack instead of W4A16 custom call when backend is :uop / :uop-rocm"
+    (let [base-cfg {:is-int4 true
+                    :weight-dtype :int4
+                    :group-size 128
+                    :vocab-size 256
+                    :hidden-dim 256
+                    :num-layers 2
+                    :num-heads 4
+                    :num-kv-heads 2
+                    :head-dim 64
+                    :global-head-dim 128
+                    :num-global-kv-heads 1
+                    :intermediate-dim 512
+                    :total-pl-dim 0
+                    :pl-dim 0
+                    :q-len 1
+                    :max-seq-len 128}
+          uop-cfg (assoc base-cfg :backend :uop :target :uop-rocm)
+          rocm-cfg (assoc base-cfg :backend :rocm :target :rocm)
+          ;; 1. Invars verification
+          uop-invars (into {} (map (fn [[k spec]] [k spec])) (kernels/build-tensor-logic-invars uop-cfg 128))
+          rocm-invars (into {} (map (fn [[k spec]] [k spec])) (kernels/build-tensor-logic-invars rocm-cfg 128))]
+      ;; Verify uop-rocm emits standard [rows cols/2] :i8 and [rows cols/group-size] :bf16
+      (is (= [:tensor [256 128] :i8] (get uop-invars :q_w_0)))
+      (is (= [:tensor [256 2] :bf16] (get uop-invars :q_scale_0)))
+      ;; Verify rocm emits W4A16 repacked [cols/8 rows] :i32
+      (is (= [:tensor [32 256] :i32] (get rocm-invars :q_w_0)))
+
+      ;; 2. AST equation routing verification
+      (let [uop-ast (gemma4/build-gemma4-kv-ast uop-cfg 128)
+            rocm-ast (gemma4/build-gemma4-kv-ast rocm-cfg 128)
+            uop-ops (map first (filter #(and (vector? %) (keyword? (first %))) (tree-seq coll? seq uop-ast)))
+            rocm-ops (map first (filter #(and (vector? %) (keyword? (first %))) (tree-seq coll? seq rocm-ast)))
+            uop-unpack-count (count (filter #(= % :int4-unpack) uop-ops))
+            uop-w4a16-count (count (filter #(= % :w4a16-gemv) uop-ops))
+            rocm-unpack-count (count (filter #(= % :int4-unpack) rocm-ops))
+            rocm-w4a16-count (count (filter #(= % :w4a16-gemv) rocm-ops))]
+        ;; UOp backend uses in-accelerator :int4-unpack and zero :w4a16-gemv
+        (is (> uop-unpack-count 0))
+        (is (zero? uop-w4a16-count))
+        ;; OpenXLA ROCm backend uses custom-call :w4a16-gemv and zero :int4-unpack
+        (is (> rocm-w4a16-count 0))
+        (is (zero? rocm-unpack-count))))))
