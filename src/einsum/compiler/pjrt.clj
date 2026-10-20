@@ -174,24 +174,28 @@
 
 (defn companion-lib?
   "Returns true if file `f` (File object or filename string) is a companion library that should be preloaded,
-   excluding main PJRT plugin shared objects (e.g. libpjrt_*, xla_cpu_pjrt.so, pjrt_plugin_xpu.so) and rocprofiler."
+   excluding main PJRT plugin shared objects (e.g. libpjrt_*, xla_cpu_pjrt.so, pjrt_plugin_xpu.so) and rocprofiler.
+   Note: rocprofiler is excluded because it depends on external librocprofiler-sdk not bundled in bin/lib/.
+   libhsa-amd-aqlprofile64.so must remain included because bin/lib/libhsa-runtime64.so.1 dynamically loads it
+   during hsa_init() and requires its companion symbols in RTLD_GLOBAL once the GPU is awake.
+   (bin/libpjrt_cpu.so skips bin/lib/ entirely via (not cpu-plugin?) in load-plugin!)."
   [f]
   (let [name (if (string? f) f (.getName ^java.io.File f))]
     (and (boolean (re-find #"\.so(\.\d+)*$" name))
+         ;; rocprofiler requires librocprofiler-sdk which is not bundled in bin/lib/;
+         ;; libhsa-amd-aqlprofile64.so is required by libhsa-runtime64 during hsa_init().
          (not (boolean (re-find #"rocprofiler" name)))
          (not (boolean (re-find #"^(xla_cpu|pjrt_plugin|libpjrt)" name))))))
 
-(defonce ^:private gpu-keepalive-started? (atom false))
-
-(defn- ensure-gpu-keepalive!
-  "Starts a daemon background thread that touches /dev/dri/renderD128 every 2 seconds
-   to prevent AMD ROCm GPUs from entering PCIe runtime autosuspend (D3cold) while PJRT is active,
-   and waits synchronously for runtime_status to reach `active`."
+(defn ensure-amdgpu-active!
+  "Ensures the AMD ROCm GPU is in runtime PM `active` state and resets its autosuspend
+   timer by touching `/dev/dri/renderD128`, polling `/sys/class/drm/renderD128/device/power/runtime_status`
+   synchronously for up to 2 seconds."
   []
-  (let [dev-render (io/file "/dev/dri/renderD128")
-        status-file (io/file "/sys/class/drm/renderD128/device/power/runtime_status")]
-    (when (.exists dev-render)
-      (when (.exists status-file)
+  (try
+    (let [dev-render (io/file "/dev/dri/renderD128")
+          status-file (io/file "/sys/class/drm/renderD128/device/power/runtime_status")]
+      (when (and (.exists dev-render) (.exists status-file))
         (loop [attempt 0]
           (let [st (str/trim (slurp status-file))]
             (cond
@@ -203,7 +207,19 @@
                 (when (= st "suspended")
                   (try (with-open [_is (io/input-stream dev-render)] nil) (catch Exception _ nil)))
                 (Thread/sleep 50)
-                (recur (inc attempt)))))))
+                (recur (inc attempt))))))))
+    (catch Throwable _ nil)))
+
+(defonce ^:private gpu-keepalive-started? (atom false))
+
+(defn- ensure-gpu-keepalive!
+  "Starts a daemon background thread that touches /dev/dri/renderD128 every 2 seconds
+   to prevent AMD ROCm GPUs from entering PCIe runtime autosuspend (D3cold) while PJRT is active,
+   and waits synchronously for runtime_status to reach `active`."
+  []
+  (ensure-amdgpu-active!)
+  (let [dev-render (io/file "/dev/dri/renderD128")]
+    (when (.exists dev-render)
       (when (compare-and-set! gpu-keepalive-started? false true)
         (let [t (Thread.
                  ^Runnable

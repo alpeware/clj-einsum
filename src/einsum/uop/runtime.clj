@@ -8,7 +8,7 @@
      kernels back-to-back on the default HIP stream with zero intermediate host-device synchronization."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as sh]
-            [clojure.string :as str]
+            [einsum.compiler.pjrt :as pjrt]
             [einsum.logic.interpret :as interpret]
             [einsum.uop.lower :as uop-lower]
             [einsum.uop.opt :as opt]
@@ -77,34 +77,6 @@
 ;; 2. HIP & HIPRTC Project Panama FFM Bindings (`/usr/lib64/libamdhip64.so`)
 ;; -----------------------------------------------------------------------------
 
-(defn- ensure-amdgpu-active!
-  "Ensures the AMD GPU is in runtime PM `active` state and resets its autosuspend
-   timer before `hipInit(0)`."
-  []
-  (try
-    (let [status-file (io/file "/sys/class/drm/renderD128/device/power/runtime_status")
-          render-file (io/file "/dev/dri/renderD128")]
-      (when (and (.exists status-file) (.exists render-file))
-        (loop [attempt 0]
-          (let [st (str/trim (slurp status-file))]
-            (cond
-              (= st "active")
-              (try
-                (with-open [_ (java.io.FileInputStream. render-file)]
-                  nil)
-                (catch Throwable _ nil))
-
-              (< attempt 40)
-              (do
-                (when (= st "suspended")
-                  (try
-                    (with-open [_ (java.io.FileInputStream. render-file)]
-                      nil)
-                    (catch Throwable _ nil)))
-                (Thread/sleep 50)
-                (recur (inc attempt))))))))
-    (catch Throwable _ nil)))
-
 (defonce ^:private hip-runtime-state (atom nil))
 
 (defn- make-downcall
@@ -128,7 +100,7 @@
                   rtc-file (io/file rtc-path)]
               (if-not (and (.exists hip-file) (.exists rtc-file))
                 {:available? false :reason "ROCm HIP/HIPRTC shared libraries not found"}
-                (let [_ (ensure-amdgpu-active!)
+                (let [_ (pjrt/ensure-amdgpu-active!)
                       lib-arena (Arena/ofShared)
                       linker (Linker/nativeLinker)
                       hip-lookup (SymbolLookup/libraryLookup (.getAbsolutePath hip-file) lib-arena)
@@ -381,6 +353,8 @@
           (let [^shorts tmp-shorts (short-array n)]
             (dotimes [i n]
               (let [v (aget arr i)]
+                ;; Zero-initialized staging array canonicalizes -0.0f (0x8000) to +0.0f (0x0000)
+                ;; and avoids per-element conversion overhead on zero-filled KV caches and tensors.
                 (when-not (zero? v)
                   (aset tmp-shorts i (f32->bf16-short v)))))
             (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n)))
@@ -401,6 +375,8 @@
           (let [^shorts tmp-shorts (short-array n)]
             (dotimes [i n]
               (let [v (aget arr i)]
+                ;; Zero-initialized staging array canonicalizes -0.0f (0x8000) to +0.0f (0x0000)
+                ;; and avoids per-element conversion overhead on zero-filled KV caches and tensors.
                 (when-not (zero? v)
                   (aset tmp-shorts i (f32->bf16-short (float v))))))
             (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n)))
@@ -446,6 +422,8 @@
           (let [^shorts tmp-shorts (short-array n)]
             (dotimes [i n]
               (let [v (aget arr i)]
+                ;; Zero-initialized staging array canonicalizes -0.0f (0x8000) to +0.0f (0x0000)
+                ;; and avoids per-element conversion overhead on zero-filled KV caches and tensors.
                 (when-not (zero? v)
                   (aset tmp-shorts i (f32->bf16-short (float v))))))
             (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n)))
@@ -468,6 +446,8 @@
           (let [^shorts tmp-shorts (short-array n)]
             (dotimes [i n]
               (let [v (aget arr i)]
+                ;; Zero-initialized staging array canonicalizes -0.0f (0x8000) to +0.0f (0x0000)
+                ;; and avoids per-element conversion overhead on zero-filled KV caches and tensors.
                 (when-not (zero? v)
                   (aset tmp-shorts i (f32->bf16-short (float v))))))
             (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n)))

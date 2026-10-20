@@ -731,12 +731,12 @@
         cols (* 4 quarter-cols)
         out-shape (if (= rank 2) [rows cols] [cols])
         shape-3d [rows quarter-cols 4]
-        packed-i32 (-> (uop/uop-cast packed-uop :i32)
+        packed-exp (-> packed-uop
                        (uop/uop-reshape [rows quarter-cols 1])
                        (uop/uop-expand shape-3d))
         trit-idx (uop/uop-iota shape-3d 2)
         shift-amt (uop/uop-alu :uop/mul trit-idx (uop/uop-const :i32 2 shape-3d))
-        shifted (uop/uop-alu :uop/shr packed-i32 shift-amt)
+        shifted (uop/uop-alu :uop/shr packed-exp shift-amt)
         masked (uop/uop-alu :uop/and shifted (uop/uop-const :i32 3 shape-3d))
         centered (uop/uop-alu :uop/sub
                               (uop/uop-cast masked :f32)

@@ -770,4 +770,48 @@
               (is (< max-err 0.08)))
             (finally
               (uop-rt/destroy-uop-executable! cpu-ctx exec-cpu)
+              (uop-rt/destroy-uop-executable! rocm-ctx exec-rocm)))))))
+
+  (testing "Subtest C — Short-Batch Prefill Wave32 WMMA GEMM (M = 14, N = 256, K = 256, group-size = 128)"
+    (let [m 14 n 256 k 256
+          invars [[:X [:tensor [14 256] :bf16]]
+                  [:W_packed [:tensor [256 128] :i8]]
+                  [:W_scale [:tensor [256 2] :bf16]]]
+          ast [:steps
+               [:int4-unpack [:W_u :n :k] [:W_packed :n :kh] [:W_scale :n :kg] {:group-size 128}]
+               [:= [:Y :m :n] [:float32 [:* [:X :m :k] [:W_u :n :k]]]]]
+          uop-graph (uop-lower/ast->uop-graph "wmma_gemm_int4_short_batch" invars ast [:Y])
+          sched (schedule/schedule-graph uop-graph)
+          k0 (first (:kernels sched))
+          opt-k0 (opt/optimize-kernel k0 {:target :rocm})
+          hip-prog (render/render-kernel opt-k0 {:target :rocm})
+          src (:source hip-prog)]
+      (is (== 1 (count (:kernels sched))))
+      (is (true? (:gemm-2d? opt-k0)))
+      (is (str/includes? src "__shared__ short s_W[4][16][18];"))
+      (is (str/includes? src "rdna3_wmma_bf16_16x16x16"))
+
+      (when (uop-rt/rocm-available?)
+        (let [cpu-ctx (uop-rt/init-uop-context! :uop-cpu)
+              rocm-ctx (uop-rt/init-uop-context! :uop-rocm)
+              x-data (short-array (repeatedly (* m k) #(f32->bf16 (- (rand 2.0) 1.0))))
+              w-packed (byte-array (repeatedly (* n 128) #(byte (- (rand-int 256) 128))))
+              w-scale (short-array (repeatedly (* n 2) #(f32->bf16 (+ 0.01 (rand 0.19)))))
+              exec-cpu (uop-rt/compile-uop-executable cpu-ctx "wmma_gemm_int4_short_batch" invars ast [:Y])
+              exec-rocm (uop-rt/compile-uop-executable rocm-ctx "wmma_gemm_int4_short_batch" invars ast [:Y])]
+          (try
+            (let [res-cpu (uop-rt/execute-uop-executable cpu-ctx exec-cpu [x-data w-packed w-scale])
+                  res-rocm (uop-rt/execute-uop-executable rocm-ctx exec-rocm [x-data w-packed w-scale])
+                  buf-cpu (get res-cpu :Y)
+                  buf-rocm (get res-rocm :Y)
+                  floats-cpu (uop-rt/device->host-floats cpu-ctx buf-cpu (* m n))
+                  floats-rocm (uop-rt/device->host-floats rocm-ctx buf-rocm (* m n))
+                  diffs (map (fn [a b] (Math/abs (- (double a) (double b))))
+                             (seq floats-cpu)
+                             (seq floats-rocm))
+                  max-err (reduce max 0.0 diffs)]
+              (println "test-int4-unpack-rocm-wmma-short-batch max-err:" max-err)
+              (is (< max-err 0.08)))
+            (finally
+              (uop-rt/destroy-uop-executable! cpu-ctx exec-cpu)
               (uop-rt/destroy-uop-executable! rocm-ctx exec-rocm))))))))

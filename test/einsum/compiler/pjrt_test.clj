@@ -14,6 +14,7 @@
     (is (false? (pjrt/companion-lib? "rocprofiler.so")))
     (is (true? (pjrt/companion-lib? "libsycl.so")))
     (is (true? (pjrt/companion-lib? "libmkl_core.so.2")))
+    (is (true? (pjrt/companion-lib? "libhsa-amd-aqlprofile64.so")))
     (is (true? (pjrt/companion-lib? "libccl.so")))))
 
 (deftest pjrt-cpu-plugin-test

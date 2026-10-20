@@ -123,15 +123,22 @@
                       (>= k-dim 64))
                  (get catalog :gemma4-gemv)
 
-                 ;; 2D Matmul / large contractions (M >= 16, N >= 16)
+                 ;; 2D Matmul / large contractions:
+                 ;; Route M >= 16 (N >= 16) OR short-batch 2 <= M <= 15 when eligible for
+                 ;; 2D LDS / Wave32 BF16 WMMA channel tiling (N >= 64, 64|N, K >= 256)
                  (and (:has-reduce? sig)
                       (not row-reduce?)
                       (>= num-out 2)
-                      (>= m-dim 16)
-                      (>= n-dim 16))
+                      (>= n-dim 16)
+                      (or (>= m-dim 16)
+                          (and (> num-out 2) (>= m-dim 2) (>= k-dim 64))
+                          (and (>= m-dim 4)
+                               (>= n-dim 64)
+                               (zero? (mod n-dim 64))
+                               (>= k-dim 256))))
                  (get catalog :gemma4-gemm)
 
-                 ;; Short-batch prefill GEMM (2 <= M <= 15, N >= 16, K >= 64)
+                 ;; Short-batch fallback GEMM (2 <= M <= 15 when N < 64, N % 64 != 0, or 64 <= K < 256)
                  (and (:has-reduce? sig)
                       (not row-reduce?)
                       (>= num-out 2)
