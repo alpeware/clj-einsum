@@ -3,6 +3,7 @@
   (:require [einsum.core :as xla]
             [einsum.logic.lower :as lower]
             [einsum.models.gemma :as gemma-logic]
+            [einsum.models.gemma4.config :as cfg]
             [einsum.runtime.arena :as arena]))
 
 (def GEMMA4-STOP-TOKEN-IDS
@@ -265,7 +266,9 @@
                                                 zeros (byte-array (* seq-l n-kv packed-dim))]
                                             [(xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)
                                              (xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)])
-                                          (let [zeros (float-array (* seq-l n-kv h-dim))]
+                                          (let [zeros (if (and (cfg/uop-backend? config) (= norm-enum 13))
+                                                        (short-array (* seq-l n-kv h-dim))
+                                                        (float-array (* seq-l n-kv h-dim)))]
                                             [(xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)
                                              (xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)]))]
                       (when target-arena

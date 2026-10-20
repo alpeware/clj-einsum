@@ -23,10 +23,14 @@
    ".models/gemma4"])
 
 (defn uop-backend?
-  "Returns true if `b` or `t` specifies a UOp backend (`:uop`, `:uop-rocm`, `:uop-cpu`)."
-  [b t]
-  (or (contains? #{:uop :uop-rocm :uop-cpu} b)
-      (contains? #{:uop :uop-rocm :uop-cpu} t)))
+  "Returns true if `config`, `b` or `t` specifies a UOp backend (`:uop`, `:uop-rocm`, `:uop-cpu`)."
+  ([config]
+   (if (map? config)
+     (uop-backend? (:backend config) (:target config))
+     (contains? #{:uop :uop-rocm :uop-cpu} config)))
+  ([b t]
+   (or (contains? #{:uop :uop-rocm :uop-cpu} b)
+       (contains? #{:uop :uop-rocm :uop-cpu} t))))
 
 (defn find-model-dir
   "Finds the first existing model directory from candidate paths."

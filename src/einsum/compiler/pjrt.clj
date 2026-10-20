@@ -178,20 +178,33 @@
   [f]
   (let [name (if (string? f) f (.getName ^java.io.File f))]
     (and (boolean (re-find #"\.so(\.\d+)*$" name))
-         (not (boolean (re-find #"rocprofiler|aqlprofile" name)))
+         (not (boolean (re-find #"rocprofiler" name)))
          (not (boolean (re-find #"^(xla_cpu|pjrt_plugin|libpjrt)" name))))))
 
 (defonce ^:private gpu-keepalive-started? (atom false))
 
 (defn- ensure-gpu-keepalive!
   "Starts a daemon background thread that touches /dev/dri/renderD128 every 2 seconds
-   to prevent AMD ROCm GPUs from entering PCIe runtime autosuspend (D3cold) while PJRT is active."
+   to prevent AMD ROCm GPUs from entering PCIe runtime autosuspend (D3cold) while PJRT is active,
+   and waits synchronously for runtime_status to reach `active`."
   []
-  (when (compare-and-set! gpu-keepalive-started? false true)
-    (let [dev-render (io/file "/dev/dri/renderD128")]
-      (when (.exists dev-render)
-        ;; Wake GPU immediately
-        (try (with-open [_is (io/input-stream dev-render)] nil) (catch Exception _ nil))
+  (let [dev-render (io/file "/dev/dri/renderD128")
+        status-file (io/file "/sys/class/drm/renderD128/device/power/runtime_status")]
+    (when (.exists dev-render)
+      (when (.exists status-file)
+        (loop [attempt 0]
+          (let [st (str/trim (slurp status-file))]
+            (cond
+              (= st "active")
+              (try (with-open [_is (io/input-stream dev-render)] nil) (catch Exception _ nil))
+
+              (< attempt 40)
+              (do
+                (when (= st "suspended")
+                  (try (with-open [_is (io/input-stream dev-render)] nil) (catch Exception _ nil)))
+                (Thread/sleep 50)
+                (recur (inc attempt)))))))
+      (when (compare-and-set! gpu-keepalive-started? false true)
         (let [t (Thread.
                  ^Runnable
                  (fn []

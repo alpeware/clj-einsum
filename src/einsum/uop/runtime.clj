@@ -335,6 +335,11 @@
           (.close a)))
       (catch Throwable _ nil))))
 
+(defn- f32->bf16-short
+  "Converts float `f` to 16-bit BF16 representation as a primitive short."
+  [f]
+  (short (interpret/f32->bf16 f)))
+
 (defn- populate-host-segment!
   "Writes `host-data` into off-heap `MemorySegment` `dst-seg` of `storage-dt` (`:f32`, `:bf16`, `:i32`, `:i8`, `:f64`).
    Transparently handles `:bf16` <-> `:f32` conversion or zero-copy short array/segment copies."
@@ -349,27 +354,37 @@
         (cond
           (and (= orig-dtype :bf16) (= storage-dt :f32) (== src-bytes (* 2 elem-count)))
           ;; Upcast bf16 MemorySegment to f32
-          (dotimes [i elem-count]
-            (let [s (.get src-seg ValueLayout/JAVA_SHORT_UNALIGNED (* i 2))]
-              (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (interpret/bf16->f32 s))))
+          (let [^shorts tmp-shorts (short-array elem-count)
+                ^floats tmp-floats (float-array elem-count)]
+            (MemorySegment/copy src-seg ValueLayout/JAVA_SHORT_UNALIGNED (long 0) tmp-shorts 0 (int elem-count))
+            (dotimes [i elem-count]
+              (aset tmp-floats i (float (interpret/bf16->f32 (aget tmp-shorts i)))))
+            (MemorySegment/copy tmp-floats 0 dst-seg ValueLayout/JAVA_FLOAT (long 0) (int elem-count)))
 
           (and (= orig-dtype :f32) (= storage-dt :bf16) (== src-bytes (* 4 elem-count)))
           ;; Downcast f32 MemorySegment to bf16
-          (dotimes [i elem-count]
-            (let [f (.get src-seg ValueLayout/JAVA_FLOAT_UNALIGNED (* i 4))]
-              (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 f))))
+          (let [^floats tmp-floats (float-array elem-count)
+                ^shorts tmp-shorts (short-array elem-count)]
+            (MemorySegment/copy src-seg ValueLayout/JAVA_FLOAT_UNALIGNED (long 0) tmp-floats 0 (int elem-count))
+            (dotimes [i elem-count]
+              (aset tmp-shorts i (f32->bf16-short (aget tmp-floats i))))
+            (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int elem-count)))
 
           :else
-          (MemorySegment/copy src-seg 0 dst-seg 0 (min src-bytes dst-bytes))))
+          (MemorySegment/copy src-seg (long 0) dst-seg (long 0) (min src-bytes dst-bytes))))
 
       ;; 2. Float array
       (instance? FLOAT-ARRAY-CLASS host-data)
       (let [^floats arr host-data
             n (min elem-count (alength arr))]
         (if (= storage-dt :bf16)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (aget arr i))))
-          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_FLOAT 0 n)))
+          (let [^shorts tmp-shorts (short-array n)]
+            (dotimes [i n]
+              (let [v (aget arr i)]
+                (when-not (zero? v)
+                  (aset tmp-shorts i (f32->bf16-short v)))))
+            (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n)))
+          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_FLOAT (long 0) (int n))))
 
       ;; 3. Int array
       (instance? INT-ARRAY-CLASS host-data)
@@ -377,31 +392,44 @@
             n (min elem-count (alength arr))]
         (cond
           (= storage-dt :f32)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (float (aget arr i))))
+          (let [^floats tmp-floats (float-array n)]
+            (dotimes [i n]
+              (aset tmp-floats i (float (aget arr i))))
+            (MemorySegment/copy tmp-floats 0 dst-seg ValueLayout/JAVA_FLOAT (long 0) (int n)))
+
           (= storage-dt :bf16)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (aget arr i)))))
+          (let [^shorts tmp-shorts (short-array n)]
+            (dotimes [i n]
+              (let [v (aget arr i)]
+                (when-not (zero? v)
+                  (aset tmp-shorts i (f32->bf16-short (float v))))))
+            (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n)))
+
           (= storage-dt :i8)
-          (dotimes [i n]
-            (.set dst-seg ValueLayout/JAVA_BYTE (long i) (byte (aget arr i))))
+          (let [^bytes tmp-bytes (byte-array n)]
+            (dotimes [i n]
+              (aset tmp-bytes i (byte (aget arr i))))
+            (MemorySegment/copy tmp-bytes 0 dst-seg ValueLayout/JAVA_BYTE (long 0) (int n)))
+
           :else
-          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_INT 0 n)))
+          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_INT (long 0) (int n))))
 
       ;; 4. Short array (e.g. bf16)
       (instance? SHORT-ARRAY-CLASS host-data)
       (let [^shorts arr host-data
             n (min elem-count (alength arr))]
         (if (= storage-dt :f32)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (interpret/bf16->f32 (aget arr i))))
-          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_SHORT 0 n)))
+          (let [^floats tmp-floats (float-array n)]
+            (dotimes [i n]
+              (aset tmp-floats i (float (interpret/bf16->f32 (aget arr i)))))
+            (MemorySegment/copy tmp-floats 0 dst-seg ValueLayout/JAVA_FLOAT (long 0) (int n)))
+          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n))))
 
       ;; 5. Byte array
       (instance? BYTE-ARRAY-CLASS host-data)
       (let [^bytes arr host-data
             n (min elem-count (alength arr))]
-        (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_BYTE 0 n))
+        (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_BYTE (long 0) (int n)))
 
       ;; 6. Double array
       (instance? DOUBLE-ARRAY-CLASS host-data)
@@ -409,13 +437,21 @@
             n (min elem-count (alength arr))]
         (cond
           (= storage-dt :f32)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (float (aget arr i))))
+          (let [^floats tmp-floats (float-array n)]
+            (dotimes [i n]
+              (aset tmp-floats i (float (aget arr i))))
+            (MemorySegment/copy tmp-floats 0 dst-seg ValueLayout/JAVA_FLOAT (long 0) (int n)))
+
           (= storage-dt :bf16)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (aget arr i)))))
+          (let [^shorts tmp-shorts (short-array n)]
+            (dotimes [i n]
+              (let [v (aget arr i)]
+                (when-not (zero? v)
+                  (aset tmp-shorts i (f32->bf16-short (float v))))))
+            (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n)))
+
           :else
-          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_DOUBLE 0 n)))
+          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_DOUBLE (long 0) (int n))))
 
       ;; 7. Long array
       (instance? LONG-ARRAY-CLASS host-data)
@@ -423,13 +459,21 @@
             n (min elem-count (alength arr))]
         (cond
           (= storage-dt :i32)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_INT (long i) (int (aget arr i))))
+          (let [^ints tmp-ints (int-array n)]
+            (dotimes [i n]
+              (aset tmp-ints i (int (aget arr i))))
+            (MemorySegment/copy tmp-ints 0 dst-seg ValueLayout/JAVA_INT (long 0) (int n)))
+
           (= storage-dt :bf16)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (aget arr i)))))
+          (let [^shorts tmp-shorts (short-array n)]
+            (dotimes [i n]
+              (let [v (aget arr i)]
+                (when-not (zero? v)
+                  (aset tmp-shorts i (f32->bf16-short (float v))))))
+            (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n)))
+
           :else
-          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_LONG 0 n)))
+          (MemorySegment/copy arr 0 dst-seg ValueLayout/JAVA_LONG (long 0) (int n))))
 
       ;; 8. Interpreter-style tensor map {:data ...}
       (and (map? host-data) (contains? host-data :data))
@@ -441,17 +485,30 @@
             n (min elem-count (count v))]
         (cond
           (= storage-dt :i32)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_INT (long i) (int (nth v i))))
+          (let [^ints tmp-ints (int-array n)]
+            (dotimes [i n]
+              (aset tmp-ints i (int (nth v i))))
+            (MemorySegment/copy tmp-ints 0 dst-seg ValueLayout/JAVA_INT (long 0) (int n)))
+
           (= storage-dt :bf16)
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_SHORT (long i) (interpret/f32->bf16 (float (nth v i)))))
+          (let [^shorts tmp-shorts (short-array n)]
+            (dotimes [i n]
+              (let [val (nth v i)]
+                (when-not (and (number? val) (zero? val))
+                  (aset tmp-shorts i (f32->bf16-short (float val))))))
+            (MemorySegment/copy tmp-shorts 0 dst-seg ValueLayout/JAVA_SHORT (long 0) (int n)))
+
           (= storage-dt :i8)
-          (dotimes [i n]
-            (.set dst-seg ValueLayout/JAVA_BYTE (long i) (byte (nth v i))))
+          (let [^bytes tmp-bytes (byte-array n)]
+            (dotimes [i n]
+              (aset tmp-bytes i (byte (nth v i))))
+            (MemorySegment/copy tmp-bytes 0 dst-seg ValueLayout/JAVA_BYTE (long 0) (int n)))
+
           :else
-          (dotimes [i n]
-            (.setAtIndex dst-seg ValueLayout/JAVA_FLOAT (long i) (float (nth v i))))))
+          (let [^floats tmp-floats (float-array n)]
+            (dotimes [i n]
+              (aset tmp-floats i (float (nth v i))))
+            (MemorySegment/copy tmp-floats 0 dst-seg ValueLayout/JAVA_FLOAT (long 0) (int n)))))
 
       :else
       (throw (ex-info "Unsupported host-data type in uop.runtime/host->device"
@@ -533,6 +590,25 @@
               (populate-host-segment! (:ptr dev-buf) host-data elem-count (or dtype :f32) storage-dt))
             dev-buf))))))
 
+(defn- segment->floats!
+  [^MemorySegment seg ^floats out ^long elem-count dt]
+  (cond
+    (= dt :i32)
+    (let [^ints tmp-ints (int-array elem-count)]
+      (MemorySegment/copy seg ValueLayout/JAVA_INT (long 0) tmp-ints 0 (int elem-count))
+      (dotimes [i elem-count]
+        (aset out (int i) (float (aget tmp-ints i)))))
+
+    (= dt :bf16)
+    (let [^shorts tmp-shorts (short-array elem-count)]
+      (MemorySegment/copy seg ValueLayout/JAVA_SHORT (long 0) tmp-shorts 0 (int elem-count))
+      (dotimes [i elem-count]
+        (let [s (int (aget tmp-shorts i))]
+          (aset out (int i) (Float/intBitsToFloat (unchecked-int (bit-shift-left (bit-and s 0xffff) 16)))))))
+
+    :else
+    (MemorySegment/copy seg ValueLayout/JAVA_FLOAT (long 0) out 0 (int elem-count))))
+
 (defn device->host-floats
   "Transfers `n-elements` from `uop-buf` back to a host `float[]` array."
   ^floats [ctx uop-buf ^long n-elements]
@@ -551,29 +627,9 @@
                                                                   (long byte-len)
                                                                   (int 2)])))]
             (check-hip! rc "hipMemcpy(DtoH)")
-            (cond
-              (= dt :i32)
-              (dotimes [i elem-count]
-                (aset out (int i) (float (.getAtIndex stage-seg ValueLayout/JAVA_INT (long i)))))
-              (= dt :bf16)
-              (dotimes [i elem-count]
-                (let [s (.getAtIndex stage-seg ValueLayout/JAVA_SHORT (long i))
-                      f (Float/intBitsToFloat (unchecked-int (bit-shift-left s 16)))]
-                  (aset out (int i) (float f))))
-              :else
-              (MemorySegment/copy stage-seg ValueLayout/JAVA_FLOAT 0 out 0 (int elem-count))))))
+            (segment->floats! stage-seg out elem-count dt))))
       (let [^MemorySegment seg (:ptr uop-buf)]
-        (cond
-          (= dt :i32)
-          (dotimes [i elem-count]
-            (aset out (int i) (float (.getAtIndex seg ValueLayout/JAVA_INT (long i)))))
-          (= dt :bf16)
-          (dotimes [i elem-count]
-            (let [s (.getAtIndex seg ValueLayout/JAVA_SHORT (long i))
-                  f (Float/intBitsToFloat (unchecked-int (bit-shift-left s 16)))]
-              (aset out (int i) (float f))))
-          :else
-          (MemorySegment/copy seg ValueLayout/JAVA_FLOAT 0 out 0 (int elem-count)))))
+        (segment->floats! seg out elem-count dt)))
     out))
 
 (defn device->host-ints
