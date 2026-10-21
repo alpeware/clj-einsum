@@ -29,6 +29,8 @@
      :bytes-per-param 2.0
      :benchmarks {:gsm8k 0.56 :swe-mini 0.22}
      :judgment-cost-hours 12.0
+     :golden-oracle "resources/golden/gemma4_uop_oracle.edn"
+     :xla-archive "resources/golden/xla_vs_uop_archive.edn"
      :status :active}
   1 {:name "Ternary Compressed Backbone (Target)"
      :parent-generation 0

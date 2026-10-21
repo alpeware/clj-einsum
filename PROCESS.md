@@ -113,6 +113,10 @@ The four gates live in `resources/catalog/` (`gate1_compression`, `gate2_velocit
   **verified output per unit of human judgment** (judgment cost per
   accepted catalog entry, repeated-error rate, evidence-use accuracy).
 
+Standing regression oracles and baselines live in `resources/golden/`:
+- `gemma4_uop_oracle.edn` — Standing post-XLA regression oracle verifying bit-level/tight logit tolerances and greedy token parity across E2B, E4B, 31B INT4, and micro models.
+- `xla_vs_uop_archive.edn` — Archived final vs-XLA benchmark baseline preserving exact pre-excision speedup, latency, and numerical parity verification.
+
 ### 3.1 Who scores the lottery tickets
 
 DeepSeek can run exploration "without rigid KPIs" because hundreds of
@@ -220,6 +224,9 @@ This document states the *why*. The *how* lives where it's enforced:
 - `resources/catalog/` — the four gate directories (`<gate>/<slug>/`) plus
   `registry.edn`: lineage per entry (bytes/param, calibration minutes, eval
   scores, hardware, judgment cost). Score the snapshot, not the model.
+- `resources/golden/` — the standing post-XLA regression oracle
+  (`gemma4_uop_oracle.edn`) and archived vs-XLA baseline
+  (`xla_vs_uop_archive.edn`) anchoring bit-level and numerical stability.
 - `docs/architecture/agent_loop.md` — the loop design: tiers, the
   committed store, the contraction reflex.
 - `CONTRIBUTING.md` — the contributor contract (coding agents as primary

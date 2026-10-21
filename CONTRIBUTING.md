@@ -37,7 +37,7 @@ Coding agents are the primary contributors to this repository. All research foll
 ## Promotion to the Core Engine (`src/einsum/`)
 
 Code in experiment pods remains isolated. It is promoted into `src/einsum/` only under **Mechanical-Sympathy Placement**:
-- **Dense Contractions & Autoregressive Decoding**: Placed 100% in OpenXLA StableHLO MLIR in accelerator VRAM. Zero host round-trips.
+- **Dense Contractions & Autoregressive Decoding**: Compiled via Declarative Tensor Logic (`einsum.logic.*`) into pure-Clojure UOp schedules (`einsum.uop.*`) dispatched on-device via Panama FFM into accelerator VRAM. Zero host round-trips in the hot path. Regressions are continuously validated against the standing regression oracle in `resources/golden/`.
 - **Discrete Lookups & Schema Verification**: Placed on CPU host memory in pure Clojure persistent data structures (host discrete lookups have a $16.4\times$ speed advantage over device VRAM lookups).
 
 ---

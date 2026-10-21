@@ -19,7 +19,7 @@ program).
 
 | Item | Track | Status | Owner | Blocked by / Unlocks | Notes |
 |---|---|---|---|---|---|
-| LoRA pure-stack trainer | capability | proposed | — | Unlocks distillation SFT | Large ticket. Pure Clojure/XLA stack, no PyTorch (program constraint) |
+| LoRA pure-stack trainer | capability | proposed | — | Unlocks distillation SFT | Large ticket. Pure Clojure/UOp stack, no PyTorch (program constraint) |
 | Program-signature versioning | capability | proposed | — | Superseded in part by :harness-sha (freeze) | Extend prompt-sha: hash(prompt, tool defs, turn structure, decoding params, harness version) on every ledger row |
 | Grading-sandbox hardening (slurp/spit) | capability | proposed | — | — | From adversarial review; load-bearing before the loop becomes training infra |
 | Paren-repair as agent-facing tool | experiment | proposed | — | — | Prompt-tuning sub-avenue; explicit tool, never silent harness fixup |
