@@ -53,3 +53,7 @@
       (let [dev (:primary-device hw-info)]
         (is (number? (:vram-bytes dev)))
         (is (pos? (:vram-bytes dev)))))))
+
+(deftest ensure-amdgpu-active-test
+  (testing "ensure-amdgpu-active! executes safely without throwing"
+    (is (nil? (hw/ensure-amdgpu-active!)))))

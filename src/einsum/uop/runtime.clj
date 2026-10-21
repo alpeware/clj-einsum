@@ -8,7 +8,7 @@
      kernels back-to-back on the default HIP stream with zero intermediate host-device synchronization."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as sh]
-            [einsum.compiler.pjrt :as pjrt]
+            [einsum.hardware :as hw]
             [einsum.logic.interpret :as interpret]
             [einsum.uop.lower :as uop-lower]
             [einsum.uop.opt :as opt]
@@ -100,7 +100,7 @@
                   rtc-file (io/file rtc-path)]
               (if-not (and (.exists hip-file) (.exists rtc-file))
                 {:available? false :reason "ROCm HIP/HIPRTC shared libraries not found"}
-                (let [_ (pjrt/ensure-amdgpu-active!)
+                (let [_ (hw/ensure-amdgpu-active!)
                       lib-arena (Arena/ofShared)
                       linker (Linker/nativeLinker)
                       hip-lookup (SymbolLookup/libraryLookup (.getAbsolutePath hip-file) lib-arena)

@@ -1,7 +1,6 @@
 (ns einsum.hardware
   "Hardware capability detection and optimal quantization strategy selection."
-  (:require [einsum.compiler.pjrt.version :as v]
-            [clojure.java.io :as io]
+  (:require [clojure.java.io :as io]
             [clojure.string :as str]))
 
 ;; --- Pure Quantization Strategy Selection ---
@@ -101,23 +100,44 @@
     (catch Exception _
       (.maxMemory (Runtime/getRuntime)))))
 
+(defn ensure-amdgpu-active!
+  "Ensures the AMD ROCm GPU is in runtime PM `active` state and resets its autosuspend
+   timer by touching `/dev/dri/renderD128`, polling `/sys/class/drm/renderD128/device/power/runtime_status`
+   synchronously for up to 2 seconds."
+  []
+  (try
+    (let [dev-render (io/file "/dev/dri/renderD128")
+          status-file (io/file "/sys/class/drm/renderD128/device/power/runtime_status")]
+      (when (and (.exists dev-render) (.exists status-file))
+        (loop [attempt 0]
+          (let [st (str/trim (slurp status-file))]
+            (cond
+              (= st "active")
+              (try (with-open [_is (io/input-stream dev-render)] nil) (catch Exception _ nil))
+
+              (< attempt 40)
+              (do
+                (when (= st "suspended")
+                  (try (with-open [_is (io/input-stream dev-render)] nil) (catch Exception _ nil)))
+                (Thread/sleep 50)
+                (recur (inc attempt))))))))
+    (catch Throwable _ nil)))
+
 (defn detect-hardware
   "Inspects host system and discrete accelerators, returning a structured hardware profile.
    Detects ROCm (RDNA3/CDNA), NVIDIA CUDA, SYCL, or falls back to CPU."
   []
   (let [rocm-devs (detect-rocm-devices)
         nv-devs (detect-nvidia-devices)
-        host-ram (detect-host-memory-bytes)
-        backend-probe (v/probe-system-driver)
-        detected-backends (:detected-backends backend-probe)]
+        host-ram (detect-host-memory-bytes)]
     (cond
-      (and (contains? detected-backends :rocm) (seq rocm-devs))
+      (seq rocm-devs)
       {:backend :rocm
        :devices rocm-devs
        :primary-device (first rocm-devs)
        :host-ram-bytes host-ram}
 
-      (and (contains? detected-backends :cuda12) (seq nv-devs))
+      (seq nv-devs)
       {:backend :cuda12
        :devices nv-devs
        :primary-device (first nv-devs)

@@ -1,7 +1,8 @@
 (ns einsum.compiler.pjrt
   "Project Panama FFM native bindings to OpenXLA PJRT C API (pjrt_c_api.h)."
   (:require [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [einsum.hardware :as hw])
   (:import [java.lang.foreign Arena FunctionDescriptor Linker Linker$Option MemoryLayout MemorySegment SymbolLookup ValueLayout]
            [java.lang.invoke MethodHandle]))
 
@@ -187,28 +188,9 @@
          (not (boolean (re-find #"rocprofiler" name)))
          (not (boolean (re-find #"^(xla_cpu|pjrt_plugin|libpjrt)" name))))))
 
-(defn ensure-amdgpu-active!
-  "Ensures the AMD ROCm GPU is in runtime PM `active` state and resets its autosuspend
-   timer by touching `/dev/dri/renderD128`, polling `/sys/class/drm/renderD128/device/power/runtime_status`
-   synchronously for up to 2 seconds."
-  []
-  (try
-    (let [dev-render (io/file "/dev/dri/renderD128")
-          status-file (io/file "/sys/class/drm/renderD128/device/power/runtime_status")]
-      (when (and (.exists dev-render) (.exists status-file))
-        (loop [attempt 0]
-          (let [st (str/trim (slurp status-file))]
-            (cond
-              (= st "active")
-              (try (with-open [_is (io/input-stream dev-render)] nil) (catch Exception _ nil))
-
-              (< attempt 40)
-              (do
-                (when (= st "suspended")
-                  (try (with-open [_is (io/input-stream dev-render)] nil) (catch Exception _ nil)))
-                (Thread/sleep 50)
-                (recur (inc attempt))))))))
-    (catch Throwable _ nil)))
+(def ensure-amdgpu-active!
+  "Rehomed to einsum.hardware/ensure-amdgpu-active!."
+  hw/ensure-amdgpu-active!)
 
 (defonce ^:private gpu-keepalive-started? (atom false))
 
@@ -217,7 +199,7 @@
    to prevent AMD ROCm GPUs from entering PCIe runtime autosuspend (D3cold) while PJRT is active,
    and waits synchronously for runtime_status to reach `active`."
   []
-  (ensure-amdgpu-active!)
+  (hw/ensure-amdgpu-active!)
   (let [dev-render (io/file "/dev/dri/renderD128")]
     (when (.exists dev-render)
       (when (compare-and-set! gpu-keepalive-started? false true)
