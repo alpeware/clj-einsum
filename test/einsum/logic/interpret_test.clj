@@ -280,9 +280,9 @@
                :invars [[:x [:tensor [3] :f32]] [:y [:tensor [3] :f32]]]
                :outvars [:z]
                :known-shapes {}
-               :eqns [{:op :stablehlo/constant :value 2.0 :outvars [:two]}
-                      {:op :stablehlo/multiply :invars [:x :two] :outvars [:t1]}
-                      {:op :stablehlo/add :invars [:t1 :y] :outvars [:z]}]}
+               :eqns [{:op :ir/constant :value 2.0 :outvars [:two]}
+                      {:op :ir/multiply :invars [:x :two] :outvars [:t1]}
+                      {:op :ir/add :invars [:t1 :y] :outvars [:z]}]}
         bindings {:x (interp/tensor :f32 [3] [1 2 3])
                   :y (interp/tensor :f32 [3] [10 20 30])}
         result (interp/execute graph bindings)]
@@ -292,7 +292,7 @@
 (deftest test-execute-constant-typed
   (let [graph {:name "t" :invars [] :outvars [:c]
                :known-shapes {}
-               :eqns [{:op :stablehlo/constant :value [1.0 2.0 3.0]
+               :eqns [{:op :ir/constant :value [1.0 2.0 3.0]
                        :type [:tensor [3] :f32] :outvars [:c]}]}
         result (interp/execute graph {})]
     (is (= [3] (:shape (:c result))))

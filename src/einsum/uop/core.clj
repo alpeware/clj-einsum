@@ -252,7 +252,7 @@
     x
     (uop :uop/cast target-dtype [x] target-dtype (:shape x))))
 
-(defn- broadcast-shapes
+(defn broadcast-shapes
   "Computes broadcasted shape of two shape vectors."
   [sh1 sh2]
   (cond

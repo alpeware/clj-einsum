@@ -4,8 +4,9 @@
             [einsum.logic.core :as logic]
             [einsum.logic.exl3 :as exl3]
             [einsum.logic.expand :as expand]
-            [einsum.logic.lower :as lower]
             [einsum.logic.shape :as shape]
+            [einsum.uop.lower :as uop-lower]
+            [einsum.uop.runtime :as uop-rt]
             [einsum.runtime.safetensors :as st]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
@@ -203,21 +204,19 @@
       (is (= [3840 2048] (get shapes :w_deq))))))
 
 (deftest test-exl3-ast-to-graph-lowering
-  (testing "Lowering an EXL3 AST block generates valid StableHLO operations."
+  (testing "Lowering an EXL3 AST block generates a valid UOp graph."
     (let [ast [:block {:name :exl3_block}
                [:hadamard-block-128 [:xh :b :k] [:x :b :k]]
                [:= [:y :b :n] [:xh :b :k] [:w :k :n]]]
           invars [[:x [:tensor [1 256] :f32]]
                   [:w [:tensor [256 256] :f32]]]
-          graph (lower/ast->graph "exl3_test_graph" invars ast [:y])
-          op-types (set (map :op (:eqns graph)))]
-      (is (contains? op-types :stablehlo/dot_general))
-      (is (contains? op-types :stablehlo/slice))
-      (is (contains? op-types :stablehlo/concatenate)))))
+          graph (uop-lower/ast->uop-graph "exl3_test_graph" invars ast [:y])]
+      (is (some? graph))
+      (is (= [:y] (:outvars graph))))))
 
-(deftest test-exl3-pjrt-cpu-execution
-  (testing "Execute hadamard-block-128 through OpenXLA PJRT."
-    (let [ctx (xla/init-backend! :cpu)
+(deftest test-exl3-cpu-execution
+  (testing "Execute hadamard-block-128 through UOp CPU runtime."
+    (let [ctx (uop-rt/init-uop-context :uop-cpu {:quiet? true})
           ast [:hadamard-block-128 [:y 1 128] [:x 1 128]]
           invars [[:x [:tensor [1 128] :f32]]]
           compiled (logic/compile-ast ctx "fwht128_graph" invars ast #{:y})

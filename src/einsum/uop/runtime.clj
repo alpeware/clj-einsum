@@ -835,7 +835,9 @@
    with deduplicated native kernels and pre-allocated intermediate stage buffers."
   [ctx name-str in-spec ast out-spec]
   (let [uop-target (or (:uop-target ctx) :cpu)
-        uop-graph (uop-lower/ast->uop-graph name-str in-spec ast out-spec)
+        uop-graph (if (and (map? ast) (contains? ast :outputs))
+                    ast
+                    (uop-lower/ast->uop-graph name-str in-spec ast out-spec))
         sched (schedule/schedule-graph uop-graph)
         opt-kernels (vec (pmap #(opt/optimize-kernel % {:target uop-target}) (:kernels sched)))
         rendered-kernels (vec (pmap #(render/render-kernel % {:target uop-target}) opt-kernels))
@@ -911,9 +913,13 @@
      :backend :uop
      :uop-target uop-target
      :ctx ctx
+     :invars in-spec
+     :outvars out-spec
+     :graph uop-graph
      :uop-graph uop-graph
      :schedule sched
      :module compiled-mod
+     :handle (or compiled-mod true)
      :prepared-kernels prepared-kernels
      :num-slots num-slots
      :slot-ptrs slot-ptrs

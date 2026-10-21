@@ -236,8 +236,8 @@
                       (let [diff (Math/abs (- (double (aget r-data k)) (double (aget expected k))))]
                         (recur (inc k) (Math/max max-diff diff))))))))
 
-(deftest test-bidirectional-link-prediction-pjrt
-  (testing "superposition relation matrix predicts tail and head correctly via OpenXLA PJRT"
+(deftest test-bidirectional-link-prediction
+  (testing "superposition relation matrix predicts tail and head correctly"
     (let [n 3 d 16
           emb (sym/random-embeddings n d 101)
           facts #{[0 1] [1 2]}

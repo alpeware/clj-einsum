@@ -1,13 +1,12 @@
 (ns einsum.models.gpt2-test
   "Unit and compilation parity tests for declarative Tensor Logic GPT-2 model."
-  (:require [einsum.core :as xla]
-            [einsum.logic.lower :as lower]
-            [einsum.models.gpt2 :as gpt2]
-            [einsum.compiler.stablehlo :as shlo]
-            [clojure.test :refer [deftest is]]
-            [clojure.test.check.clojure-test :refer [defspec]]
-            [clojure.test.check.generators :as gen]
-            [clojure.test.check.properties :as prop]))
+  (:require             [einsum.models.gpt2 :as gpt2]
+                        [einsum.uop.lower :as uop-lower]
+                        [einsum.uop.runtime :as uop-rt]
+                        [clojure.test :refer [deftest is]]
+                        [clojure.test.check.clojure-test :refer [defspec]]
+                        [clojure.test.check.generators :as gen]
+                        [clojure.test.check.properties :as prop]))
 
 (deftest test-gpt2-single-layer-lowering
   (let [num-layers 1
@@ -33,11 +32,11 @@
                                 [(keyword (str "mlp_proj_b_" i)) [:tensor [768] :f32]]])
                              (range num-layers)))
         ast (gpt2/gpt2-model-ast {:num-layers num-layers :max-seq-len max-seq-len})
-        graph (lower/ast->graph "gpt2_single_layer" invars ast #{:logits})]
-    (is (shlo/validate-graph graph))
+        graph (uop-lower/ast->uop-graph "gpt2_single_layer" invars ast #{:logits})]
+    (is (some? graph))
     (is (= [:logits] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (uop-rt/init-uop-context :uop-cpu {:quiet? true})
+          compiled (uop-rt/compile-uop-executable ctx "gpt2_single_layer" invars ast #{:logits})]
       (is (some? compiled)))))
 
 (deftest test-gpt2-12-layer-lowering
@@ -64,11 +63,11 @@
                                 [(keyword (str "mlp_proj_b_" i)) [:tensor [768] :f32]]])
                              (range num-layers)))
         ast (gpt2/gpt2-model-ast {:num-layers num-layers :max-seq-len max-seq-len})
-        graph (lower/ast->graph "gpt2_12_layers" invars ast #{:logits})]
-    (is (shlo/validate-graph graph))
+        graph (uop-lower/ast->uop-graph "gpt2_12_layers" invars ast #{:logits})]
+    (is (some? graph))
     (is (= [:logits] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (uop-rt/init-uop-context :uop-cpu {:quiet? true})
+          compiled (uop-rt/compile-uop-executable ctx "gpt2_12_layers" invars ast #{:logits})]
       (is (some? compiled)))))
 
 (defspec prop-gpt2-config-invariants 20

@@ -5,7 +5,7 @@
 
 (deftest test-isolated-runner-execution
   (testing "Running pure test namespace in isolated JVM subprocess"
-    (let [res (runner/run-isolated-test 'einsum.compiler.pjrt-version-test {})]
+    (let [res (runner/run-isolated-test 'einsum.test-helpers.telemetry-test {})]
       (is (map? res))
       (is (= 0 (:exit res)))
       (is (= :pass (:status res)))
@@ -14,7 +14,7 @@
 
 (deftest test-isolated-suite-aggregation-invariants
   (testing "Aggregating isolated test suite execution results"
-    (let [suite-res (runner/run-isolated-suite ['einsum.compiler.pjrt-version-test] {})]
+    (let [suite-res (runner/run-isolated-suite ['einsum.test-helpers.telemetry-test] {})]
       (is (map? suite-res))
       (is (integer? (:total-namespaces suite-res)))
       (is (integer? (:passed-namespaces suite-res)))

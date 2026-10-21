@@ -7,8 +7,7 @@
    - Protocol query window recognition via token-ID compare
    - Device-resident verbalization bridge (entity indices -> token IDs)
    - Exact parity with E21 Knowledge Base (Gate P0b)"
-  (:require [einsum.core :as xla]
-            [einsum.logic.lower :as lower]
+  (:require [einsum.uop.runtime :as uop-rt]
             [clojure.string :as str]))
 
 ;; ==============================================================================
@@ -88,34 +87,36 @@
 ;; ==============================================================================
 
 (defn compile-kb-query-executable
-  "Compiles OpenXLA PJRT dynamic-slice query executable for gathering row [1 1 N] from [3 N N]."
+  "Compiles dynamic-slice query executable for gathering row [1 1 N] from [3 N N]."
   ([num-entities]
-   (compile-kb-query-executable (xla/get-context) num-entities))
+   (compile-kb-query-executable (uop-rt/init-uop-context :uop-cpu {:quiet? true}) num-entities))
   ([ctx ^long num-entities]
    (let [n num-entities
          invars [[:KB [:tensor [3 n n] :f32]]
                  [:rel [:tensor [1] :i32]]
                  [:arg [:tensor [1] :i32]]]
          ast [:dynamic-slice [:row :one_r :one_c :dim] [:KB :r :c :dim]
-              {:slice-sizes [1 1 n] :start-indices [:rel :arg 0]}]
-         graph (lower/ast->graph "kb_device_query" invars ast #{:row})]
-     (xla/compile-graph ctx graph))))
+              {:slice-sizes [1 1 n] :start-indices [:rel :arg 0]}]]
+     (uop-rt/compile-uop-executable ctx "kb_device_query" invars ast #{:row}))))
 
 (defn allocate-device-kb!
-  "Pins the [3 N N] relation table resident in PJRT VRAM."
+  "Pins the [3 N N] relation table resident in VRAM."
   [ctx ^floats table-data ^long num-entities]
   (let [n num-entities]
-    (xla/buffer-from-host-buffer ctx (:client ctx) table-data [3 n n] 11)))
+    (uop-rt/host->device ctx table-data [3 n n] :f32)))
 
 (defn execute-device-query!
   "Executes in-graph row gather on device-resident relation table.
    Returns vector or float-array of length num-entities."
   [ctx exec device-kb-buf rel-idx arg-idx num-entities]
-  (let [rel-arr (int-array [(long rel-idx)])
-        arg-arr (int-array [(long arg-idx)])
-        out-buf (xla/execute exec device-kb-buf rel-arr arg-arr)
-        row-slice (xla/to-host-slice out-buf 0 (long num-entities) (long num-entities) :f32)]
-    (xla/destroy-buffer! ctx out-buf)
+  (let [rel-buf (uop-rt/host->device ctx (int-array [(long rel-idx)]) [1] :i32)
+        arg-buf (uop-rt/host->device ctx (int-array [(long arg-idx)]) [1] :i32)
+        out-map (uop-rt/execute-uop-executable ctx exec [device-kb-buf rel-buf arg-buf])
+        row-buf (get out-map :row)
+        row-slice (uop-rt/device->host-floats ctx row-buf (long num-entities))]
+    (uop-rt/destroy-buffer! ctx rel-buf)
+    (uop-rt/destroy-buffer! ctx arg-buf)
+    (when row-buf (uop-rt/destroy-buffer! ctx row-buf))
     row-slice))
 
 (defn row-slice->entity-indices

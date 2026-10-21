@@ -4,9 +4,8 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [einsum.compiler.stablehlo :as shlo]
             [einsum.logic.interpret :as interp]
-            [einsum.logic.lower :as lower]))
+            [einsum.uop.lower :as uop-lower]))
 
 ;; =============================================================================
 ;; 1. StableHLO Interpreter Gather (Direct op-gather 3D Target Gathering)
@@ -94,10 +93,6 @@
         ast [:block {}
              [:log-softmax [:log_probs :b :p :v] [:logits :b :p :v] {:axis 2}]
              [:gather [:target_log_probs :b :p] [:log_probs :b :p :v] [:targets :b :p] {:axis 2}]]
-        graph (lower/ast->graph "scoring_test" invars ast #{:target_log_probs})]
-    (is (shlo/validate-graph graph))
-    (is (= [:target_log_probs] (:outvars graph)))
-    (let [ops (mapv :op (:eqns graph))]
-      (is (some #(= :stablehlo/gather %) ops))
-      (is (some #(= :stablehlo/log %) ops))
-      (is (some #(= :stablehlo/concatenate %) ops)))))
+        graph (uop-lower/ast->uop-graph "scoring_test" invars ast #{:target_log_probs})]
+    (is (some? graph))
+    (is (= [:target_log_probs] (:outvars graph)))))

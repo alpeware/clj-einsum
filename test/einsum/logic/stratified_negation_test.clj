@@ -45,11 +45,11 @@
                             (strat/stratify-program self-neg-rules))))))
 
 ;; -----------------------------------------------------------------------------
-;; 2. Stratified Fixpoint Execution via OpenXLA PJRT
+;; 2. Stratified Fixpoint Execution
 ;; -----------------------------------------------------------------------------
 
-(deftest test-eval-stratified-pjrt
-  (testing "eval-stratified computes multi-stratum fixpoint with complement injection in OpenXLA PJRT"
+(deftest test-eval-stratified
+  (testing "eval-stratified computes multi-stratum fixpoint with complement injection"
     ;; Graph with two disconnected components: {0, 1} and {2, 3}
     (let [n 4
           facts {:edge #{[0 1] [1 0] [2 3] [3 2]}}

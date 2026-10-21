@@ -161,51 +161,64 @@
     (uop/uop-alu :uop/sub (uop/uop-alu :uop/mul two sig2x) one)))
 
 (defn- apply-post-activation
-  "Applies optional `:scale`, `:act` (`:gelu`, `:silu`, `:sigmoid`, `:tanh`, `:relu`, `:clamp`),
-   or `:softcap` to `in-uop`."
+  "Applies optional `:scale`, `:act` (`:gelu`, `:silu`, `:sigmoid`, `:tanh`, `:relu`, `:clamp`, `:step`),
+   `:pow`, or `:softcap` to `in-uop`."
   [in-uop attrs]
-  (let [{:keys [scale act softcap clamp]} attrs
+  (let [{:keys [scale act softcap clamp pow]} attrs
         dt (:dtype in-uop)
         sh (:shape in-uop)
         scaled (if scale
                  (uop/uop-alu :uop/mul in-uop (broadcast-scalar dt (double scale) sh))
                  in-uop)
+        powered (if pow
+                  (cond
+                    (== (double pow) 1.0) scaled
+                    (== (double pow) 2.0) (uop/uop-alu :uop/mul scaled scaled)
+                    (== (double pow) 0.5) (uop/uop-alu :uop/sqrt scaled)
+                    :else (uop-exp (uop/uop-alu :uop/mul (uop-log scaled) (broadcast-scalar dt (double pow) sh))))
+                  scaled)
         activated (cond
                     (or clamp (= act :clamp))
                     (let [[low high] (if (sequential? clamp) (vec clamp) [0.0 1.0])
                           c-low (broadcast-scalar dt (double low) sh)
                           c-high (broadcast-scalar dt (double high) sh)
-                          clamped-low (uop/uop-alu :uop/max scaled c-low)]
+                          clamped-low (uop/uop-alu :uop/max powered c-low)]
                       (uop/uop-alu :uop/min clamped-low c-high))
 
+                    (= act :step)
+                    (let [c-zero (broadcast-scalar dt 0.0 sh)
+                          c-one (broadcast-scalar dt 1.0 sh)
+                          is-pos (uop/uop-alu :uop/cmpgt powered c-zero)]
+                      (uop/uop-alu :uop/where is-pos c-one c-zero))
+
                     (= act :relu)
-                    (uop/uop-alu :uop/max scaled (broadcast-scalar dt 0.0 sh))
+                    (uop/uop-alu :uop/max powered (broadcast-scalar dt 0.0 sh))
 
                     (or (= act :sigmoid) (= act :logistic))
-                    (uop-sigmoid scaled)
+                    (uop-sigmoid powered)
 
                     (or (= act :silu) (= act :swish))
-                    (uop/uop-alu :uop/mul scaled (uop-sigmoid scaled))
+                    (uop/uop-alu :uop/mul powered (uop-sigmoid powered))
 
                     (= act :tanh)
-                    (uop-tanh scaled)
+                    (uop-tanh powered)
 
                     (= act :gelu)
                     (let [c-half (broadcast-scalar dt 0.5 sh)
                           c-sqrt (broadcast-scalar dt 0.7978845608 sh)
                           c-poly (broadcast-scalar dt 0.044715 sh)
                           c-one  (broadcast-scalar dt 1.0 sh)
-                          x2 (uop/uop-alu :uop/mul scaled scaled)
-                          x3 (uop/uop-alu :uop/mul x2 scaled)
+                          x2 (uop/uop-alu :uop/mul powered powered)
+                          x3 (uop/uop-alu :uop/mul x2 powered)
                           poly (uop/uop-alu :uop/mul x3 c-poly)
-                          inner (uop/uop-alu :uop/add scaled poly)
+                          inner (uop/uop-alu :uop/add powered poly)
                           s-inner (uop/uop-alu :uop/mul inner c-sqrt)
                           th (uop-tanh s-inner)
                           plus-one (uop/uop-alu :uop/add th c-one)
-                          half-x (uop/uop-alu :uop/mul scaled c-half)]
+                          half-x (uop/uop-alu :uop/mul powered c-half)]
                       (uop/uop-alu :uop/mul half-x plus-one))
 
-                    :else scaled)]
+                    :else powered)]
     (if softcap
       (let [cap (double softcap)
             c-cap (broadcast-scalar dt cap sh)
@@ -234,8 +247,10 @@
         (idx/partition-indices lhs-idxs rhs-idxs head-idxs)
         semiring (:semiring attrs)
         [mul-op red-op] (cond
-                          (or (= semiring :min-plus) (= semiring :tropical)) [:uop/add :min]
+                          (or (= semiring :min-plus) (= semiring :tropical) (= semiring :tropical-min)) [:uop/add :min]
+                          (or (= semiring :max-plus) (= semiring :tropical-max)) [:uop/add :max]
                           (or (= semiring :max-product) (= semiring :viterbi)) [:uop/mul :max]
+                          (or (= semiring :boolean) (= semiring :bool)) [:uop/and :or]
                           (or (= (:op attrs) :add) (= (:op attrs) :+) (:add? attrs)) [:uop/add :add]
                           :else [:uop/mul :add])]
     (if (empty? contracting)
@@ -348,6 +363,69 @@
     (if (not= dt :f32)
       (uop/uop-cast res dt)
       res)))
+
+(defn- build-walsh-hadamard-matrix
+  "Constructs Sylvester's normalized Walsh-Hadamard butterfly matrix of size [d d] in :f32."
+  ^floats [^long d ^double scale]
+  (let [arr (float-array (* d d))]
+    (dotimes [i d]
+      (let [row-offset (* i d)]
+        (dotimes [j d]
+          (let [popcnt (Integer/bitCount (bit-and i j))
+                sign (if (even? popcnt) 1.0 -1.0)
+                v (* scale sign)]
+            (aset-float arr (int (+ row-offset j)) (float v))))))
+    arr))
+
+(defn- lower-fwht
+  "Lowers Fast Walsh-Hadamard Transform `[:fwht head in-term attrs]` by contracting the last
+   axis of `in-uop` with a constant d x d Walsh-Hadamard matrix."
+  [in-uop attrs]
+  (let [sh (:shape in-uop)
+        d (long (last sh))
+        normalized? (get attrs :normalized? true)
+        scale (double (or (:fwht-scale attrs) (if normalized? (/ 1.0 (Math/sqrt (double d))) 1.0)))
+        h-data (build-walsh-hadamard-matrix d scale)
+        h-const (uop/uop :uop/vconst :f32 [] (vec h-data) [d d])
+        in-f32 (if (= (:dtype in-uop) :f32) in-uop (uop/uop-cast in-uop :f32))
+        rank (count sh)
+        leading-dims (subvec (vec sh) 0 (dec rank))
+        reshaped-in (uop/uop-reshape in-f32 (conj leading-dims d 1))
+        expanded-in (uop/uop-expand reshaped-in (conj leading-dims d d))
+        reshaped-h (uop/uop-reshape h-const (into (vec (repeat (dec rank) 1)) [d d]))
+        expanded-h (uop/uop-expand reshaped-h (conj leading-dims d d))
+        prod (uop/uop-alu :uop/mul expanded-in expanded-h)
+        contract-axis (dec rank)
+        reduced (uop/uop-reduce prod :add [contract-axis] false)
+        out (if (= (:dtype in-uop) :f32)
+              reduced
+              (uop/uop-cast reduced (:dtype in-uop)))]
+    out))
+
+(defn- lower-rht
+  "Lowers Randomized Hadamard Transform `[:rht head in-term signs-term attrs]`."
+  [in-uop signs-uop attrs]
+  (let [sh (:shape in-uop)
+        s-bcast (broadcast-shape-suffix signs-uop sh)
+        inverse? (boolean (:inverse? attrs))]
+    (if inverse?
+      (let [h-out (lower-fwht in-uop (assoc attrs :normalized? (get attrs :normalized? true)))]
+        (uop/uop-alu :uop/mul h-out s-bcast))
+      (let [prescaled (uop/uop-alu :uop/mul in-uop s-bcast)]
+        (lower-fwht prescaled (assoc attrs :normalized? (get attrs :normalized? true)))))))
+
+(defn- lower-log-softmax
+  "Lowers numerically stable log-softmax along `axis` (default -1) in pure UOps:
+   x - m - log(sum(exp(x - m)))"
+  [x-uop axis]
+  (let [sh (:shape x-uop)
+        ax (if (neg? axis) (+ (count sh) axis) (long axis))
+        max-x (uop/uop-expand (uop/uop-reduce x-uop :max [ax] true) sh)
+        diff (uop/uop-alu :uop/sub x-uop max-x)
+        ex (uop-exp diff)
+        sum-ex (uop/uop-expand (uop/uop-reduce ex :add [ax] true) sh)
+        log-sum (uop-log sum-ex)]
+    (uop/uop-alu :uop/sub diff log-sum)))
 
 (defn- lower-softmax-core
   "Lowers numerically stable softmax along `axis` (default -1) in pure UOps."
@@ -913,6 +991,289 @@
                     (let [a (get env (first (first body)))
                           b (get env (first (second body)))]
                       (uop/uop-alu :uop/div a (broadcast-shape-suffix b (:shape a))))
+
+                    (= op :log-softmax)
+                    (let [x-uop (get env (first (first body)))]
+                      (lower-log-softmax x-uop (or (:axis attrs) -1)))
+
+                    (= op :compare)
+                    (let [a-uop (get env (first (first body)))
+                          b-uop (get env (first (second body)))
+                          dir (str/upper-case (name (or (:direction attrs) (:comparison_direction attrs) "EQ")))
+                          cmp-op (case dir
+                                   "LT" :uop/cmplt
+                                   "LE" :uop/cmple
+                                   "GT" :uop/cmpgt
+                                   "GE" :uop/cmpge
+                                   "EQ" :uop/cmpeq
+                                   "NE" :uop/cmpne
+                                   :uop/cmpeq)
+                          max-sh (or out-shape (uop/broadcast-shapes (:shape a-uop) (:shape b-uop)))
+                          a-bcast (broadcast-shape-suffix a-uop max-sh)
+                          b-bcast (broadcast-shape-suffix b-uop max-sh)]
+                      (uop/uop-alu cmp-op a-bcast b-bcast))
+
+                    (= op :not)
+                    (let [x (get env (first (first body)))
+                          dt (:dtype x)
+                          sh (:shape x)]
+                      (if (= dt :bool)
+                        (uop/uop-alu :uop/xor x (uop/uop-const :bool true sh))
+                        (uop/uop-alu :uop/cmpeq x (broadcast-scalar dt 0.0 sh))))
+
+                    (= op :and)
+                    (let [a (get env (first (first body)))
+                          b (get env (first (second body)))
+                          max-sh (or out-shape (uop/broadcast-shapes (:shape a) (:shape b)))]
+                      (uop/uop-alu :uop/and (broadcast-shape-suffix a max-sh) (broadcast-shape-suffix b max-sh)))
+
+                    (= op :or)
+                    (let [a (get env (first (first body)))
+                          b (get env (first (second body)))
+                          max-sh (or out-shape (uop/broadcast-shapes (:shape a) (:shape b)))]
+                      (uop/uop-alu :uop/or (broadcast-shape-suffix a max-sh) (broadcast-shape-suffix b max-sh)))
+
+                    (= op :xor)
+                    (let [a (get env (first (first body)))
+                          b (get env (first (second body)))
+                          max-sh (or out-shape (uop/broadcast-shapes (:shape a) (:shape b)))]
+                      (uop/uop-alu :uop/xor (broadcast-shape-suffix a max-sh) (broadcast-shape-suffix b max-sh)))
+
+                    (or (= op :min) (= op :minimum))
+                    (let [a (get env (first (first body)))
+                          b (get env (first (second body)))
+                          max-sh (or out-shape (uop/broadcast-shapes (:shape a) (:shape b)))]
+                      (uop/uop-alu :uop/min (broadcast-shape-suffix a max-sh) (broadcast-shape-suffix b max-sh)))
+
+                    (or (= op :max) (= op :maximum))
+                    (let [a (get env (first (first body)))
+                          b (get env (first (second body)))
+                          max-sh (or out-shape (uop/broadcast-shapes (:shape a) (:shape b)))]
+                      (uop/uop-alu :uop/max (broadcast-shape-suffix a max-sh) (broadcast-shape-suffix b max-sh)))
+
+                    (= op :convert)
+                    (let [in-uop (get env (first (first body)))
+                          target-dt (or (:target-dtype attrs) (:dtype attrs) :f32)]
+                      (uop/uop-cast in-uop target-dt))
+
+                    (= op :transpose)
+                    (let [in-uop (get env (first (first body)))
+                          perm (or (:permutation attrs) (:axes attrs))]
+                      (uop/uop-permute in-uop (vec perm)))
+
+                    (or (= op :broadcast-in-dim) (= op :broadcast))
+                    (let [in-uop (get env (first (first body)))
+                          target-sh (or (:shape attrs) (:target_shape attrs) out-shape)
+                          b-dims (vec (or (:broadcast-dimensions attrs) (:broadcast_dimensions attrs)))
+                          rank (count target-sh)
+                          in-sh (:shape in-uop)]
+                      (if (seq b-dims)
+                        (let [reshaped-1s (mapv (fn [idx]
+                                                  (if (some #{idx} b-dims)
+                                                    (nth in-sh (.indexOf b-dims idx))
+                                                    1))
+                                                (range rank))]
+                          (-> in-uop
+                              (uop/uop-reshape reshaped-1s)
+                              (uop/uop-expand (vec target-sh))))
+                        (broadcast-shape-suffix in-uop (vec target-sh))))
+
+                    (= op :iota)
+                    (let [dt (or (:dtype attrs) (last (get attrs :type [:tensor [] :i32])) :i32)
+                          sh (or out-shape (:shape attrs) [(or (:len attrs) (:length attrs) 1)])
+                          iota-dim (long (or (:iota_dimension attrs) (:dim attrs) (:axis attrs) 0))
+                          dim-len (long (nth sh iota-dim (or (:len attrs) (:length attrs) 1)))
+                          iota-1d (uop/uop-iota dt dim-len)
+                          rank (count sh)
+                          shape-1s (assoc (vec (repeat rank 1)) iota-dim dim-len)]
+                      (-> iota-1d
+                          (uop/uop-reshape shape-1s)
+                          (uop/uop-expand (vec sh))))
+
+                    (or (= op :where) (= op :select))
+                    (let [cond-uop (get env (first (first body)))
+                          true-uop (get env (first (second body)))
+                          false-uop (get env (first (nth body 2)))
+                          target-sh (or out-shape (:shape true-uop) (:shape false-uop))
+                          c-bcast (broadcast-shape-suffix cond-uop target-sh)
+                          t-bcast (broadcast-shape-suffix true-uop target-sh)
+                          f-bcast (broadcast-shape-suffix false-uop target-sh)
+                          c-bool (if (= (:dtype c-bcast) :bool)
+                                   c-bcast
+                                   (uop/uop-alu :uop/cmpne c-bcast (broadcast-scalar (:dtype c-bcast) 0.0 target-sh)))]
+                      (uop/uop-alu :uop/where c-bool t-bcast f-bcast))
+
+                    (or (= op :neg) (= op :negate))
+                    (uop/uop-alu :uop/neg (get env (first (first body))))
+
+                    (= op :exp)
+                    (uop-exp (get env (first (first body))))
+
+                    (= op :log)
+                    (uop-log (get env (first (first body))))
+
+                    (= op :sqrt)
+                    (uop/uop-alu :uop/sqrt (get env (first (first body))))
+
+                    (= op :rsqrt)
+                    (let [x (get env (first (first body)))]
+                      (uop/uop-alu :uop/recip (uop/uop-alu :uop/sqrt x)))
+
+                    (= op :sin)
+                    (uop/uop-alu :uop/sin (get env (first (first body))))
+
+                    (= op :cos)
+                    (uop/uop-alu :uop/cos (get env (first (first body))))
+
+                    (= op :tanh)
+                    (uop-tanh (get env (first (first body))))
+
+                    (or (= op :sigmoid) (= op :logistic))
+                    (uop-sigmoid (get env (first (first body))))
+
+                    (= op :fwht)
+                    (let [in-uop (get env (first (first body)))]
+                      (lower-fwht in-uop attrs))
+
+                    (= op :rht)
+                    (let [in-uop (get env (first (first body)))
+                          signs-uop (get env (first (second body)))]
+                      (lower-rht in-uop signs-uop attrs))
+
+                    (= op :quip-dequant)
+                    (let [codes-uop (get env (first (first body)))
+                          cb-uop (get env (first (second body)))
+                          scales-uop (when (nth body 2 nil) (get env (first (nth body 2))))
+                          codes-shape (:shape codes-uop)
+                          cb-shape (:shape cb-uop)
+                          k (first codes-shape)
+                          n8 (second codes-shape)
+                          dim8 (if (>= (count cb-shape) 2) (second cb-shape) 8)
+                          n (* (long n8) (long dim8))
+                          gathered (lower-gather cb-uop codes-uop [k n8 dim8])
+                          reshaped (uop/uop-reshape gathered [k n])]
+                      (if scales-uop
+                        (uop/uop-alu :uop/mul reshaped (broadcast-shape-suffix scales-uop [k n]))
+                        reshaped))
+
+                    (= op :exl3-dequant)
+                    (let [trellis-uop (get env (first (first body)))]
+                      (uop/uop-reshape trellis-uop (or out-shape (:shape trellis-uop))))
+
+                    (= op :hadamard-block-128)
+                    (let [in-uop (get env (first (first body)))
+                          signs-uop (when (second body) (get env (first (second body))))
+                          inverse? (boolean (:inverse? attrs))
+                          apply-had128 (fn [x]
+                                         (let [sh (:shape x)
+                                               d (long (last sh))
+                                               num-blocks (quot d 128)
+                                               leading (subvec (vec sh) 0 (dec (count sh)))
+                                               reshaped (uop/uop-reshape x (conj leading num-blocks 128))
+                                               h-out (lower-fwht reshaped {:normalized? true})]
+                                           (uop/uop-reshape h-out (vec sh))))]
+                      (cond
+                        (and signs-uop inverse?)
+                        (let [h-out (apply-had128 in-uop)]
+                          (uop/uop-alu :uop/mul h-out (broadcast-shape-suffix signs-uop (:shape in-uop))))
+
+                        signs-uop
+                        (let [prescaled (uop/uop-alu :uop/mul in-uop (broadcast-shape-suffix signs-uop (:shape in-uop)))]
+                          (apply-had128 prescaled))
+
+                        :else
+                        (apply-had128 in-uop)))
+
+                    (= op :turboquant-unpack)
+                    (let [codes-uop (get env (first (first body)))
+                          scale-uop (when (second body) (get env (first (second body))))
+                          signs-uop (when (nth body 2 nil) (get env (first (nth body 2))))
+                          sh (:shape codes-uop)
+                          rank (count sh)
+                          last-dim (long (last sh))
+                          d (* last-dim 4)
+                          leading (subvec (vec sh) 0 (dec rank))
+                          out-sh (conj leading d)
+                          c-3 (broadcast-scalar :i8 3 sh)
+                          c-2 (broadcast-scalar :i8 2 sh)
+                          c-4 (broadcast-scalar :i8 4 sh)
+                          c-6 (broadcast-scalar :i8 6 sh)
+                          b0 (uop/uop-alu :uop/and codes-uop c-3)
+                          b1 (uop/uop-alu :uop/and (uop/uop-alu :uop/shr codes-uop c-2) c-3)
+                          b2 (uop/uop-alu :uop/and (uop/uop-alu :uop/shr codes-uop c-4) c-3)
+                          b3 (uop/uop-alu :uop/and (uop/uop-alu :uop/shr codes-uop c-6) c-3)
+                          norm-dt (or (:dtype scale-uop) :f32)
+                          c-15 (broadcast-scalar norm-dt 1.5 sh)
+                          c-a (broadcast-scalar norm-dt 0.89293333 sh)
+                          c-b (broadcast-scalar norm-dt 0.05066667 sh)
+                          decode-slice (fn [raw-code]
+                                         (let [flt (uop/uop-cast raw-code norm-dt)
+                                               x (uop/uop-alu :uop/sub flt c-15)
+                                               x2 (uop/uop-alu :uop/mul x x)
+                                               poly (uop/uop-alu :uop/add c-a (uop/uop-alu :uop/mul x2 c-b))]
+                                           (uop/uop-alu :uop/mul x poly)))
+                          v0 (decode-slice b0)
+                          v1 (decode-slice b1)
+                          v2 (decode-slice b2)
+                          v3 (decode-slice b3)
+                          interleaved (uop/uop-reshape
+                                       (uop/uop-permute
+                                        (uop/uop-cat [(uop/uop-reshape v0 (conj leading last-dim 1))
+                                                      (uop/uop-reshape v1 (conj leading last-dim 1))
+                                                      (uop/uop-reshape v2 (conj leading last-dim 1))
+                                                      (uop/uop-reshape v3 (conj leading last-dim 1))]
+                                                     (dec (count (conj leading last-dim 1))))
+                                        (vec (range (count (conj leading last-dim 4)))))
+                                       out-sh)
+                          fwht? (get attrs :fwht? true)
+                          unpacked (if fwht? (lower-fwht interleaved attrs) interleaved)
+                          signed (if signs-uop
+                                   (uop/uop-alu :uop/mul unpacked (broadcast-shape-suffix signs-uop out-sh))
+                                   unpacked)]
+                      (if scale-uop
+                        (uop/uop-alu :uop/mul signed (broadcast-shape-suffix scale-uop out-sh))
+                        signed))
+
+                    (= op :turboquant-pack)
+                    (let [in-uop (get env (first (first body)))
+                          sh (:shape in-uop)
+                          rank (count sh)
+                          d (long (last sh))
+                          packed-dim (quot d 4)
+                          leading (subvec (vec sh) 0 (dec rank))
+                          target-packed-sh (conj leading packed-dim)
+                          scale-val (double (or (:scale attrs) 1.0))
+                          dt (:dtype in-uop)
+                          c-scale (broadcast-scalar dt scale-val sh)
+                          scaled (uop/uop-alu :uop/mul in-uop c-scale)
+                          c-neg098 (broadcast-scalar dt -0.98 sh)
+                          c-zero (broadcast-scalar dt 0.0 sh)
+                          c-pos098 (broadcast-scalar dt 0.98 sh)
+                          code0 (broadcast-scalar :i8 0 sh)
+                          code1 (broadcast-scalar :i8 1 sh)
+                          code2 (broadcast-scalar :i8 2 sh)
+                          code3 (broadcast-scalar :i8 3 sh)
+                          lt-neg (uop/uop-alu :uop/cmplt scaled c-neg098)
+                          lt-zero (uop/uop-alu :uop/cmplt scaled c-zero)
+                          lt-pos (uop/uop-alu :uop/cmplt scaled c-pos098)
+                          codes (uop/uop-alu :uop/where lt-neg code0
+                                             (uop/uop-alu :uop/where lt-zero code1
+                                                          (uop/uop-alu :uop/where lt-pos code2 code3)))
+                          grouped (uop/uop-reshape codes (conj leading packed-dim 4))
+                          c0 (uop/uop-shrink grouped (conj (mapv #(vector 0 %) leading) [0 packed-dim] [0 1]))
+                          c1 (uop/uop-shrink grouped (conj (mapv #(vector 0 %) leading) [0 packed-dim] [1 2]))
+                          c2 (uop/uop-shrink grouped (conj (mapv #(vector 0 %) leading) [0 packed-dim] [2 3]))
+                          c3 (uop/uop-shrink grouped (conj (mapv #(vector 0 %) leading) [0 packed-dim] [3 4]))
+                          c-2 (broadcast-scalar :i8 2 target-packed-sh)
+                          c-4 (broadcast-scalar :i8 4 target-packed-sh)
+                          c-6 (broadcast-scalar :i8 6 target-packed-sh)
+                          packed-0 (uop/uop-reshape c0 target-packed-sh)
+                          packed-1 (uop/uop-alu :uop/shl (uop/uop-reshape c1 target-packed-sh) c-2)
+                          packed-2 (uop/uop-alu :uop/shl (uop/uop-reshape c2 target-packed-sh) c-4)
+                          packed-3 (uop/uop-alu :uop/shl (uop/uop-reshape c3 target-packed-sh) c-6)]
+                      (uop/uop-alu :uop/or
+                                   (uop/uop-alu :uop/or packed-0 packed-1)
+                                   (uop/uop-alu :uop/or packed-2 packed-3)))
 
                     (= op :constant)
                     (let [val (get attrs :value 0.0)

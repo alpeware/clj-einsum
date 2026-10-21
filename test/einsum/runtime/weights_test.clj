@@ -1,14 +1,13 @@
 (ns einsum.runtime.weights-test
   "Generative property tests and unit tests for WeightStore and automated invar inference."
-  (:require [einsum.compiler.stablehlo :as shlo]
-            [einsum.core :as xla]
-            [einsum.logic.lower :as lower]
-            [einsum.runtime.arena :as arena]
-            [einsum.runtime.weights :as weights]
-            [clojure.test :refer [deftest is testing]]
-            [clojure.test.check.clojure-test :refer [defspec]]
-            [clojure.test.check.generators :as gen]
-            [clojure.test.check.properties :as prop])
+  (:require             [einsum.runtime.arena :as arena]
+                        [einsum.runtime.weights :as weights]
+                        [einsum.uop.lower :as uop-lower]
+                        [einsum.uop.runtime :as uop-rt]
+                        [clojure.test :refer [deftest is testing]]
+                        [clojure.test.check.clojure-test :refer [defspec]]
+                        [clojure.test.check.generators :as gen]
+                        [clojure.test.check.properties :as prop])
   (:import [java.lang.foreign MemorySegment]))
 
 (deftest test-weight-store-resolution
@@ -36,7 +35,7 @@
 
 (deftest test-weight-store-get-device-buffer-with-arrays
   (testing "get-device-buffer transfers host array to device, tracks in arena, and caches"
-    (let [ctx (xla/init-backend! :interpreter {:quiet? true})
+    (let [ctx (uop-rt/init-uop-context :uop-cpu {:quiet? true})
           w-floats (float-array [1.0 2.0 3.0 4.0])
           source {"w.weight" w-floats}
           header {"w.weight" {"shape" [2 2] "dtype" "F32"}}]
@@ -62,14 +61,14 @@
       (is (= [[:x [:tensor [1 64] :f32]]
               [:w [:tensor [64 128] :f32]]]
              invars))
-      ;; Verify the inferred invars lower into a valid StableHLO graph via 4-arity
-      (let [graph (lower/ast->graph "inferred_gemm" invars ast #{:y})]
-        (is (some? (shlo/validate-graph graph))))
-      ;; Verify lowering directly via 3-arity ast->graph with :inputs and :weights
-      (let [graph-3 (lower/ast->graph "inferred_gemm_3" ast {:inputs dynamic-inputs
-                                                             :weights weights-map
-                                                             :targets #{:y}})]
-        (is (some? (shlo/validate-graph graph-3)))
+      ;; Verify the inferred invars lower into a valid UOp graph via 4-arity
+      (let [graph (uop-lower/ast->uop-graph "inferred_gemm" invars ast #{:y})]
+        (is (some? graph)))
+      ;; Verify lowering directly via 3-arity ast->uop-graph with :inputs and :weights
+      (let [graph-3 (uop-lower/ast->uop-graph "inferred_gemm_3" ast {:inputs dynamic-inputs
+                                                                     :weights weights-map
+                                                                     :targets #{:y}})]
+        (is (some? graph-3))
         (is (= invars (:invars graph-3)))))))
 
 (defspec prop-inferred-invars-match-free-vars

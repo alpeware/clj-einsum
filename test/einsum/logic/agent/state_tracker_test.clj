@@ -23,11 +23,11 @@
                   (every? #(contains? res %) (range chain-len)))))
 
 ;; ==============================================================================
-;; 2. In-VRAM OpenXLA PJRT Datalog Compilation & Execution Check
+;; 2. In-VRAM Datalog Compilation & Execution Check
 ;; ==============================================================================
 
-(deftest test-state-tracker-pjrt-execution
-  (testing "In-VRAM Datalog Fixpoint compiles to OpenXLA PJRT and tracks state exactly"
+(deftest test-state-tracker-execution
+  (testing "In-VRAM Datalog Fixpoint compiles and tracks state exactly"
     (let [ctx (xla/get-context)
           n 8
           ;; Dependencies: file 0 depends on file 1, file 1 depends on file 2

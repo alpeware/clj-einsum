@@ -57,11 +57,11 @@
                   (every? #(contains? closure %) (range chain-len)))))
 
 ;; ==============================================================================
-;; 3. Unit Test: Arm B In-VRAM Deductive Exactness via PJRT
+;; 3. Unit Test: Arm B In-VRAM Deductive Exactness
 ;; ==============================================================================
 
-(deftest test-arm-b-pjrt-deductive-exactness
-  (testing "Arm B achieves 100% deductive exactness on a multi-turn refactoring sequence in PJRT"
+(deftest test-arm-b-deductive-exactness
+  (testing "Arm B achieves 100% deductive exactness on a multi-turn refactoring sequence"
     (let [ctx (xla/get-context)
           ontology (swe/build-codebase-ontology {:num-files 16
                                                  :num-functions 32

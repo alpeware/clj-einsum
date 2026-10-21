@@ -20,11 +20,11 @@
 
 (def gen-elementwise-op
   "Generator for elementwise binary operations."
-  (gen/elements [:stablehlo/add
-                 :stablehlo/multiply
-                 :stablehlo/subtract
-                 :stablehlo/maximum
-                 :stablehlo/minimum]))
+  (gen/elements [:ir/add
+                 :ir/multiply
+                 :ir/subtract
+                 :ir/maximum
+                 :ir/minimum]))
 
 (def gen-valid-graph
   "Generates valid Malli-schema-compliant EDN SSA compute graphs."
@@ -34,7 +34,7 @@
       :invars [[:x [:tensor shape dtype]]
                [:y [:tensor shape dtype]]]
       :outvars [:out]
-      :eqns [{:op :stablehlo/constant :value c-val :outvars [:c0]}
+      :eqns [{:op :ir/constant :value c-val :outvars [:c0]}
              {:op op :invars [:x :y] :outvars [:tmp]}
-             {:op :stablehlo/add :invars [:tmp :c0] :outvars [:out]}]})
+             {:op :ir/add :invars [:tmp :c0] :outvars [:out]}]})
    (gen/tuple gen-elementwise-op gen-shape gen-dtype (gen/double* {:NaN? false :infinite? false}))))

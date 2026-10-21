@@ -2,11 +2,10 @@
   "Embedding-Space Symbolic Reasoning for Tensor Logic (Section 5 of Pedro Domingos, arXiv:2510.12269).
    Implements relation embedding via superposed tensor products, rule embedding via contraction joins,
    fact decoding, tempered analogical queries, and host-driven forward-chaining fixpoints."
-  (:require [einsum.core :as xla]
-            [einsum.logic.ast :as ast]
+  (:require [einsum.logic.ast :as ast]
             [einsum.logic.core :as logic]
             [einsum.logic.dce :as dce]
-            [einsum.compiler.pjrt :as pjrt]
+            [einsum.uop.runtime :as uop-rt]
             [clojure.set :as set]
             [clojure.string :as str]))
 
@@ -288,7 +287,7 @@
 ;; ==============================================================================
 
 (defn compile-query
-  "Compiles a Tensor Logic symbolic AST into an OpenXLA PJRT loaded executable."
+  "Compiles a Tensor Logic symbolic AST into a native UOp loaded executable."
   ([graph-name invars ast target-heads]
    (logic/compile-ast graph-name invars ast target-heads))
   ([ctx graph-name invars ast target-heads]
@@ -299,9 +298,9 @@
    Returns map of {target-head-kw float-array}.
    Explicitly destroys native device buffers before returning."
   [executable inputs]
-  (let [ctx (or (:ctx executable) (xla/get-context))
-        invars (or (get-in executable [:graph :invars]) [])
-        outvars (or (get-in executable [:graph :outvars]) [])
+  (let [ctx (or (:ctx executable) (uop-rt/init-uop-context :uop-cpu {:quiet? true}))
+        invars (or (:invars executable) (get-in executable [:schedule :invars]) (get-in executable [:uop-graph :invars]) (get-in executable [:graph :invars]) [])
+        outvars (or (:outvars executable) (get-in executable [:schedule :outvars]) (get-in executable [:uop-graph :outvars]) (get-in executable [:graph :outvars]) [])
         ephemeral-buffers (atom [])
         input-buffers
         (mapv (fn [[invar-name [_kw shape dtype]]]
@@ -309,35 +308,28 @@
                       _ (when-not data
                           (throw (ex-info "Missing input data for invar"
                                           {:invar invar-name :available (keys inputs)})))]
-                  (if (instance? java.lang.foreign.MemorySegment data)
+                  (if (uop-rt/uop-buffer? data)
                     data
-                    (let [dtype-enum (case dtype :f32 11 :bf16 13 :i32 4 :i8 2 11)
-                          buf (pjrt/buffer-from-host-buffer ctx (:client ctx) data shape dtype-enum)]
+                    (let [buf (uop-rt/host->device ctx data shape (or dtype :f32))]
                       (swap! ephemeral-buffers conj buf)
                       buf))))
               invars)]
     (try
-      (let [num-outs (count outvars)
-            raw-out (pjrt/execute-executable ctx (or (:handle executable) executable) input-buffers num-outs)
-            out-buffers (if (= num-outs 1) [raw-out] raw-out)
+      (let [out-map (uop-rt/execute-uop-executable ctx executable input-buffers)
             results (into {}
-                          (map-indexed
-                           (fn [idx target-head]
-                             (let [buf (nth out-buffers idx)
-                                   sh (or (get-in executable [:graph :known-shapes target-head])
-                                          [1])
-                                   total-elems (reduce * 1 sh)
-                                   floats (pjrt/buffer-to-host-buffer ctx buf (long total-elems) :f32)]
-                               [target-head floats]))
-                           outvars))]
+                          (map (fn [target-head]
+                                 (let [buf (get out-map target-head)
+                                       floats (when buf (uop-rt/device->host-floats ctx buf))]
+                                   [target-head floats]))
+                               outvars))]
         ;; Destroy device output buffers
-        (doseq [b out-buffers]
-          (try (xla/destroy-buffer! b) (catch Exception _ nil)))
+        (doseq [[_k b] out-map]
+          (try (uop-rt/destroy-buffer! ctx b) (catch Exception _ nil)))
         results)
       (finally
         ;; Destroy only ephemeral device input buffers
         (doseq [b @ephemeral-buffers]
-          (try (xla/destroy-buffer! b) (catch Exception _ nil)))))))
+          (try (uop-rt/destroy-buffer! ctx b) (catch Exception _ nil)))))))
 
 ;; ==============================================================================
 ;; 3.4 Forward-Chaining Driver (Host-Side, Phase 1)
@@ -778,7 +770,7 @@
    `facts`: sequence or set of [h t] integer entity index pairs.
    Returns {:shape [d d] :data float-array}."
   ([entity-embeddings facts]
-   (superposition-relation-matrix (xla/get-context) entity-embeddings facts))
+   (superposition-relation-matrix (uop-rt/init-uop-context :uop-cpu {:quiet? true}) entity-embeddings facts))
   ([ctx entity-embeddings facts]
    (let [{:keys [shape data]} entity-embeddings
          [n d] shape

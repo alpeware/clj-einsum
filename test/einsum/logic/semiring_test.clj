@@ -36,11 +36,11 @@
       (is (= {:semiring :min-plus} (ast/attrs node))))))
 
 ;; -----------------------------------------------------------------------------
-;; 2. Execution Tests via OpenXLA PJRT
+;; 2. Execution Tests
 ;; -----------------------------------------------------------------------------
 
-(deftest test-all-pairs-shortest-paths-pjrt
-  (testing "all-pairs-shortest-paths computes optimal shortest paths via OpenXLA PJRT (Bellman-Ford / Floyd-Warshall)"
+(deftest test-all-pairs-shortest-paths
+  (testing "all-pairs-shortest-paths computes optimal shortest paths (Bellman-Ford / Floyd-Warshall)"
     ;; Directed graph with 4 nodes:
     ;; 0 -> 1: wt 1.0
     ;; 1 -> 2: wt 2.0
@@ -67,8 +67,8 @@
       ;; Unreachable 3 -> 0 should remain infinity (>= 1e20)
       (is (> (get-dist 3 0) 1e20)))))
 
-(deftest test-path-multiplicities-pjrt
-  (testing "path-multiplicities computes exact path counts without clamping via OpenXLA PJRT"
+(deftest test-path-multiplicities
+  (testing "path-multiplicities computes exact path counts without clamping"
     ;; Diamond graph:
     ;; 0 -> 1, 0 -> 2
     ;; 1 -> 3, 2 -> 3
@@ -85,8 +85,8 @@
       ;; 0 paths from 3 to 0
       (is (= 0.0 (double (get-count 3 0)))))))
 
-(deftest test-viterbi-most-probable-paths-pjrt
-  (testing "viterbi-most-probable-paths computes maximum reliability path via OpenXLA PJRT"
+(deftest test-viterbi-most-probable-paths
+  (testing "viterbi-most-probable-paths computes maximum reliability path"
     ;; Probabilistic transition network:
     ;; 0 -> 1 (0.9), 1 -> 3 (0.9) => path probability 0.81
     ;; 0 -> 2 (0.5), 2 -> 3 (0.5) => path probability 0.25

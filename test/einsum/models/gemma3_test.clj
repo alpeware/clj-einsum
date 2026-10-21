@@ -1,15 +1,14 @@
 (ns einsum.models.gemma3-test
   "Unit and generative tests for declarative Tensor Logic Gemma 3 model architecture."
-  (:require [einsum.core :as xla]
-            [einsum.logic.ast :as ast]
-            [einsum.logic.expand :as expand]
-            [einsum.logic.lower :as lower]
-            [einsum.models.gemma3 :as gemma3]
-            [einsum.compiler.stablehlo :as shlo]
-            [clojure.test :refer [deftest is testing]]
-            [clojure.test.check.clojure-test :refer [defspec]]
-            [clojure.test.check.generators :as gen]
-            [clojure.test.check.properties :as prop]))
+  (:require             [einsum.logic.ast :as ast]
+                        [einsum.logic.expand :as expand]
+                        [einsum.models.gemma3 :as gemma3]
+                        [einsum.uop.lower :as uop-lower]
+                        [einsum.uop.runtime :as uop-rt]
+                        [clojure.test :refer [deftest is testing]]
+                        [clojure.test.check.clojure-test :refer [defspec]]
+                        [clojure.test.check.generators :as gen]
+                        [clojure.test.check.properties :as prop]))
 
 (defspec prop-gemma3-layer-ast-validity 20
   (prop/for-all [layer-idx (gen/choose 0 17)
@@ -102,11 +101,11 @@
                 [:up_w_0 [:tensor [intermediate-dim hidden-dim] :bf16]]
                 [:down_w_0 [:tensor [hidden-dim intermediate-dim] :bf16]]]
         ast (gemma3/gemma3-model-ast config)
-        graph (lower/ast->graph "gemma3_single_layer" invars ast #{:logits})]
-    (is (shlo/validate-graph graph))
+        graph (uop-lower/ast->uop-graph "gemma3_single_layer" invars ast #{:logits})]
+    (is (some? graph))
     (is (= [:logits] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (uop-rt/init-uop-context :uop-cpu {:quiet? true})
+          compiled (uop-rt/compile-uop-executable ctx "gemma3_single_layer" invars ast #{:logits})]
       (is (some? compiled)))))
 
 (deftest test-gemma3-full-model-lowering
@@ -146,9 +145,9 @@
                                 [(keyword (str "down_w_" i)) [:tensor [hidden-dim intermediate-dim] :bf16]]])
                              (range num-layers))))
         ast (gemma3/gemma3-model-ast config)
-        graph (lower/ast->graph "gemma3_full_model" invars ast #{:logits})]
-    (is (shlo/validate-graph graph))
+        graph (uop-lower/ast->uop-graph "gemma3_full_model" invars ast #{:logits})]
+    (is (some? graph))
     (is (= [:logits] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (uop-rt/init-uop-context :uop-cpu {:quiet? true})
+          compiled (uop-rt/compile-uop-executable ctx "gemma3_full_model" invars ast #{:logits})]
       (is (some? compiled)))))

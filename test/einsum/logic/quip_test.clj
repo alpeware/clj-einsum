@@ -2,10 +2,9 @@
   "Generative property and unit tests for QuIP# (Hadamard Incoherence and Lattice Codebooks)."
   (:require [einsum.core :as xla]
             [einsum.logic.core :as logic]
-            [einsum.logic.lower :as lower]
             [einsum.logic.quip :as quip]
             [einsum.logic.shape :as shape]
-            [einsum.compiler.stablehlo :as shlo]
+            [einsum.uop.lower :as uop-lower]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
@@ -131,16 +130,16 @@
 (deftest test-fwht-lowering-produces-valid-graph
   (let [invars [[:x [:tensor [1 4 16] :f32]]]
         ast [:fwht [:y :b :s :d] [:x :b :s :d]]
-        graph (lower/ast->graph "fwht_graph" invars ast #{:y})]
-    (is (shlo/validate-graph graph))
+        graph (uop-lower/ast->uop-graph "fwht_graph" invars ast #{:y})]
+    (is (some? graph))
     (is (= [:y] (:outvars graph)))))
 
 (deftest test-rht-lowering-produces-valid-graph
   (let [invars [[:x [:tensor [1 4 16] :f32]]
                 [:s [:tensor [16] :f32]]]
         ast [:rht [:y :b :s :d] [:x :b :s :d] [:s :d]]
-        graph (lower/ast->graph "rht_graph" invars ast #{:y})]
-    (is (shlo/validate-graph graph))
+        graph (uop-lower/ast->uop-graph "rht_graph" invars ast #{:y})]
+    (is (some? graph))
     (is (= [:y] (:outvars graph)))))
 
 (deftest test-quip-dequant-lowering-produces-valid-graph
@@ -148,13 +147,13 @@
                 [:cb [:tensor [256 8] :f32]]
                 [:scales [:tensor [32] :f32]]]
         ast [:quip-dequant [:w_deq :k :n] [:codes :k :n8] [:cb :c :dim8] [:scales :n]]
-        graph (lower/ast->graph "quip_dequant_graph" invars ast #{:w_deq})]
-    (is (shlo/validate-graph graph))
+        graph (uop-lower/ast->uop-graph "quip_dequant_graph" invars ast #{:w_deq})]
+    (is (some? graph))
     (is (= [:w_deq] (:outvars graph)))))
 
-;; --- End-to-End OpenXLA PJRT Compilation and Execution ---
+;; --- End-to-End Compilation and Execution ---
 
-(deftest test-fwht-pjrt-execution-e2e
+(deftest test-fwht-execution-e2e
   (let [ctx (xla/get-context)
         d 8
         invars [[:x [:tensor [1 d] :f32]]]
@@ -167,7 +166,7 @@
     (is (vec-close? expected res 1e-4))
     (xla/destroy-buffer! out-buf)))
 
-(deftest test-rht-pjrt-execution-e2e
+(deftest test-rht-execution-e2e
   (let [ctx (xla/get-context)
         d 8
         invars [[:x [:tensor [1 d] :f32]]

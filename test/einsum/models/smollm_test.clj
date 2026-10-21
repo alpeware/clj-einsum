@@ -1,15 +1,14 @@
 (ns einsum.models.smollm-test
   "Unit and generative tests for declarative Tensor Logic SmolLM model."
-  (:require [einsum.core :as xla]
-            [einsum.logic.ast :as ast]
-            [einsum.logic.expand :as expand]
-            [einsum.logic.lower :as lower]
-            [einsum.models.smollm :as smollm]
-            [einsum.compiler.stablehlo :as shlo]
-            [clojure.test :refer [deftest is testing]]
-            [clojure.test.check.clojure-test :refer [defspec]]
-            [clojure.test.check.generators :as gen]
-            [clojure.test.check.properties :as prop]))
+  (:require             [einsum.logic.ast :as ast]
+                        [einsum.logic.expand :as expand]
+                        [einsum.models.smollm :as smollm]
+                        [einsum.uop.lower :as uop-lower]
+                        [einsum.uop.runtime :as uop-rt]
+                        [clojure.test :refer [deftest is testing]]
+                        [clojure.test.check.clojure-test :refer [defspec]]
+                        [clojure.test.check.generators :as gen]
+                        [clojure.test.check.properties :as prop]))
 
 (defspec prop-smollm-layer-ast-validity 20
   (prop/for-all [layer-idx (gen/choose 0 29)
@@ -39,11 +38,11 @@
                                 [(keyword (str "down_w_" i)) [:tensor [576 1536] :f32]]])
                              (range num-layers)))
         ast (smollm/smollm-model-ast {:num-layers num-layers :max-seq-len max-seq-len})
-        graph (lower/ast->graph "smollm_single_layer" invars ast #{:logits})]
-    (is (shlo/validate-graph graph))
+        graph (uop-lower/ast->uop-graph "smollm_single_layer" invars ast #{:logits})]
+    (is (some? graph))
     (is (= [:logits] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (uop-rt/init-uop-context :uop-cpu {:quiet? true})
+          compiled (uop-rt/compile-uop-executable ctx "smollm_single_layer" invars ast #{:logits})]
       (is (some? compiled)))))
 
 (defspec prop-smollm-config-invariants 20

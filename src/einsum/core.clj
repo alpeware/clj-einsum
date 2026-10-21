@@ -280,10 +280,22 @@
         :backend :interpreter
         :ctx ctx})
 
-     (= (:backend ctx) :uop)
-     (if-let [compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
-       (compile-uop ctx (:name graph "graph") (:invars graph) (or (:ast graph) graph) (:outvars graph))
-       (throw (ex-info "UOp backend runtime not found" {:ctx ctx})))
+     (or (= (:backend ctx) :uop)
+         (= (:backend ctx) :uop-cpu)
+         (= (:backend ctx) :uop-rocm)
+         (contains? graph :outputs)
+         (contains? graph :uops)
+         (contains? graph :ast))
+     (let [uop-ctx (if (or (= (:backend ctx) :uop)
+                           (= (:backend ctx) :uop-cpu)
+                           (= (:backend ctx) :uop-rocm))
+                     ctx
+                     (let [init-fn (requiring-resolve 'einsum.uop.runtime/init-uop-context)]
+                       (init-fn :uop-cpu {:quiet? true})))
+           compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
+       (if compile-uop
+         (compile-uop uop-ctx (:name graph "graph") (:invars graph) (if (contains? graph :outputs) graph (or (:ast graph) graph)) (:outvars graph))
+         (throw (ex-info "UOp backend runtime not found" {:ctx ctx}))))
 
      :else
      (let [exec (compile/compile-graph ctx (:client ctx) graph)]
@@ -367,6 +379,7 @@
 
 (def ^:private ^Class FLOAT-ARRAY-CLASS (Class/forName "[F"))
 (def ^:private ^Class SHORT-ARRAY-CLASS (Class/forName "[S"))
+(def ^:private ^Class INT-ARRAY-CLASS (Class/forName "[I"))
 
 (defn to-host-slice
   "Transfers a slice of PJRT output device buffer, UOp device buffer, or interpreter tensor back to host float array.
@@ -437,10 +450,16 @@
                       :else
                       (pjrt/buffer-to-host-buffer ctx out-buf n-elements (or dtype :f32)))
          offset (* (long slice-idx) (long vocab-size))]
-     (if (and (>= offset 0) (<= (+ offset vocab-size) (alength ^floats all-floats)))
+     (cond
+       (instance? INT-ARRAY-CLASS all-floats)
+       all-floats
+
+       (and (>= offset 0) (<= (+ offset vocab-size) (alength ^floats all-floats)))
        (let [slice (float-array vocab-size)]
          (System/arraycopy all-floats offset slice 0 vocab-size)
          slice)
+
+       :else
        all-floats))))
 
 (defn destroy-buffer!
