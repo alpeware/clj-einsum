@@ -1,8 +1,8 @@
 (ns einsum.logic.memory.relation
-  "In-tensor relational memory core and embedding-space operations for OpenXLA PJRT execution.
+  "In-tensor relational memory core and embedding-space operations for UOp device runtime execution.
    Implements zero-gradient outer-product superposition, compiled in-tensor memory probing,
    extract-threshold-re-embed denoising cycles, and Gemma 4 relational grounding AST."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.symbolic :as sym]))
 
 (def MemoryConfigSchema
@@ -44,7 +44,7 @@
             (aset cores idx (+ (aget cores idx) (* h-val t-val)))))))))
 
 ;; ==============================================================================
-;; OpenXLA PJRT Compiled In-Tensor Memory Probing
+;; UOp device runtime Compiled In-Tensor Memory Probing
 ;; ==============================================================================
 
 (defn- probe-memory-ast
@@ -57,9 +57,9 @@
      [:= [:Scores :n] [:V_unit :d] [:E :n :d]]]))
 
 (defn compile-probe-query
-  "Compiles an OpenXLA PJRT executable for querying relation memory cores."
+  "Compiles an UOp device runtime executable for querying relation memory cores."
   ([dim entity-count]
-   (compile-probe-query (xla/get-context) dim entity-count))
+   (compile-probe-query (ein/get-context) dim entity-count))
   ([ctx dim entity-count]
    (let [d (long dim)
          n (long entity-count)
@@ -70,11 +70,11 @@
      (sym/compile-query ctx "probe_relation_memory" invars ast [:Scores]))))
 
 (defn probe-relation-memory
-  "Evaluates in-tensor probe query via OpenXLA PJRT (Rule 4: Zero Java bypasses).
+  "Evaluates in-tensor probe query via UOp device runtime (Rule 4: Zero Java bypasses).
    Contraction: v_target = v_q * R_r, v_unit = normalize(v_target), scores = v_unit * E^T.
    Accepts {:keys [head-id rel-id memory query-vec relation-core entity-table dim entity-count]}."
   ([opts]
-   (probe-relation-memory (xla/get-context) opts))
+   (probe-relation-memory (ein/get-context) opts))
   ([ctx {:keys [head-id rel-id memory query-vec relation-core entity-table dim entity-count]}]
    (let [mem memory
          e-arr ^floats (or entity-table (:entity-table mem))
@@ -100,7 +100,7 @@
      {:scores scores})))
 
 ;; ==============================================================================
-;; OpenXLA PJRT Compiled Extract-Threshold-Re-Embed Denoising Cycle
+;; UOp device runtime Compiled Extract-Threshold-Re-Embed Denoising Cycle
 ;; ==============================================================================
 
 (defn- denoise-core-ast
@@ -120,10 +120,10 @@
     [:= [:R_clean :i :j] [:ETA :i :t] [:E :t :j]]]))
 
 (defn compile-relation-denoiser
-  "Compiles an OpenXLA PJRT executable for algebraic denoising (Section 2.4):
+  "Compiles an UOp device runtime executable for algebraic denoising (Section 2.4):
    A_crisp = step(E * R * E^T - 0.5), R_clean = E^T * A_crisp * E."
   ([dim entity-count]
-   (compile-relation-denoiser (xla/get-context) dim entity-count 0.5))
+   (compile-relation-denoiser (ein/get-context) dim entity-count 0.5))
   ([ctx dim entity-count]
    (compile-relation-denoiser ctx dim entity-count 0.5))
   ([ctx dim entity-count threshold]
@@ -135,10 +135,10 @@
      (sym/compile-query ctx "denoise_relation_core" invars ast [:R_clean :A_crisp]))))
 
 (defn denoise-relation-core
-  "Applies extract-threshold-re-embed denoising cycle via OpenXLA PJRT (Rule 4).
+  "Applies extract-threshold-re-embed denoising cycle via UOp device runtime (Rule 4).
    Restores pristine superposition matrix and extracts crisp binary fact indicators."
   ([opts]
-   (denoise-relation-core (xla/get-context) opts))
+   (denoise-relation-core (ein/get-context) opts))
   ([ctx {:keys [relation-core entity-table entity-count dim threshold]}]
    (let [d (long dim)
          n (long entity-count)
@@ -152,7 +152,7 @@
 (defn denoise-relation-core!
   "In-place algebraic denoising of relation core `rel-id` in resident `cores` array."
   ([cores entity-table rel-id entity-count dim]
-   (denoise-relation-core! (xla/get-context) cores entity-table rel-id entity-count dim 0.5))
+   (denoise-relation-core! (ein/get-context) cores entity-table rel-id entity-count dim 0.5))
   ([ctx ^floats cores ^floats entity-table rel-id entity-count dim threshold]
    (let [d (long dim)
          rel-offset (* (long rel-id) d d)

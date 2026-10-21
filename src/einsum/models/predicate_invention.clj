@@ -2,8 +2,8 @@
   "Gradient-Based Predicate Invention in Declarative Tensor Logic (Experiment E16/E17).
    Learns a latent relation core L = sigma(Z / tau) via gradient descent to recover
    hidden predicates (Parent) from observed compositions (Grandparent = L . L, Sibling = L^T . L).
-   Compiled 100% in OpenXLA PJRT VRAM (Rule 4: Zero Java bypasses). Pure functions (Rule 2)."
-  (:require [einsum.core :as xla]
+   Compiled 100% in UOp device runtime VRAM (Rule 4: Zero Java bypasses). Pure functions (Rule 2)."
+  (:require [einsum.core :as ein]
             [einsum.logic.symbolic :as sym]))
 
 ;; ==============================================================================
@@ -123,13 +123,13 @@
            [:- [:B_new :j :r] [:B :j :r] [:scaled_dB :j :r]]])])]))
 
 ;; ==============================================================================
-;; 2. OpenXLA PJRT Compilation Boundary
+;; 2. UOp device runtime Compilation Boundary
 ;; ==============================================================================
 
 (defn compile-predicate-invention-step
-  "Compiles OpenXLA PJRT executable for predicate invention step."
+  "Compiles UOp device runtime executable for predicate invention step."
   ([opts]
-   (compile-predicate-invention-step (xla/get-context) opts))
+   (compile-predicate-invention-step (ein/get-context) opts))
   ([ctx opts]
    (let [n (long (or (:num-entities opts) 64))
          din (long (or (:dim opts) 64))

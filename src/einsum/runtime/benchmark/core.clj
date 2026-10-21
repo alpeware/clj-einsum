@@ -1,5 +1,5 @@
 (ns einsum.runtime.benchmark.core
-  "Pure Clojure telemetry and metrics calculation engine for benchmarking PJRT workloads."
+  "Pure Clojure telemetry and metrics calculation engine for benchmarking UOp workloads."
   (:require [clojure.string :as str]))
 
 (defn calculate-latency-stats

@@ -131,7 +131,7 @@
 (defn run-vram-loop-generation
   "Executes autoregressive token generation entirely within device VRAM using 1-shot prefill
    (or sequential prefill for large contexts, with prefix KV-cache reuse across agent turns)
-   and an OpenXLA while-loop supporting chunked semantic early stopping."
+   and an UOp while-loop supporting chunked semantic early stopping."
   [session exec device-weights prompt-ids max-seq-len]
   (let [exec (or exec (:executable session) (:exec session))
         device-weights (or device-weights (:device-weights session))
@@ -216,7 +216,7 @@
                                       x-b (arena/device-buffer iter-arena x-arr [1 1] :i32)
                                       pos-b (arena/device-buffer iter-arena pos-arr [1] :i32)
                                       step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                      outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                                      outs (arena/track! iter-arena (execute-step-executable ctx step-exec step-inputs num-step-outs))
                                       outs-vec (if (vector? outs) outs [outs])
                                       nk (vec (subvec outs-vec 1))]
                                   (arena/promote! iter-arena session-arena nk)
@@ -234,7 +234,7 @@
                       prefill-inputs (into [in-b pos-b] device-weights)
                       num-prefill-outs (inc (* 2 num-unshared))
                       prefill-outs (arena/track! prefill-arena
-                                                 (execute-step-executable ctx (or (:handle prefill-exec) prefill-exec) prefill-inputs num-prefill-outs))
+                                                 (execute-step-executable ctx prefill-exec prefill-inputs num-prefill-outs))
                       prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
                       kv-outs (vec (subvec prefill-outs-vec 1))]
                   (arena/promote! prefill-arena session-arena kv-outs)
@@ -271,7 +271,7 @@
                                           x-b (arena/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
                                           pos-b (arena/device-buffer iter-arena pos-c [1] :i32)
                                           step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                          outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-step-outs))
+                                          outs (arena/track! iter-arena (execute-step-executable ctx chunk-exec step-inputs num-step-outs))
                                           outs-vec (if (vector? outs) outs [outs])
                                           nk (vec (subvec outs-vec 1))]
                                       (arena/promote! iter-arena session-arena nk)
@@ -291,7 +291,7 @@
                                     x-b (arena/device-buffer iter-arena x-arr [1 1] :i32)
                                     pos-b (arena/device-buffer iter-arena pos-arr [1] :i32)
                                     step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                    outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                                    outs (arena/track! iter-arena (execute-step-executable ctx step-exec step-inputs num-step-outs))
                                     outs-vec (if (vector? outs) outs [outs])
                                     nk (vec (subvec outs-vec 1))]
                                 (arena/promote! iter-arena session-arena nk)
@@ -323,7 +323,7 @@
                               b-max (arena/device-buffer chunk-arena (int-array [chunk-target]) [] :i32)
                               b-toks (arena/device-buffer chunk-arena cur-toks-arr [1 seq-len] :i32)
                               loop-inputs (into [b-step b-max b-toks] (concat cur-kv device-weights))
-                              loop-outs (arena/track! chunk-arena (execute-step-executable ctx (or (:handle exec) exec) loop-inputs num-loop-outs))
+                              loop-outs (arena/track! chunk-arena (execute-step-executable ctx exec loop-inputs num-loop-outs))
                               loop-outs-vec (if (vector? loop-outs) loop-outs [loop-outs])
                               out-step (nth loop-outs-vec 0)
                               out-toks (nth loop-outs-vec 1)
@@ -416,7 +416,7 @@
                        args (let [base (if last-token? [in-b pos-b] [in-b])
                                   rel-bufs (get session :relational-buffers [])]
                               (into base (concat device-weights rel-bufs)))
-                       out (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) args 1))
+                       out (arena/track! step-arena (execute-step-executable ctx exec args 1))
                        out-buf (if (sequential? out) (first out) out)
                        logits (if last-token?
                                 (to-host-slice out-buf 0 vocab-size vocab-size weight-dt)
@@ -511,14 +511,14 @@
                    (let [zero-chunk (int-array target-chunk-sz)
                          x-b (arena/device-buffer warmup-arena zero-chunk [1 target-chunk-sz] :i32)
                          step-inputs (into [x-b pos-b] (concat initial-kv device-weights))]
-                     (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-outs)))
+                     (execute-step-executable ctx chunk-exec step-inputs num-outs)))
                  (when (and exec
                             (:warmed-up? exec)
                             (compare-and-set! (:warmed-up? exec) false true))
                    (let [zero-tok (int-array 1)
                          x-b (arena/device-buffer warmup-arena zero-tok [1 1] :i32)
                          step-inputs (into [x-b pos-b] (concat initial-kv device-weights))]
-                     (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))))))
+                     (execute-step-executable ctx exec step-inputs num-outs))))))
          t0 (System/nanoTime)]
      (try
        ;; Phase 1: Prefill prompt tokens into KV cache
@@ -538,7 +538,7 @@
                                                x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
                                                pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
                                                step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                               outs (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                               outs (arena/track! step-arena (execute-step-executable ctx exec step-inputs num-outs))
                                                outs-vec (if (vector? outs) outs [outs])
                                                nl (first outs-vec)
                                                nk (vec (subvec outs-vec 1))]
@@ -564,7 +564,7 @@
                              in-b (arena/device-buffer step-arena in-arr [1 seq-len] :i32)
                              pos-b (arena/device-buffer step-arena pos-p [1] :i32)
                              step-inputs (into [in-b pos-b] device-weights)
-                             outs (arena/track! step-arena (execute-step-executable ctx (or (:handle prefill-exec) prefill-exec) step-inputs num-outs))
+                             outs (arena/track! step-arena (execute-step-executable ctx prefill-exec step-inputs num-outs))
                              outs-vec (if (vector? outs) outs [outs])
                              pl (first outs-vec)
                              pkv (vec (subvec outs-vec 1))]
@@ -605,7 +605,7 @@
                                            x-b (arena/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
                                            pos-b (arena/device-buffer iter-arena pos-c [1] :i32)
                                            step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                           outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-outs))
+                                           outs (arena/track! iter-arena (execute-step-executable ctx chunk-exec step-inputs num-outs))
                                            outs-vec (if (vector? outs) outs [outs])
                                            nl (first outs-vec)
                                            nk (vec (subvec outs-vec 1))]
@@ -635,7 +635,7 @@
                                      x-b (arena/device-buffer iter-arena tail-toks [1 tail-len] :i32)
                                      pos-b (arena/device-buffer iter-arena pos-c [1] :i32)
                                      step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                     outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle tail-exec) tail-exec) step-inputs num-outs))
+                                     outs (arena/track! iter-arena (execute-step-executable ctx tail-exec step-inputs num-outs))
                                      outs-vec (if (vector? outs) outs [outs])
                                      nl (first outs-vec)
                                      nk (vec (subvec outs-vec 1))]
@@ -657,7 +657,7 @@
                                      x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
                                      pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
                                      step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                     outs (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                     outs (arena/track! step-arena (execute-step-executable ctx exec step-inputs num-outs))
                                      outs-vec (if (vector? outs) outs [outs])
                                      nl (first outs-vec)
                                      nk (vec (subvec outs-vec 1))]
@@ -698,7 +698,7 @@
                                x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
                                pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
                                step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                               outs (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                               outs (arena/track! step-arena (execute-step-executable ctx exec step-inputs num-outs))
                                outs-vec (if (vector? outs) outs [outs])
                                nl (first outs-vec)
                                nk (vec (subvec outs-vec 1))]
@@ -764,8 +764,8 @@
   "Initializes UOp runtime, loads safetensors weights, and prepares model configuration for Gemma 4 REPL/CLI sessions."
   ([opts]
    (let [{:keys [backend]} opts
-         _ (when (contains? #{:rocm :pjrt :cuda12 :sycl :cpu} backend)
-             (throw (ex-info (str "Backend " backend " is no longer supported. OpenXLA/PJRT has been excised. Supported backends are :uop-rocm and :uop-cpu.")
+         _ (when (contains? #{:rocm :UOp :cuda12 :sycl :cpu} backend)
+             (throw (ex-info (str "Backend " backend " is no longer supported. UOp/UOp has been excised. Supported backends are :uop-rocm and :uop-cpu.")
                              {:backend backend})))
          target-backend (or backend :uop-cpu)
          ctx (uop-rt/init-uop-context target-backend opts)
@@ -839,7 +839,7 @@
 
          step-exec (when vram-loop?
                      (kernels/compile-gemma4-kv-executable session max-seq-len))
-         _ (when-not (:quiet opts) (println "Pinning Gemma 4 weights in PJRT VRAM..."))
+         _ (when-not (:quiet opts) (println "Pinning Gemma 4 weights in UOp VRAM..."))
          device-weights (weights/allocate-device-weights session)]
      (assoc session
             :device-weights device-weights
@@ -1058,7 +1058,7 @@
   (:text (generate-new-tokens-and-text session prompt)))
 
 (defn score-sequence-log-probs
-  "Evaluates exact log-probabilities of a token sequence in OpenXLA device memory.
+  "Evaluates exact log-probabilities of a token sequence in UOp device memory.
    When `session` contains `:step-executable` (from `init-agent-vram-session`), executes
    sequential in-accelerator KV-cache evaluation with fused target log-prob extraction,
    streaming log-probabilities with zero PCIe logit bloat.
@@ -1121,11 +1121,11 @@
                                pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
                                target-b (arena/device-buffer step-arena target-arr [1 1] :i32)
                                step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                               outs (arena/track! step-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                               outs (arena/track! step-arena (execute-step-executable ctx step-exec step-inputs num-step-outs))
                                outs-vec (if (vector? outs) outs [outs])
                                logits-buf (first outs-vec)
                                nk (vec (subvec outs-vec 1))
-                               lp-out (arena/track! step-arena (execute-step-executable ctx (or (:handle target-exec) target-exec) [logits-buf target-b] 1))
+                               lp-out (arena/track! step-arena (execute-step-executable ctx target-exec [logits-buf target-b] 1))
                                lp-buf (if (vector? lp-out) (first lp-out) lp-out)
                                floats (uop-rt/device->host-floats ctx lp-buf 1)
                                lp (aget floats 0)]
@@ -1155,7 +1155,7 @@
                        device-weights (or (:device-weights session)
                                           (weights/allocate-device-weights session))
                        args (into [in-b targets-b] device-weights)
-                       out (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) args 1))
+                       out (arena/track! step-arena (execute-step-executable ctx exec args 1))
                        out-buf (if (sequential? out) (first out) out)
                        raw-floats (to-host-slice out-buf 0 seq-len seq-len :f32)]
                    (mapv #(double (aget ^floats raw-floats %)) (range (dec n)))))]

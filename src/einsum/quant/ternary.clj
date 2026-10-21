@@ -14,7 +14,7 @@
 ;; Code 2 (0b10) -> +1.0  [(2 - 1.0)]
 ;; Code 3 (0b11) ->  0.0  (reserved / zero padding)
 ;;
-;; In OpenXLA StableHLO, unpacking lowers to:
+;; In UOp Tensor Logic, unpacking lowers to:
 ;; val = (convert(shift_right_logical(packed, s) & 0x03) - 1.0) * gamma
 
 (defn decode-ternary-2bit

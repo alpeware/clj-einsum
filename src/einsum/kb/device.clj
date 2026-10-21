@@ -1,9 +1,9 @@
 (ns einsum.kb.device
   "Experiment E22: In-Graph KB Query Dispatch.
-   Tier 2 KB-query arm conforming to Repository Rules 1, 2, and 4 (Pure XLA Execution, Sans-IO core).
+   Tier 2 KB-query arm conforming to Repository Rules 1, 2, and 4 (Pure UOp Execution, Sans-IO core).
    Implements:
    - VRAM-resident relation matrices [3 N N] (PARENT, SIBLING, ANCESTOR)
-   - Compiled OpenXLA PJRT dynamic-slice query executable (row gather)
+   - Compiled UOp device runtime dynamic-slice query executable (row gather)
    - Protocol query window recognition via token-ID compare
    - Device-resident verbalization bridge (entity indices -> token IDs)
    - Exact parity with E21 Knowledge Base (Gate P0b)"
@@ -83,7 +83,7 @@
      :num-entities n}))
 
 ;; ==============================================================================
-;; 3. OpenXLA PJRT Query Graph Compilation & Device Execution
+;; 3. UOp device runtime Query Graph Compilation & Device Execution
 ;; ==============================================================================
 
 (defn compile-kb-query-executable

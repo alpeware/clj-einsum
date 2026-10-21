@@ -2,7 +2,7 @@
   "State-of-the-Art (SOTA) Multi-Backend Kernel & Transformer Block Benchmark Suite."
   (:require [einsum.runtime.benchmark.core :as bcore]
             [einsum.runtime.benchmark.runner :as runner]
-            [einsum.compiler.pjrt.version :as v]
+            [einsum.test-helpers.telemetry :as telemetry]
             [clojure.java.io :as io]
             [clojure.string :as str]))
 
@@ -45,20 +45,20 @@
   "Main benchmark suite entry point."
   [& args]
   (let [opts (parse-cli-opts args)
-        probe (v/probe-system-driver)
-        detected (:detected-backends probe)
+        probe (telemetry/collect-system-telemetry)
+        detected (get-in probe [:backends :detected-backends] #{:uop-cpu})
         target-backend (:backend opts)
         backends-to-run (cond
                           (= target-backend :auto) detected
                           (contains? detected target-backend) #{target-backend}
                           :else (do
-                                  (println (format "Warning: Target backend %s not detected on host. Falling back to CPU." target-backend))
-                                  #{:cpu}))]
+                                  (println (format "Warning: Target backend %s not detected on host. Falling back to uop-cpu." target-backend))
+                                  #{:uop-cpu}))]
     (println "==========================================================================")
-    (println "                clj-xla SOTA Kernel Benchmark Suite                       ")
+    (println "               clj-einsum SOTA Kernel Benchmark Suite                     ")
     (println "==========================================================================")
     (println (format "Host System: %s (%s, %s)"
-                     (get-in probe [:details :cpu :java-version] "JVM")
+                     (get-in probe [:host :java-version] "JVM")
                      (System/getProperty "os.name")
                      (System/getProperty "os.arch")))
     (println (format "Detected Backends: %s" (str/join ", " (map name detected))))

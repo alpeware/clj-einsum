@@ -1,6 +1,6 @@
 (ns einsum.logic.attention.kg-masked-test
   "Unit, generative, and invariant tests for Knowledge-Graph Masked Self-Attention
-   in OpenXLA PJRT and Pedro Domingos' Declarative Tensor Logic (Experiment E2).
+   in UOp device runtime and Pedro Domingos' Declarative Tensor Logic (Experiment E2).
    Tests relational token adjacency generation, causal mask preservation,
    monotonic attention gating, simplex conservation, and adversarial distractor suppression."
   (:require [einsum.logic.attention.kg-masked :as kg-attn]

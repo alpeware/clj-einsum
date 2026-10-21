@@ -1,15 +1,15 @@
 (ns einsum.runtime.benchmark.workloads
   "Standard benchmark workload specifications (GEMM, RMSNorm, SwiGLU, GQA Attention, GPT-2 block, Gemma 4 block)."
   (:require [einsum.runtime.benchmark.core :as bcore]
-            [einsum.logic.lower :as lower]))
+            [einsum.uop.lower :as uop-lower]))
 
 (defn build-gemm-graph
   [m n k dtype]
   (let [invars [[:a [:tensor [m k] dtype]]
                 [:b [:tensor [k n] dtype]]]
         ast [[:= [:c :m :n] [:a :m :k] [:b :k :n]]]]
-    (lower/ast->graph (str "gemm_" (name dtype) "_" m "_" n "_" k)
-                      invars ast [:c])))
+    (uop-lower/ast->uop-graph (str "gemm_" (name dtype) "_" m "_" n "_" k)
+                              invars ast [:c])))
 
 (defn make-gemm-inputs
   [m n k dtype]
@@ -26,8 +26,8 @@
   (let [invars [[:x [:tensor [batch seq-len dim] dtype]]
                 [:w [:tensor [dim] dtype]]]
         ast [[:rms-norm [:out :b :s :d] [:x :b :s :d] [:w :d] {:eps 1e-6}]]]
-    (lower/ast->graph (str "rms_norm_" batch "_" seq-len "_" dim)
-                      invars ast [:out])))
+    (uop-lower/ast->uop-graph (str "rms_norm_" batch "_" seq-len "_" dim)
+                              invars ast [:out])))
 
 (defn make-rms-norm-inputs
   [batch seq-len dim _dtype]
@@ -43,8 +43,8 @@
         ast [[:= [:gate :b :s :i] {:act :swish} [:x :b :s :d] [:gate_w :d :i]]
              [:= [:up :b :s :i] [:x :b :s :d] [:up_w :d :i]]
              [:= [:out :b :s :i] [:gate :b :s :i] [:up :b :s :i]]]]
-    (lower/ast->graph (str "swiglu_" batch "_" seq-len "_" dim)
-                      invars ast [:out])))
+    (uop-lower/ast->uop-graph (str "swiglu_" batch "_" seq-len "_" dim)
+                              invars ast [:out])))
 
 (defn make-swiglu-inputs
   [batch seq-len dim _dtype]
@@ -94,8 +94,8 @@
              ;; 6. Out proj
              [:reshape [:attn_proj_in :b :p :qd] [:attn_ctx :b :h :p :hd] {:shape [batch seq-len q-dim]}]
              [:= [:out :b :p :d] [:attn_proj_in :b :p :qd] [:o_w :d :qd]]]]
-    (lower/ast->graph (str "gqa_attn_" batch "_" seq-len "_" num-heads "_" num-kv-heads)
-                      invars ast [:out])))
+    (uop-lower/ast->uop-graph (str "gqa_attn_" batch "_" seq-len "_" num-heads "_" num-kv-heads)
+                              invars ast [:out])))
 
 (defn make-gqa-attn-inputs
   [batch seq-len num-heads num-kv-heads head-dim _dtype]
@@ -163,8 +163,8 @@
              ;; 10. Residual 2
              [:= [:out :b :p :d] [:res1 :b :p :d]]
              [:= [:out :b :p :d] [:mlp_out :b :p :d]]]]
-    (lower/ast->graph (str "gpt2_block_" batch "_" seq-len "_" hidden-dim)
-                      invars ast [:out])))
+    (uop-lower/ast->uop-graph (str "gpt2_block_" batch "_" seq-len "_" hidden-dim)
+                              invars ast [:out])))
 
 (defn make-gpt2-block-inputs
   [batch seq-len hidden-dim _dtype]
@@ -273,8 +273,8 @@
              [:= [:res3 :b :p :d] [:pl_normed :b :p :d]]
              ;; 15. Layer Scalar
              [:= [:out :b :p :d] [:res3 :b :p :d] [:layer_scalar :one]]]]
-    (lower/ast->graph (str "gemma4_block_" batch "_" seq-len "_" hidden-dim)
-                      invars ast [:out])))
+    (uop-lower/ast->uop-graph (str "gemma4_block_" batch "_" seq-len "_" hidden-dim)
+                              invars ast [:out])))
 
 (defn make-gemma4-block-inputs
   [batch seq-len hidden-dim num-heads num-kv-heads head-dim pl-dim _dtype]

@@ -2,11 +2,11 @@
   "Unit and generative property tests for einsum.kb.device (Experiment E22).
    Repository Rule 1: Generative tests for invariants written FIRST before implementation.
    Verifies:
-   - Device KB query compilation and execution via OpenXLA PJRT
+   - Device KB query compilation and execution via UOp device runtime
    - Exact query parity between VRAM-resident relation gather and E21 KB ground truth across all 64 entities x 3 relations (Gate P0b)
    - Protocol query window recognition and token-ID parsing
    - Verbalization bridge: index-to-token translation and answer token formatting"
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.data.family-trees :as ft]
             [einsum.kb.store :as kb]
             [einsum.kb.device :as kbd]
@@ -23,7 +23,7 @@
   (prop/for-all [seed gen/nat
                  rel-idx (gen/choose 0 2)
                  arg-idx (gen/choose 0 15)]
-                (let [ctx (xla/init-backend! :cpu)
+                (let [ctx (ein/init-backend! :cpu)
                       n 16
                       rnd (java.util.Random. (long seed))
                       total-size (* 3 n n)
@@ -43,7 +43,7 @@
                        (filter (fn [j]
                                  (> (aget table-data (+ offset j)) (float 0.5)))
                                (range n)))]
-                  (xla/destroy-buffer! ctx dev-buf)
+                  (ein/destroy-buffer! ctx dev-buf)
                   (= expected-indices dev-indices))))
 
 ;; ==============================================================================
@@ -52,7 +52,7 @@
 
 (deftest test-p0b-full-family-parity
   (testing "Gate P0b: For all 64 entities x 3 relations, device gather results == E21 KB answers exactly"
-    (let [ctx (xla/init-backend! :cpu)
+    (let [ctx (ein/init-backend! :cpu)
           n 64
           forest (ft/generate-family-forest {:num-entities n :num-trees 8 :seed 42})
           schema {:parent {:arity 2 :sorts [:person :person] :cardinality {:target-arg 1 :max 2} :denial #{:acyclic}}
@@ -78,7 +78,7 @@
                     (format "Mismatch for relation %s entity %d: expected %s, got %s"
                             rel-kw arg expected-entities dev-entities))))))
         (finally
-          (xla/destroy-buffer! ctx dev-buf))))))
+          (ein/destroy-buffer! ctx dev-buf))))))
 
 ;; ==============================================================================
 ;; 3. Unit Tests: Query Window Recognition & Verbalization Formatting

@@ -1,17 +1,17 @@
 (ns tools.train-catq
   "Command-line entrypoint for training CAT-Q Learnable Modulation and LoRA Refinement
-   directly on open-weights Gemma 4 models (E2B, E4B, 12B, etc.) using sequential PJRT
+   directly on open-weights Gemma 4 models (E2B, E4B, 12B, etc.) using sequential UOp
    activation-forwarded calibration and exporting resident 2-bit ternary Safetensors
    and catq_factors.edn artifacts."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [einsum.compiler.pjrt :as pjrt]
-            [einsum.core :as xla]
+            [einsum.core :as core]
             [einsum.logic.core :as logic]
             [einsum.models.gemma4 :as gemma4]
             [einsum.quant.catq :as catq]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.tokenizer.protocol :as tok]
+            [einsum.uop.runtime :as uop-rt]
             [tools.gemma4-inference :as gemma4-inf]))
 
 (set! *warn-on-reflection* true)
@@ -58,7 +58,7 @@
 
 (defn calibrate-model-catq!
   "Calibrates CAT-Q modulation factors and OBS error compensation across all linear projections
-   in `model-dir` using sequential activation-forwarded PJRT execution and streams the
+   in `model-dir` using sequential activation-forwarded UOp execution and streams the
    resulting 2-bit ternary model and artifacts to `output-dir`."
   [opts]
   (let [model-dir (or (:model opts) ".models/gemma-4-E2B-it")
@@ -72,14 +72,14 @@
         t0 (System/nanoTime)
         _ (when-not quiet?
             (println "\n====================================================================================================")
-            (println "  CAT-Q Native Training & Quantization Pipeline (Sequential PJRT Activation Engine)")
+            (println "  CAT-Q Native Training & Quantization Pipeline (Sequential UOp Activation Engine)")
             (println "  Source Model: " model-dir)
             (println "  Target Output:" out-dir)
             (println (format "  Backend: %s | Max Seq Len: %d | Group Size: %d"
                              (name backend) max-seq-len group-size))
             (println "====================================================================================================\n"))
 
-        ;; 1. Initialize PJRT VRAM session
+        ;; 1. Initialize UOp VRAM session
         session (gemma4-inf/init-agent-vram-session {:model model-dir :backend backend :quiet true :precision :bf16} max-seq-len)
         ctx (:ctx session)
         config (:config session)
@@ -96,7 +96,7 @@
                       plen (min max-seq-len (count tokens))
                       arr (int-array max-seq-len)
                       _ (dotimes [i plen] (aset arr i (int (nth tokens i))))
-                      buf (xla/buffer-from-host-buffer ctx (:client ctx) arr [1 max-seq-len] 4)]
+                      buf (core/buffer-from-host-buffer ctx arr [1 max-seq-len] :i32)]
                   {:buf buf :len plen}))
               prompts)
 
@@ -176,18 +176,18 @@
                 ;; Forward pass across all calibration prompts with weights quantized up to L-1
                 prompt-acts
                 (mapv (fn [{:keys [buf len]}]
-                        (let [outs (pjrt/execute-executable ctx (or (:handle compiled) compiled) (into [buf] @device-weights) (count targets))
+                        (let [outs (uop-rt/execute-executable ctx (or (:handle compiled) compiled) (into [buf] @device-weights) (count targets))
                               get-act (fn [target-key]
                                         (let [idx (.indexOf ^java.util.List targets target-key)
                                               sz (long (get target-sizes target-key (* max-seq-len hidden-dim)))]
-                                          (pjrt/buffer-to-host-buffer ctx (nth outs idx) sz :bf16)))
+                                          (uop-rt/buffer-to-host-buffer ctx (nth outs idx) sz :bf16)))
                               act-map {:len (long len)
                                        :x-norm1 (get-act (keyword (str "x_norm1_" L)))
                                        :ctx-flat (get-act (keyword (str "ctx_flat_" L)))
                                        :x-norm2 (get-act (keyword (str "x_norm2_" L)))
                                        :mlp-act (get-act (keyword (str "mlp_act_" L)))}]
                           (doseq [b outs]
-                            (pjrt/destroy-buffer! ctx b))
+                            (uop-rt/destroy-buffer! ctx b))
                           act-map))
                       calib-inputs)]
             (doseq [[_pname tname act-key rows cols buf-idx shape] projs]
@@ -218,14 +218,14 @@
                           :scales (:scales res)}
                     w-shorts (catq/floats->bf16-shorts deq)
                     old-dev-buf (nth @device-weights buf-idx)
-                    new-dev-buf (xla/buffer-from-host-buffer ctx (:client ctx) w-shorts shape 13)]
+                    new-dev-buf (core/buffer-from-host-buffer ctx w-shorts shape :bf16)]
                 (swap! quant-specs conj spec)
                 (swap! total-quantized-params + (* (long rows) (long cols)))
                 (swap! factors-map assoc-in [:projections tname]
                        {:rows rows :cols cols :zs (vec (:zs res)) :zr (vec (:zr res))})
                 (swap! device-weights assoc buf-idx new-dev-buf)
                 (when old-dev-buf
-                  (pjrt/destroy-buffer! ctx old-dev-buf))))
+                  (uop-rt/destroy-buffer! ctx old-dev-buf))))
 
             (when-not quiet?
               (let [t-layer-end (System/nanoTime)
@@ -253,7 +253,7 @@
       (println (format "\nSerializing CAT-Q factors (catq_factors.edn) and 2-bit Safetensors to [%s]..." out-dir)))
     (catq/save-catq-model! model-dir out-dir @factors-map @quant-specs)
     (doseq [w @device-weights]
-      (try (pjrt/destroy-buffer! ctx w) (catch Exception _ nil)))
+      (try (uop-rt/destroy-buffer! ctx w) (catch Exception _ nil)))
 
     (let [t1 (System/nanoTime)
           total-sec (/ (- t1 t0) 1e9)

@@ -3,11 +3,11 @@
    Enables direct semantic communication between Gemma 4 instances resident in GPU VRAM
    without host text serialization or prefix prefill recomputation.
    Follows:
-   - Rule 1: Strict TDD (Generative tests in test/clj_xla/logic/c2c_test.clj).
+   - Rule 1: Strict TDD (Generative tests in test/clj_einsum/logic/c2c_test.clj).
    - Rule 2: Pure Functions (Sans-IO core geometry, offsets, token extraction, and answer scoring).
-   - Rule 4: Pure XLA Execution via PJRT (StableHLO While Loop and Step executables)."
-  (:require [einsum.core :as xla]
-            [einsum.compiler.pjrt :as pjrt]
+   - Rule 4: Pure UOp Execution via UOp (Tensor Logic While Loop and Step executables)."
+  (:require [einsum.core :as ein]
+            [einsum.uop.runtime :as uop-rt]
             [einsum.runtime.tokenizer.protocol :as tok]
             [clojure.string :as str]
             [tools.gemma4-inference :as gemma4-inf]))
@@ -280,7 +280,7 @@
        "<|turn>model\n"))
 
 ;; ==============================================================================
-;; 4. Device VRAM Execution Primitives (PJRT StableHLO)
+;; 4. Device VRAM Execution Primitives (UOp Tensor Logic)
 ;; ==============================================================================
 
 (defn init-c2c-session
@@ -295,12 +295,12 @@
    (let [max-seq-len (long max-seq-len)
          session (gemma4-inf/init-inference-session (assoc opts :mode :agent :max-seq-len max-seq-len))
          _ (when-not (:quiet opts)
-             (println (format "Pre-compiling C2C StableHLO graphs (max-seq-len=%d)..." max-seq-len)))
+             (println (format "Pre-compiling C2C Tensor Logic graphs (max-seq-len=%d)..." max-seq-len)))
          prefill-exec (gemma4-inf/compile-gemma4-prefill-executable session max-seq-len)
          step-exec (gemma4-inf/compile-gemma4-kv-executable session max-seq-len)
          while-exec (gemma4-inf/compile-in-vram-loop-executable session max-seq-len)
          _ (when-not (:quiet opts)
-             (println "Pinning Gemma 4 weights in PJRT VRAM (Single Model Footprint)..."))
+             (println "Pinning Gemma 4 weights in UOp VRAM (Single Model Footprint)..."))
          device-weights (gemma4-inf/allocate-device-weights session)]
      (assoc session
             :device-weights device-weights
@@ -315,7 +315,7 @@
   [{:keys [ctx device-weights]}]
   (when (seq device-weights)
     (doseq [w device-weights]
-      (xla/destroy-buffer! ctx w))))
+      (ein/destroy-buffer! ctx w))))
 
 (defn execute-delta-prefill!
   "Executes delta-prefill for transition tokens using step-executable directly in device VRAM.
@@ -326,7 +326,7 @@
         num-layers (long (or (:num-layers config) 35))
         num-kv-shared (long (or (:num-kv-shared-layers config) 0))
         num-unshared (- num-layers num-kv-shared)
-        num-outs (inc (* 2 num-unshared))
+        _num-outs (inc (* 2 num-unshared))
         x-arr (int-array 1)
         pos-arr (int-array 1)]
     (loop [tokens (seq trans-tokens)
@@ -335,18 +335,18 @@
       (if-let [tok (first tokens)]
         (let [_ (aset x-arr 0 (int tok))
               _ (aset pos-arr 0 (int pos))
-              x-b (pjrt/buffer-from-host-buffer ctx (:client ctx) x-arr [1 1] 4)
-              pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) pos-arr [1] 4)
+              x-b (uop-rt/host->device ctx x-arr [1 1] :i32)
+              pos-b (uop-rt/host->device ctx pos-arr [1] :i32)
               step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-              outs (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs)
-              _ (xla/destroy-buffer! ctx x-b)
-              _ (xla/destroy-buffer! ctx pos-b)
+              outs (uop-rt/execute-uop-executable ctx (or (:handle exec) exec) step-inputs)
+              _ (ein/destroy-buffer! ctx x-b)
+              _ (ein/destroy-buffer! ctx pos-b)
               outs-vec (if (vector? outs) outs [outs])
               step-logits (first outs-vec)
               new-kv (vec (subvec outs-vec 1))]
-          (xla/destroy-buffer! ctx step-logits)
+          (ein/destroy-buffer! ctx step-logits)
           ;; Free previous step's KV buffers
-          (doseq [b cur-kv] (xla/destroy-buffer! ctx b))
+          (doseq [b cur-kv] (ein/destroy-buffer! ctx b))
           (recur (rest tokens) (inc pos) new-kv))
         cur-kv))))
 
@@ -356,31 +356,31 @@
   (let [num-layers (long (or (:num-layers config) 35))
         num-kv-shared (long (or (:num-kv-shared-layers config) 0))
         num-unshared (- num-layers num-kv-shared)
-        num-loop-outs (+ 2 (* 2 num-unshared))
+        _num-loop-outs (+ 2 (* 2 num-unshared))
         exec (or executable
                  (throw (ex-info "Missing executable for while-loop" {})))
-        b-step (pjrt/buffer-from-host-buffer ctx (:client ctx) (int-array [(int start-step)]) [] 4)
-        b-max (pjrt/buffer-from-host-buffer ctx (:client ctx) (int-array [(int target-max)]) [] 4)
-        b-toks (pjrt/buffer-from-host-buffer ctx (:client ctx) in-tokens-arr [1 (int seq-len)] 4)
+        b-step (uop-rt/host->device ctx (int-array [(int start-step)]) [] :i32)
+        b-max (uop-rt/host->device ctx (int-array [(int target-max)]) [] :i32)
+        b-toks (uop-rt/host->device ctx in-tokens-arr [1 (int seq-len)] :i32)
         loop-inputs (into [b-step b-max b-toks] (concat kv-buffers device-weights))
         t0 (System/nanoTime)
-        loop-outs (pjrt/execute-executable ctx (or (:handle exec) exec) loop-inputs num-loop-outs)
+        loop-outs (uop-rt/execute-uop-executable ctx (or (:handle exec) exec) loop-inputs)
         t1 (System/nanoTime)
         decode-ms (/ (- t1 t0) 1e6)
-        _ (xla/destroy-buffer! ctx b-step)
-        _ (xla/destroy-buffer! ctx b-max)
-        _ (xla/destroy-buffer! ctx b-toks)
+        _ (ein/destroy-buffer! ctx b-step)
+        _ (ein/destroy-buffer! ctx b-max)
+        _ (ein/destroy-buffer! ctx b-toks)
         ;; Input KV buffers are consumed; free them
-        _ (doseq [b kv-buffers] (xla/destroy-buffer! ctx b))
+        _ (doseq [b kv-buffers] (ein/destroy-buffer! ctx b))
         loop-outs-vec (if (vector? loop-outs) loop-outs [loop-outs])
         out-step (nth loop-outs-vec 0)
         out-toks (nth loop-outs-vec 1)
         final-kv (vec (subvec loop-outs-vec 2))
-        step-floats (pjrt/buffer-to-host-buffer ctx out-step 1 :f32)
+        step-floats (uop-rt/device->host-floats ctx out-step 1)
         step-val (int (Float/floatToIntBits (aget step-floats 0)))
-        toks-floats (pjrt/buffer-to-host-buffer ctx out-toks seq-len :f32)
-        _ (xla/destroy-buffer! ctx out-step)
-        _ (xla/destroy-buffer! ctx out-toks)
+        toks-floats (uop-rt/device->host-floats ctx out-toks seq-len)
+        _ (ein/destroy-buffer! ctx out-step)
+        _ (ein/destroy-buffer! ctx out-toks)
         actual-step (min (max (long start-step) (long step-val)) (long seq-len))
         final-ids (mapv #(Float/floatToIntBits %) (take actual-step (vec toks-floats)))]
     {:final-step actual-step
@@ -401,7 +401,7 @@
         num-layers (long (or (:num-layers config) 35))
         num-kv-shared (long (or (:num-kv-shared-layers config) 0))
         num-unshared (- num-layers num-kv-shared)
-        num-prefill-outs (inc (* 2 num-unshared))
+        _num-prefill-outs (inc (* 2 num-unshared))
         prompt-str (format-proposer-prompt problem-text)
         prompt-ids (let [raw (tok/encode tokenizer prompt-str)]
                      (if (= (first raw) (tok/bos-id tokenizer))
@@ -416,16 +416,16 @@
         ;; ----------------------------------------------------------------------
         t-turn0-start (System/nanoTime)
         pos-p (int-array [(dec p-count)])
-        in-b (pjrt/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
-        pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
+        in-b (uop-rt/host->device ctx in-arr [1 seq-len] :i32)
+        pos-b (uop-rt/host->device ctx pos-p [1] :i32)
         prefill-inputs (into [in-b pos-b] device-weights)
-        prefill-outs (pjrt/execute-executable ctx (or (:handle prefill-executable) prefill-executable) prefill-inputs num-prefill-outs)
-        _ (xla/destroy-buffer! ctx in-b)
-        _ (xla/destroy-buffer! ctx pos-b)
+        prefill-outs (uop-rt/execute-uop-executable ctx (or (:handle prefill-executable) prefill-executable) prefill-inputs)
+        _ (ein/destroy-buffer! ctx in-b)
+        _ (ein/destroy-buffer! ctx pos-b)
         prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
         prefill-logits (first prefill-outs-vec)
         turn0-kv (vec (subvec prefill-outs-vec 1))
-        _ (xla/destroy-buffer! ctx prefill-logits)
+        _ (ein/destroy-buffer! ctx prefill-logits)
 
         max-new-0 (long (or max-tokens-turn0 120))
         target-max-0 (long (min (- seq-len 100) (+ p-count max-new-0)))
@@ -464,7 +464,7 @@
         p-final (:final-step t1-res)
         final-tokens (:final-tokens t1-res)
         final-kv (:kv-buffers t1-res)
-        _ (doseq [b final-kv] (xla/destroy-buffer! ctx b))
+        _ (doseq [b final-kv] (ein/destroy-buffer! ctx b))
         t-turn1-end (System/nanoTime)
         turn1-ms (/ (- t-turn1-end t-turn1-start) 1e6)
 
@@ -523,7 +523,7 @@
         num-layers (long (or (:num-layers config) 35))
         num-kv-shared (long (or (:num-kv-shared-layers config) 0))
         num-unshared (- num-layers num-kv-shared)
-        num-prefill-outs (inc (* 2 num-unshared))
+        _num-prefill-outs (inc (* 2 num-unshared))
         prompt-str (format-proposer-prompt problem-text)
         prompt-ids (let [raw (tok/encode tokenizer prompt-str)]
                      (if (= (first raw) (tok/bos-id tokenizer))
@@ -538,16 +538,16 @@
         ;; ----------------------------------------------------------------------
         t-turn0-start (System/nanoTime)
         pos-p (int-array [(dec p-count)])
-        in-b (pjrt/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
-        pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
+        in-b (uop-rt/host->device ctx in-arr [1 seq-len] :i32)
+        pos-b (uop-rt/host->device ctx pos-p [1] :i32)
         prefill-inputs (into [in-b pos-b] device-weights)
-        prefill-outs (pjrt/execute-executable ctx (or (:handle prefill-executable) prefill-executable) prefill-inputs num-prefill-outs)
-        _ (xla/destroy-buffer! ctx in-b)
-        _ (xla/destroy-buffer! ctx pos-b)
+        prefill-outs (uop-rt/execute-uop-executable ctx (or (:handle prefill-executable) prefill-executable) prefill-inputs)
+        _ (ein/destroy-buffer! ctx in-b)
+        _ (ein/destroy-buffer! ctx pos-b)
         prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
         prefill-logits (first prefill-outs-vec)
         turn0-kv (vec (subvec prefill-outs-vec 1))
-        _ (xla/destroy-buffer! ctx prefill-logits)
+        _ (ein/destroy-buffer! ctx prefill-logits)
 
         max-new-0 (long (or max-tokens-turn0 120))
         target-max-0 (long (min (- seq-len 100) (+ p-count max-new-0)))
@@ -556,7 +556,7 @@
         tokens-at-p1 (:final-tokens t0-res)
         t0-kv (:kv-buffers t0-res)
         ;; Cell B1 discards Turn 0 KV cache!
-        _ (doseq [b t0-kv] (xla/destroy-buffer! ctx b))
+        _ (doseq [b t0-kv] (ein/destroy-buffer! ctx b))
         t-turn0-end (System/nanoTime)
         turn0-ms (/ (- t-turn0-end t-turn0-start) 1e6)
 
@@ -578,16 +578,16 @@
 
         ;; Re-prefill entire concatenated prompt [P + D + Trans] from scratch
         b1-pos-p (int-array [(dec b1-p-count)])
-        b1-in-b (pjrt/buffer-from-host-buffer ctx (:client ctx) b1-in-arr [1 seq-len] 4)
-        b1-pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) b1-pos-p [1] 4)
+        b1-in-b (uop-rt/host->device ctx b1-in-arr [1 seq-len] :i32)
+        b1-pos-b (uop-rt/host->device ctx b1-pos-p [1] :i32)
         b1-prefill-inputs (into [b1-in-b b1-pos-b] device-weights)
-        b1-prefill-outs (pjrt/execute-executable ctx (or (:handle prefill-executable) prefill-executable) b1-prefill-inputs num-prefill-outs)
-        _ (xla/destroy-buffer! ctx b1-in-b)
-        _ (xla/destroy-buffer! ctx b1-pos-b)
+        b1-prefill-outs (uop-rt/execute-uop-executable ctx (or (:handle prefill-executable) prefill-executable) b1-prefill-inputs)
+        _ (ein/destroy-buffer! ctx b1-in-b)
+        _ (ein/destroy-buffer! ctx b1-pos-b)
         b1-prefill-outs-vec (if (vector? b1-prefill-outs) b1-prefill-outs [b1-prefill-outs])
         b1-logits (first b1-prefill-outs-vec)
         b1-turn1-kv (vec (subvec b1-prefill-outs-vec 1))
-        _ (xla/destroy-buffer! ctx b1-logits)
+        _ (ein/destroy-buffer! ctx b1-logits)
         t-handover-end (System/nanoTime)
         handover-ms (/ (- t-handover-end t-handover-start) 1e6)
 
@@ -601,7 +601,7 @@
         b1-final-step (:final-step t1-res)
         b1-final-tokens (:final-tokens t1-res)
         b1-final-kv (:kv-buffers t1-res)
-        _ (doseq [b b1-final-kv] (xla/destroy-buffer! ctx b))
+        _ (doseq [b b1-final-kv] (ein/destroy-buffer! ctx b))
         t-turn1-end (System/nanoTime)
         turn1-ms (/ (- t-turn1-end t-turn1-start) 1e6)
 
@@ -654,7 +654,7 @@
         num-layers (long (or (:num-layers config) 35))
         num-kv-shared (long (or (:num-kv-shared-layers config) 0))
         num-unshared (- num-layers num-kv-shared)
-        num-prefill-outs (inc (* 2 num-unshared))
+        _num-prefill-outs (inc (* 2 num-unshared))
         prompt-str (format-baseline-b0-prompt problem-text)
         prompt-ids (let [raw (tok/encode tokenizer prompt-str)]
                      (if (= (first raw) (tok/bos-id tokenizer))
@@ -666,16 +666,16 @@
 
         t0 (System/nanoTime)
         pos-p (int-array [(dec p-count)])
-        in-b (pjrt/buffer-from-host-buffer ctx (:client ctx) in-arr [1 seq-len] 4)
-        pos-b (pjrt/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
+        in-b (uop-rt/host->device ctx in-arr [1 seq-len] :i32)
+        pos-b (uop-rt/host->device ctx pos-p [1] :i32)
         prefill-inputs (into [in-b pos-b] device-weights)
-        prefill-outs (pjrt/execute-executable ctx (or (:handle prefill-executable) prefill-executable) prefill-inputs num-prefill-outs)
-        _ (xla/destroy-buffer! ctx in-b)
-        _ (xla/destroy-buffer! ctx pos-b)
+        prefill-outs (uop-rt/execute-uop-executable ctx (or (:handle prefill-executable) prefill-executable) prefill-inputs)
+        _ (ein/destroy-buffer! ctx in-b)
+        _ (ein/destroy-buffer! ctx pos-b)
         prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
         prefill-logits (first prefill-outs-vec)
         prefill-kv (vec (subvec prefill-outs-vec 1))
-        _ (xla/destroy-buffer! ctx prefill-logits)
+        _ (ein/destroy-buffer! ctx prefill-logits)
 
         max-new (long (or max-tokens 520))
         target-max (long (min (- seq-len 1) (+ p-count max-new)))
@@ -683,7 +683,7 @@
         final-step (:final-step loop-res)
         final-tokens (:final-tokens loop-res)
         final-kv (:kv-buffers loop-res)
-        _ (doseq [b final-kv] (xla/destroy-buffer! ctx b))
+        _ (doseq [b final-kv] (ein/destroy-buffer! ctx b))
         t1 (System/nanoTime)
         total-ms (/ (- t1 t0) 1e6)
 

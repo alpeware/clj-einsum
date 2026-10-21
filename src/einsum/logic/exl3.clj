@@ -1,5 +1,5 @@
 (ns einsum.logic.exl3
-  "EXL3 Quantization (turboderp-org/exllamav3) Procedural Codebooks, Trellis Decoding, and OpenXLA PJRT Lowers.
+  "EXL3 Quantization (turboderp-org/exllamav3) Procedural Codebooks, Trellis Decoding, and UOp device runtime Lowers.
    Delegates to einsum.quant.exl3 for backwards compatibility."
   (:require [einsum.quant.exl3 :as e]))
 

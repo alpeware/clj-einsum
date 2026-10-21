@@ -1,6 +1,6 @@
 (ns einsum.logic.core-test
   "Generative property and unit tests for unified Tensor Logic core compilation API."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.core :as logic]
             [clojure.test :refer [deftest is]]))
 
@@ -15,10 +15,10 @@
                              0.0 1.0
                              1.0 0.0
                              0.0 1.0])
-        out-buf (xla/execute compiled x-data w-data)
-        res (xla/to-host-slice out-buf 0 4 4)]
+        out-buf (ein/execute compiled x-data w-data)
+        res (ein/to-host-slice out-buf 0 4 4)]
     (is (= 4.0 (nth res 0)))
     (is (= 6.0 (nth res 1)))
     (is (= 12.0 (nth res 2)))
     (is (= 14.0 (nth res 3)))
-    (xla/destroy-buffer! out-buf)))
+    (ein/destroy-buffer! out-buf)))

@@ -4,8 +4,8 @@
    - MIN_PLUS / Tropical (min, +): All-Pairs Shortest Paths (APSP / Bellman-Ford)
    - MAX_PRODUCT / Viterbi (max, *): Maximum probability paths & reliability networks
    - COUNTING (+, *): Path multiplicities and graph cycle counts
-   Compiled and executed natively through OpenXLA PJRT via StableHLO (Rule 4)."
-  (:require [einsum.core :as xla]
+   Compiled and executed natively through UOp device runtime via Tensor Logic (Rule 4)."
+  (:require [einsum.core :as ein]
             [einsum.logic.ast :as ast]
             [einsum.logic.symbolic :as sym]))
 
@@ -79,15 +79,15 @@
      node)))
 
 ;; ==============================================================================
-;; 3. OpenXLA PJRT Execution Drivers (Rule 4: Zero Java/Host Math Escape Hatches)
+;; 3. UOp device runtime Execution Drivers (Rule 4: Zero Java/Host Math Escape Hatches)
 ;; ==============================================================================
 
 (defn all-pairs-shortest-paths
-  "Computes all-pairs shortest paths on a directed weighted graph via OpenXLA PJRT
+  "Computes all-pairs shortest paths on a directed weighted graph via UOp device runtime
    using the Tropical MIN_PLUS semiring (min, +).
    `edges`: map of {[u v] weight} or sequence of [[u v] weight].
    `n`: integer number of vertices.
-   `opts`: {:max-iters int (default n), :ctx OpenXLA-context}.
+   `opts`: {:max-iters int (default n), :ctx UOp-context}.
    Returns {:distances float-array :converged? bool :iterations int}."
   ([edges n]
    (all-pairs-shortest-paths edges n {}))
@@ -95,7 +95,7 @@
    (let [n-long (long n)
          max-it (long (or max-iters n-long))
          total (* n-long n-long)
-         ctx-obj (or ctx (xla/get-context))
+         ctx-obj (or ctx (ein/get-context))
          ;; Initialize distance matrix D0
          inf 1.0e30
          d-arr (float-array total (float inf))]
@@ -110,7 +110,7 @@
                     (>= v-idx 0) (< v-idx n-long))
            (aset-float d-arr (int (+ (* u-idx n-long) v-idx)) (float w)))))
 
-     ;; Compile single OpenXLA PJRT execution graph for iterative tropical Bellman-Ford step:
+     ;; Compile single UOp device runtime execution graph for iterative tropical Bellman-Ford step:
      ;; D_step[i, j] = min_k (D[i, k] + W[k, j])
      ;; D_next[i, j] = min(D[i, j], D_step[i, j])
      (let [ast [:block {:name :tropical-apsp-step}
@@ -142,11 +142,11 @@
 
 (defn path-multiplicities
   "Computes exact path counts between all pairs of nodes of length `hops`
-   via OpenXLA PJRT using the COUNTING semiring (+, *).
+   via UOp device runtime using the COUNTING semiring (+, *).
    `edges`: set or sequence of [u v] edges.
    `n`: integer number of vertices.
    `hops`: integer number of edges in path (>= 1).
-   `opts`: {:ctx OpenXLA-context}.
+   `opts`: {:ctx UOp-context}.
    Returns {:counts float-array}."
   ([edges n hops]
    (path-multiplicities edges n hops {}))
@@ -154,7 +154,7 @@
    (let [n-long (long n)
          hops-long (long (max 1 hops))
          total (* n-long n-long)
-         ctx-obj (or ctx (xla/get-context))
+         ctx-obj (or ctx (ein/get-context))
          a-arr (float-array total (float 0.0))]
      ;; Encode adjacency matrix
      (doseq [tuple edges]
@@ -181,11 +181,11 @@
                (recur next-c (inc hop))))))))))
 
 (defn viterbi-most-probable-paths
-  "Computes maximum-probability paths on a transition network via OpenXLA PJRT
+  "Computes maximum-probability paths on a transition network via UOp device runtime
    using the MAX_PRODUCT semiring (max, *).
    `transitions`: map of {[u v] probability} with 0.0 <= prob <= 1.0.
    `n`: integer number of vertices.
-   `opts`: {:max-iters int (default n), :ctx OpenXLA-context}.
+   `opts`: {:max-iters int (default n), :ctx UOp-context}.
    Returns {:probabilities float-array :converged? bool :iterations int}."
   ([transitions n]
    (viterbi-most-probable-paths transitions n {}))
@@ -193,7 +193,7 @@
    (let [n-long (long n)
          max-it (long (or max-iters n-long))
          total (* n-long n-long)
-         ctx-obj (or ctx (xla/get-context))
+         ctx-obj (or ctx (ein/get-context))
          p-arr (float-array total (float 0.0))]
      ;; Diagonal self-transition is 1.0
      (dotimes [i n-long]

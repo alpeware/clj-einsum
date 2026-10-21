@@ -1,6 +1,6 @@
 (ns einsum.logic.quip-test
   "Generative property and unit tests for QuIP# (Hadamard Incoherence and Lattice Codebooks)."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.core :as logic]
             [einsum.logic.quip :as quip]
             [einsum.logic.shape :as shape]
@@ -154,20 +154,20 @@
 ;; --- End-to-End Compilation and Execution ---
 
 (deftest test-fwht-execution-e2e
-  (let [ctx (xla/get-context)
+  (let [ctx (ein/get-context)
         d 8
         invars [[:x [:tensor [1 d] :f32]]]
         ast [:fwht [:y :b :d] [:x :b :d]]
         compiled (logic/compile-ast ctx "fwht_e2e" invars ast #{:y})
         input (float-array [1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0])
-        out-buf (xla/execute compiled input)
-        res (vec (xla/to-host-slice out-buf 0 d 4))
+        out-buf (ein/execute compiled input)
+        res (vec (ein/to-host-slice out-buf 0 d 4))
         expected (quip/fwht-ref [1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0])]
     (is (vec-close? expected res 1e-4))
-    (xla/destroy-buffer! out-buf)))
+    (ein/destroy-buffer! out-buf)))
 
 (deftest test-rht-execution-e2e
-  (let [ctx (xla/get-context)
+  (let [ctx (ein/get-context)
         d 8
         invars [[:x [:tensor [1 d] :f32]]
                 [:s [:tensor [d] :f32]]]
@@ -175,16 +175,16 @@
         compiled (logic/compile-ast ctx "rht_e2e" invars ast #{:y})
         input (float-array [1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0])
         signs (float-array [1.0 -1.0 1.0 -1.0 1.0 1.0 -1.0 -1.0])
-        out-buf (xla/execute compiled input signs)
-        res (vec (xla/to-host-slice out-buf 0 d 4))
+        out-buf (ein/execute compiled input signs)
+        res (vec (ein/to-host-slice out-buf 0 d 4))
         expected (quip/rht-ref [1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0]
                                [1.0 -1.0 1.0 -1.0 1.0 1.0 -1.0 -1.0])]
     (is (vec-close? expected res 1e-4))
-    (xla/destroy-buffer! out-buf)))
+    (ein/destroy-buffer! out-buf)))
 
 (deftest test-quip-linear-e2e-gemm-parity
   (testing "Verify that a QuIP# linear layer with exact weights reproduces unquantized GEMM."
-    (let [ctx (xla/get-context)
+    (let [ctx (ein/get-context)
           batch 1
           k 16
           n 16
@@ -212,17 +212,17 @@
           x-arr (float-array x-vec)
           su-arr (float-array su)
           sv-arr (float-array sv)
-          out-buf (xla/execute compiled x-arr su-arr w-tilde-flat sv-arr)
-          actual-res (vec (xla/to-host-slice out-buf 0 n 4))
+          out-buf (ein/execute compiled x-arr su-arr w-tilde-flat sv-arr)
+          actual-res (vec (ein/to-host-slice out-buf 0 n 4))
           expected-res (mapv (fn [j]
                                (reduce + (map (fn [i] (* (nth x-vec i) (nth (nth w-mat i) j))) (range k))))
                              (range n))]
       (is (vec-close? expected-res actual-res 1e-3))
-      (xla/destroy-buffer! out-buf))))
+      (ein/destroy-buffer! out-buf))))
 
 (deftest test-quip-linear-ast-with-e8p-codebook-e2e
   (testing "Verify complete QuIP# linear layer forward pass with E8P codebook vector dequantization."
-    (let [ctx (xla/get-context)
+    (let [ctx (ein/get-context)
           batch 1
           k 16
           n 16
@@ -247,8 +247,8 @@
                   [:scales [:tensor [n] :f32]]
                   [:sv [:tensor [n] :f32]]]
           compiled (logic/compile-ast ctx "quip_linear_ast_e2e" invars ast #{:y})
-          out-buf (xla/execute compiled x-arr su-arr codes-arr cb-flat scales-arr sv-arr)
-          actual-res (vec (xla/to-host-slice out-buf 0 n 4))
+          out-buf (ein/execute compiled x-arr su-arr codes-arr cb-flat scales-arr sv-arr)
+          actual-res (vec (ein/to-host-slice out-buf 0 n 4))
           codes-partitioned (partition n8 (vec codes-arr))
           w-deq (mapv (fn [row-codes]
                         (let [row-unscaled (vec (mapcat #(nth cb-matrix %) row-codes))]
@@ -260,5 +260,5 @@
                       (range n))
           expected-res (quip/rht-inv-ref y-rot (vec sv-arr))]
       (is (vec-close? expected-res actual-res 1e-3))
-      (xla/destroy-buffer! out-buf))))
+      (ein/destroy-buffer! out-buf))))
 

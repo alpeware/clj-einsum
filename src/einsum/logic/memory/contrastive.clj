@@ -1,9 +1,9 @@
 (ns einsum.logic.memory.contrastive
   "Contrastive Subspace Pre-training on Knowledge Graphs for Pedro Domingos' Declarative Tensor Logic (Experiment E3).
    Aligns LLM embedding spaces with relational memory cores via InfoNCE contrastive loss on knowledge triples.
-   Lowered into StableHLO MLIR and executed on OpenXLA PJRT (Rule 4: Zero Java bypasses).
+   Lowered into Tensor Logic MLIR and executed on UOp device runtime (Rule 4: Zero Java bypasses).
    Adjoint gradient equations derived algebraically via einsum.logic.autodiff."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.symbolic :as sym]))
 
 ;; ==============================================================================
@@ -61,7 +61,7 @@
 
 (defn in-vram-contrastive-step-ast
   "Constructs Tensor Logic AST for an end-to-end, zero-host-transfer InfoNCE training step.
-   Performs 100% in OpenXLA PJRT VRAM:
+   Performs 100% in UOp device runtime VRAM:
    1. Gathers entity embeddings from W_embed:
       V_h = gather(W_embed, I_h), V_t = gather(W_embed, I_t)
    2. Subspace projections:
@@ -110,7 +110,7 @@
 (defn in-vram-resolver-step-ast
   "Constructs Tensor Logic AST for an end-to-end, zero-host-transfer training step for
    the Stage 2 Non-Linear Resolver (W_Q and W_K).
-   Performs 100% in OpenXLA PJRT VRAM:
+   Performs 100% in UOp device runtime VRAM:
    1. Gathers entity embeddings (or contextual hidden states if :query-source is :cache):
       V_h = gather(W_embed, I_h) [or gather(H_cache, I_cache)], V_t = gather(W_embed, I_t)
    2. Relational type modulation from Stage 1:
@@ -225,17 +225,17 @@
     grad))
 
 ;; ==============================================================================
-;; 3. OpenXLA PJRT Compilation Boundary
+;; 3. UOp device runtime Compilation Boundary
 ;; ==============================================================================
 
 (defn compile-contrastive-forward
-  "Compiles OpenXLA PJRT executable for forward contrastive projection."
+  "Compiles UOp device runtime executable for forward contrastive projection."
   ([batch-size dim-in dim-mem]
-   (compile-contrastive-forward (xla/get-context) batch-size dim-in dim-mem nil))
+   (compile-contrastive-forward (ein/get-context) batch-size dim-in dim-mem nil))
   ([a b c d]
    (if (map? a)
      (compile-contrastive-forward a b c d nil)
-     (compile-contrastive-forward (xla/get-context) a b c d)))
+     (compile-contrastive-forward (ein/get-context) a b c d)))
   ([ctx batch-size dim-in dim-mem opts]
    (let [b (long batch-size)
          din (long dim-in)
@@ -248,9 +248,9 @@
      (sym/compile-query ctx "contrastive_forward" invars ast [:Scores :U_hr :U_t :U_h]))))
 
 (defn compile-contrastive-backward
-  "Compiles OpenXLA PJRT executable for backward adjoint gradient calculation."
+  "Compiles UOp device runtime executable for backward adjoint gradient calculation."
   ([batch-size dim-in dim-mem]
-   (compile-contrastive-backward (xla/get-context) batch-size dim-in dim-mem))
+   (compile-contrastive-backward (ein/get-context) batch-size dim-in dim-mem))
   ([ctx batch-size dim-in dim-mem]
    (let [b (long batch-size)
          din (long dim-in)
@@ -266,13 +266,13 @@
      (sym/compile-query ctx "contrastive_backward" invars ast [:dW :dR]))))
 
 (defn compile-contrastive-update
-  "Compiles OpenXLA PJRT executable for SGD parameter updates."
+  "Compiles UOp device runtime executable for SGD parameter updates."
   ([dim-in dim-mem]
-   (compile-contrastive-update (xla/get-context) dim-in dim-mem nil))
+   (compile-contrastive-update (ein/get-context) dim-in dim-mem nil))
   ([a b c]
    (if (map? a)
      (compile-contrastive-update a b c nil)
-     (compile-contrastive-update (xla/get-context) a b c)))
+     (compile-contrastive-update (ein/get-context) a b c)))
   ([ctx dim-in dim-mem opts]
    (let [din (long dim-in)
          dm (long dim-mem)
@@ -284,15 +284,15 @@
      (sym/compile-query ctx "contrastive_update" invars ast [:W_new :R_new]))))
 
 (defn compile-in-vram-contrastive-step
-  "Compiles OpenXLA PJRT executable for unified, 100% in-VRAM InfoNCE step:
+  "Compiles UOp device runtime executable for unified, 100% in-VRAM InfoNCE step:
    Gathers embeddings, computes projections, in-graph softmax, analytical adjoint matrix,
    backward contractions, and SGD updates directly in GPU memory."
   ([vocab-size dim-in k-triples dim-mem]
-   (compile-in-vram-contrastive-step (xla/get-context) vocab-size dim-in k-triples dim-mem nil))
+   (compile-in-vram-contrastive-step (ein/get-context) vocab-size dim-in k-triples dim-mem nil))
   ([a b c d e]
    (if (map? a)
      (compile-in-vram-contrastive-step a b c d e nil)
-     (compile-in-vram-contrastive-step (xla/get-context) a b c d e)))
+     (compile-in-vram-contrastive-step (ein/get-context) a b c d e)))
   ([ctx vocab-size dim-in k-triples dim-mem opts]
    (let [v (long vocab-size)
          din (long dim-in)
@@ -311,7 +311,7 @@
      (sym/compile-query ctx "in_vram_contrastive_step" invars ast targets))))
 
 (defn compile-in-vram-resolver-step
-  "Compiles OpenXLA PJRT executable for Stage 2 Non-Linear Resolver training step."
+  "Compiles UOp device runtime executable for Stage 2 Non-Linear Resolver training step."
   ([ctx vocab-size dim-in k-triples dim-mem opts]
    (let [v (long vocab-size)
          din (long dim-in)
@@ -345,26 +345,26 @@
      (sym/compile-query ctx "in_vram_resolver_step" invars ast targets))))
 
 ;; ==============================================================================
-;; 4. Impure Execution Wrappers (PJRT Dispatch)
+;; 4. Impure Execution Wrappers (UOp Dispatch)
 ;; ==============================================================================
 
 (defn run-contrastive-forward!
-  "Executes forward contrastive pass on PJRT device runtime."
+  "Executes forward contrastive pass on UOp device runtime."
   [exec vh vt w r]
   (sym/run-query! exec {:V_h vh :V_t vt :W w :R r}))
 
 (defn run-contrastive-backward!
-  "Executes backward adjoint pass on PJRT device runtime."
+  "Executes backward adjoint pass on UOp device runtime."
   [exec grad-s u-hr u-t u-h vh vt r]
   (sym/run-query! exec {:G_S grad-s :U_hr u-hr :U_t u-t :U_h u-h :V_h vh :V_t vt :R r}))
 
 (defn run-contrastive-update!
-  "Executes SGD parameter update on PJRT device runtime."
+  "Executes SGD parameter update on UOp device runtime."
   [exec w dw r dr]
   (sym/run-query! exec {:W w :dW dw :R r :dR dr}))
 
 (defn run-in-vram-contrastive-step!
-  "Executes unified in-VRAM InfoNCE step on PJRT runtime."
+  "Executes unified in-VRAM InfoNCE step on UOp runtime."
   [exec w-embed ih it w r target mask-scale]
   (sym/run-query! exec {:W_embed w-embed
                         :I_h ih

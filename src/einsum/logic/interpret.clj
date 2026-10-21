@@ -1,21 +1,19 @@
 (ns einsum.logic.interpret
-  "Pure-JVM execution backend for lowered StableHLO graphs.
+  "Pure-JVM execution backend for lowered Tensor Logic graphs.
 
-  Consumes the EDN SSA IR produced by `einsum.logic.lower/ast->graph`
-  (the same IR that `graph->mlir-text` serializes for XLA) and executes it
-  directly on the JVM with plain primitive arrays -- no PJRT, no XLA, no
-  native libraries.
+  Consumes the EDN SSA IR produced by `einsum.uop.lower/ast->uop-graph`
+  and executes it directly on the JVM with plain primitive arrays -- no native libraries.
 
-  Rationale: on memory-constrained machines the PJRT CPU backend must
-  duplicate the whole model (mmap page cache + 4+ GB of anonymous PJRT
+  Rationale: on memory-constrained machines the UOp CPU backend must
+  duplicate the whole model (mmap page cache + 4+ GB of anonymous UOp
   buffers + JVM heap), which OOMs. The interpreter reads weights straight
   from the mmap'd safetensors segments (zero copy, kernel-reclaimable page
   cache) and only materializes activations.
 
   NOTE (repo-rule tension): `AGENTS.md` Rule 4 forbids host-side matrix
-  engines that *bypass* XLA compilation. This backend does not bypass
+  engines that *bypass* UOp compilation. This backend does not bypass
   compilation -- model math stays declarative Tensor Logic lowered to
-  StableHLO; only the *execution* of that IR changes. It is the same
+  Tensor Logic; only the *execution* of that IR changes. It is the same
   relationship the reference interpreter already has to the compiler.
   This work lives on the `jvm-stableshlo-backend` branch until the rule is
   amended to distinguish execution backends from compilation bypasses.
@@ -360,7 +358,7 @@
     {:dtype (:dtype t) :shape out-shape :data (pack-floats (:dtype t) out)}))
 
 (defn op-broadcast-in-dim
-  "StableHLO broadcast_in_dim."
+  "Tensor Logic broadcast_in_dim."
   [t broadcast-dimensions target-shape]
   (let [bcast-dims (vec broadcast-dimensions)
         target-shape (vec target-shape)
@@ -635,7 +633,7 @@
     (assoc s :data (pack-floats (:dtype s) out))))
 
 ;; ---------------------------------------------------------------------------
-;; Gather (StableHLO semantics, batching dimensions)
+;; Gather (Tensor Logic semantics, batching dimensions)
 ;; ---------------------------------------------------------------------------
 
 (defn- get-at-coords
@@ -657,7 +655,7 @@
         (throw (ex-info "Cannot read dtype" {:dtype dtype}))))))
 
 (defn op-gather
-  "StableHLO gather. `attrs` keys: :offset_dims :collapsed_slice_dims
+  "Tensor Logic gather. `attrs` keys: :offset_dims :collapsed_slice_dims
    :start_index_map :index_vector_dim :slice_sizes."
   [operand indices attrs]
   (let [o-shape (vec (:shape operand))
@@ -857,7 +855,7 @@
   (op-transpose t perm))
 
 (defn op-dot-general
-  "StableHLO dot_general with batch and contracting dims."
+  "Tensor Logic dot_general with batch and contracting dims."
   [lhs rhs {:keys [contracting_dims batch_dims]}]
   (let [l-shape (vec (:shape lhs)) r-shape (vec (:shape rhs))
         l-rank (count l-shape) r-rank (count r-shape)
@@ -1070,7 +1068,7 @@
   "Executes one eqn. Returns a map of outvar -> tensor."
   [eqn in-tensors known-shapes env]
   (let [op (let [k (:op eqn)]
-             (if (and (keyword? k) (= "stablehlo" (namespace k)))
+             (if (and (keyword? k) (= "Tensor Logic" (namespace k)))
                (keyword "ir" (name k))
                k))
         attrs (:attrs eqn)

@@ -1,7 +1,7 @@
 (ns einsum.quant.turboquant
   "Fast-TurboQuant: Multiplier-Free Online Vector Quantization with Lloyd-Max and QJL Residual Correction.
    Implements 3-tier KV compression (arXiv:2606.21448 & arXiv:2504.19874) in pure Clojure with
-   OpenXLA StableHLO tensor AST lowerings."
+   UOp Tensor Logic tensor AST lowerings."
   (:import [java.util Random]))
 
 ;; ==============================================================================

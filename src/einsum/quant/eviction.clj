@@ -239,7 +239,7 @@
   "Slices a sequence, vector, or map of KV buffer tensors along dimension 1 (sequence length),
    retaining only the specified indices.
    Host-side buffers (nested persistent vectors / sequences) are sliced into new contiguous structures.
-   Note: In-place accelerator device buffer compaction via PJRT DynamicUpdateSlice is staged as future work."
+   Note: In-place accelerator device buffer compaction via UOp DynamicUpdateSlice is staged as future work."
   [retained-indices kv-buffers]
   (let [retained (vec (sort retained-indices))
         n-retained (count retained)

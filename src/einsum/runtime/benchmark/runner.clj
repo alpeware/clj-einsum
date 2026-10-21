@@ -1,15 +1,15 @@
 (ns einsum.runtime.benchmark.runner
-  "Execution engine for measuring JIT compilation throughput, execution latency, FLOPS, and memory bandwidth across PJRT backends."
+  "Execution engine for measuring JIT compilation throughput, execution latency, FLOPS, and memory bandwidth across backends."
   (:require [einsum.runtime.benchmark.core :as bcore]
             [einsum.runtime.benchmark.workloads :as bw]
-            [einsum.core :as xla]
-            [einsum.compiler.pjrt :as pjrt]))
+            [einsum.core :as ein]
+            [einsum.uop.runtime :as uop-rt]))
 
 (defn benchmark-workload
   "Measures cold compilation, warm compilation, latency percentiles, FLOPS, and bandwidth for `workload` on `ctx`."
   ([ctx workload] (benchmark-workload ctx workload {}))
   ([ctx workload opts]
-   (binding [xla/*default-context* ctx]
+   (binding [ein/*default-context* ctx]
      (let [{:keys [id name category flops bytes build-graph-fn make-inputs-fn]} workload
            warmup-iters (get opts :warmup-iters 5)
            measure-iters (get opts :measure-iters 25)
@@ -18,13 +18,13 @@
            ;; 1. Measure Cold JIT compilation
            t0 (System/nanoTime)
            graph (build-graph-fn)
-           exec1 (xla/compile-graph ctx graph)
+           exec1 (ein/compile-graph ctx graph)
            t1 (System/nanoTime)
            cold-ms (/ (- t1 t0) 1000000.0)
 
            ;; 2. Measure Warm cached compilation
            t2 (System/nanoTime)
-           _exec2 (xla/compile-graph ctx graph)
+           _exec2 (ein/compile-graph ctx graph)
            t3 (System/nanoTime)
            warm-us (/ (- t3 t2) 1000.0)
 
@@ -36,32 +36,31 @@
                           (range (count invars))
                           invars)
            device-args (mapv (fn [idx input-data]
-                               (let [[_var-name [_kw shape dtype]] (nth invars idx)
-                                     dtype-enum (case dtype :i8 2 :i32 4 :f32 11 :bf16 13 :f16 10 11)]
-                                 (pjrt/buffer-from-host-buffer ctx (:client ctx) input-data shape dtype-enum)))
+                               (let [[_var-name [_kw shape dtype]] (nth invars idx)]
+                                 (uop-rt/host->device ctx input-data shape dtype)))
                              (range (count invars))
                              raw-args)
 
            ;; 4. Warmup passes
            _ (dotimes [_ warmup-iters]
-               (let [out (xla/execute exec1 device-args)]
+               (let [out (ein/execute exec1 device-args)]
                  (if (vector? out)
-                   (doseq [b out] (pjrt/destroy-buffer! ctx b))
-                   (pjrt/destroy-buffer! ctx out))))
+                   (doseq [b out] (uop-rt/destroy-buffer! ctx b))
+                   (uop-rt/destroy-buffer! ctx out))))
 
            ;; 5. Measured passes
            latencies (mapv (fn [_]
                              (let [start (System/nanoTime)
-                                   out (xla/execute exec1 device-args)
+                                   out (ein/execute exec1 device-args)
                                    end (System/nanoTime)
                                    lat (/ (- end start) 1000000.0)]
                                (if (vector? out)
-                                 (doseq [b out] (pjrt/destroy-buffer! ctx b))
-                                 (pjrt/destroy-buffer! ctx out))
+                                 (doseq [b out] (uop-rt/destroy-buffer! ctx b))
+                                 (uop-rt/destroy-buffer! ctx out))
                                lat))
                            (range measure-iters))
 
-           _ (doseq [b device-args] (pjrt/destroy-buffer! ctx b))
+           _ (doseq [b device-args] (uop-rt/destroy-buffer! ctx b))
 
            stats (bcore/calculate-latency-stats latencies)
            mean-lat (:mean stats)
@@ -91,7 +90,7 @@
   "Initializes `target-backend` and benchmarks all registered workloads (or a subset specified via :workload-ids in opts)."
   ([target-backend] (run-backend-benchmarks target-backend {}))
   ([target-backend opts]
-   (let [ctx (xla/init-backend! target-backend)
+   (let [ctx (ein/init-backend! target-backend)
          wls (if-let [ids (:workload-ids opts)]
                (select-keys bw/WORKLOADS ids)
                bw/WORKLOADS)]

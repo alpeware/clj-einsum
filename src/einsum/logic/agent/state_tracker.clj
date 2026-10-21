@@ -1,9 +1,9 @@
 (ns einsum.logic.agent.state-tracker
   "Experiment E4: In-VRAM Datalog Fixpoint State Tracker for Long-Horizon Autonomous Agents.
    Maintains codebase dependency relations, test coverage maps, and invalidation closures
-   entirely in OpenXLA PJRT device memory (VRAM). Eliminates context explosion across 100+ turns
+   entirely in UOp device runtime device memory (VRAM). Eliminates context explosion across 100+ turns
    by tracking state in O(1) constant context with compiled Datalog tensor fixpoints.
-   Rule 2: Pure functions and compiled PJRT execution."
+   Rule 2: Pure functions and compiled UOp execution."
   (:require [einsum.logic.symbolic :as sym]))
 
 ;; ==============================================================================
@@ -52,12 +52,12 @@
    [:= [:Affected_Tests :t] {:clamp [0.0 1.0]} [:Aff_tests_raw :t]]])
 
 ;; ==============================================================================
-;; 3. In-VRAM Session & OpenXLA Compilation
+;; 3. In-VRAM Session & UOp Compilation
 ;; ==============================================================================
 
 (defn init-state-tracker
-  "Compiles OpenXLA PJRT executable and allocates initial state buffers:
-   ctx: PJRT context
+  "Compiles UOp device runtime executable and allocates initial state buffers:
+   ctx: UOp context
    n: entity universe size (total files + tests)
    opts: {:deps #{[x y] ...} :tests #{[t x] ...}}"
   [ctx n opts]

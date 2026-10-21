@@ -26,4 +26,4 @@
                        (string? (:name graph))
                        (vector? (:invars graph))
                        (vector? (:outvars graph))
-                       (seq (:eqns graph))))))
+                       (or (seq (:uops graph)) (seq (:outputs graph)) (seq (:eqns graph)))))))

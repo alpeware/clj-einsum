@@ -1,6 +1,6 @@
 (ns tools.smollm-inference
-  "End-to-End SmolLM-135M Autoregressive Generation Loop using clj-xla PJRT backend."
-  (:require [einsum.core :as xla]
+  "End-to-End SmolLM-135M Autoregressive Generation Loop using clj-einsum UOp backend."
+  (:require [einsum.core :as ein]
             [einsum.models.smollm :as smollm-logic]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.sampling :as sampling]
@@ -35,7 +35,7 @@
   "Runs full end-to-end text generation on an initialized or discovered SmolLM model."
   ([opts]
    (let [{:keys [prompt max-new-tokens temperature top-k backend precision model-dir]} (merge DEFAULT_CLI_OPTS opts)
-         ctx (xla/init-backend! (or backend :cpu))
+         ctx (ein/init-backend! (or backend :cpu))
          resolved-dir (cli/find-model-dir model-dir :smollm)
          tokenizer (tok/from-file resolved-dir)
          prompt-ids (proto/encode tokenizer prompt)
@@ -65,25 +65,25 @@
        (println (format "Encoded Token IDs (%d tokens): %s" prompt-len prompt-ids))
 
        (println "Lowering & JIT Compiling full SmolLM via Tensor Logic Hiccup AST & WeightStore...")
-       (with-open [session-arena (xla/create-arena ctx)]
-         (let [store (xla/create-weight-store ctx weights {:aliases (smollm-logic/smollm-alias-resolver weights)
+       (with-open [session-arena (ein/create-arena ctx)]
+         (let [store (ein/create-weight-store ctx weights {:aliases (smollm-logic/smollm-alias-resolver weights)
                                                            :arena session-arena})
                ast (smollm-logic/smollm-model-ast config)
-               kernel (xla/compile-kernel ctx "full_smollm_model" ast
+               kernel (ein/compile-kernel ctx "full_smollm_model" ast
                                           {:in {:x [:tensor [1 max-seq-len] :i32]}
                                            :weights store
                                            :out [:logits]})
                cur-tokens (atom (vec prompt-ids))]
-           (println "Successfully compiled model to native XLA PjRtLoadedExecutable handle.")
+           (println "Successfully compiled model to native UOp UOpLoadedExecutable handle.")
            (println "\nGenerating tokens autoregressively...")
            (print prompt)
            (flush)
            (dotimes [_ max-new-tokens]
-             (xla/with-device-arena [_step-arena session-arena]
+             (ein/with-device-arena [_step-arena session-arena]
                (let [seq-len (count @cur-tokens)
                      input-tensor (prepare-input-tensor @cur-tokens max-seq-len)
                      {:keys [logits]} (kernel {:x input-tensor})
-                     slice (xla/to-host-slice logits (dec seq-len) vocab-size (* max-seq-len vocab-size) weight-dtype)
+                     slice (ein/to-host-slice logits (dec seq-len) vocab-size (* max-seq-len vocab-size) weight-dtype)
                      next-id (sampling/sample-logits slice {:temperature temperature :top-k top-k})]
                  (swap! cur-tokens conj next-id)
                  (print (proto/decode tokenizer [next-id]))
@@ -100,12 +100,12 @@
    (generate-text (assoc (:opts session) :prompt prompt-text :model-dir (:model-dir session)))))
 
 (defn init-inference-session
-  "Initializes PJRT runtime and loads safetensors metadata and tokenizer.
+  "Initializes UOp runtime and loads safetensors metadata and tokenizer.
    Returns a session map for REPL workflows."
   ([] (init-inference-session {}))
   ([opts]
    (let [opts (merge DEFAULT_CLI_OPTS opts)
-         ctx (xla/init-backend! (or (:backend opts) :cpu))
+         ctx (ein/init-backend! (or (:backend opts) :cpu))
          resolved-dir (cli/find-model-dir (:model-dir opts) :smollm)
          tokenizer (tok/from-file resolved-dir)]
      {:ctx ctx
@@ -118,7 +118,7 @@
   [& args]
   (let [opts (parse-cli-args args)]
     (println "==================================================================")
-    (println "      clj-xla SmolLM-135M End-to-End Autoregressive Generation    ")
+    (println "      clj-einsum SmolLM-135M End-to-End Autoregressive Generation    ")
     (println "==================================================================")
     (generate-text opts)))
 

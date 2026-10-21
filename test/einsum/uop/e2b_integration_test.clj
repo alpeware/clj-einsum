@@ -9,7 +9,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [einsum.core :as xla]
+            [einsum.core :as ein]
             [einsum.models.gemma4.kernels :as kernels]
             [einsum.models.gemma4.runtime :as rt]))
 
@@ -87,7 +87,7 @@
   (testing "Gemma 4 E2B single-token KV-step compiles and executes via UOp backend"
     (let [max-seq 8
           cfg (make-compact-e2b-config max-seq)
-          ctx (xla/init-backend! :uop-cpu {:quiet? true})
+          ctx (ein/init-backend! :uop-cpu {:quiet? true})
           session {:ctx ctx :config cfg :opts {:quiet true}}
           exec (kernels/compile-gemma4-kv-executable session max-seq)
           _ (is (some? exec))
@@ -101,11 +101,11 @@
       (is (= 3 (count outs)))
       (let [[logits-buf k-out-buf v-out-buf] outs
             vocab-sz (:vocab-size cfg)
-            logits-data (xla/to-host-slice logits-buf 0 vocab-sz vocab-sz)
+            logits-data (ein/to-host-slice logits-buf 0 vocab-sz vocab-sz)
             layer-seq-len (min max-seq (or (:sliding-window cfg) max-seq))
             head-dim (:head-dim cfg)
-            k-out-data (xla/to-host-slice k-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))
-            v-out-data (xla/to-host-slice v-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))]
+            k-out-data (ein/to-host-slice k-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))
+            v-out-data (ein/to-host-slice v-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))]
         ;; Logits should be populated with non-zero finite floats
         (is (= vocab-sz (alength ^floats logits-data)))
         (is (some #(not (zero? %)) (seq logits-data)))
@@ -120,7 +120,7 @@
   (testing "Gemma 4 E2B single-token KV-step with :weight-dtype :bf16 compiles and executes via UOp backend"
     (let [max-seq 8
           cfg (assoc (make-compact-e2b-config max-seq) :weight-dtype :bf16)
-          ctx (xla/init-backend! :uop-cpu {:quiet? true})
+          ctx (ein/init-backend! :uop-cpu {:quiet? true})
           session {:ctx ctx :config cfg :opts {:quiet true}}
           exec (kernels/compile-gemma4-kv-executable session max-seq)
           _ (is (some? exec))
@@ -134,7 +134,7 @@
       (is (= 3 (count outs)))
       (let [[logits-buf _ _] outs
             vocab-sz (:vocab-size cfg)
-            logits-data (xla/to-host-slice logits-buf 0 vocab-sz vocab-sz)]
+            logits-data (ein/to-host-slice logits-buf 0 vocab-sz vocab-sz)]
         (is (= vocab-sz (alength ^floats logits-data)))
         (is (some #(not (zero? %)) (seq logits-data)))))))
 
@@ -147,7 +147,7 @@
     (let [max-seq 8
           prompt-len 4
           cfg (make-compact-e2b-config max-seq)
-          ctx (xla/init-backend! :uop-cpu {:quiet? true})
+          ctx (ein/init-backend! :uop-cpu {:quiet? true})
           session {:ctx ctx :config cfg :opts {:quiet true}}
           prefill-exec (kernels/compile-gemma4-prefill-executable session max-seq)
           _ (is (some? prefill-exec))
@@ -161,11 +161,11 @@
       (is (= 3 (count outs)))
       (let [[logits-buf k-out-buf v-out-buf] outs
             vocab-sz (:vocab-size cfg)
-            logits-data (xla/to-host-slice logits-buf 0 vocab-sz vocab-sz)
+            logits-data (ein/to-host-slice logits-buf 0 vocab-sz vocab-sz)
             ;; Note: layer-seq-len for ring buffer = min(max-seq, sliding-window) = 4
             layer-seq-len 4
-            k-out-data (xla/to-host-slice k-out-buf 0 (* layer-seq-len 32) (* layer-seq-len 32))
-            v-out-data (xla/to-host-slice v-out-buf 0 (* layer-seq-len 32) (* layer-seq-len 32))]
+            k-out-data (ein/to-host-slice k-out-buf 0 (* layer-seq-len 32) (* layer-seq-len 32))
+            v-out-data (ein/to-host-slice v-out-buf 0 (* layer-seq-len 32) (* layer-seq-len 32))]
         ;; Logits should be populated with 128 elements
         (is (= vocab-sz (alength ^floats logits-data)))
         (is (some #(not (zero? %)) (seq logits-data)))
@@ -180,7 +180,7 @@
     (let [max-seq 8
           prompt-len 4
           cfg (make-compact-e2b-config max-seq)
-          ctx (xla/init-backend! :uop-cpu {:quiet? true})
+          ctx (ein/init-backend! :uop-cpu {:quiet? true})
           session {:ctx ctx :config cfg :opts {:quiet true}}
           chunk-exec (kernels/compile-gemma4-chunked-prefill-executable session max-seq prompt-len)
           _ (is (some? chunk-exec))
@@ -194,11 +194,11 @@
       (is (= 3 (count outs)))
       (let [[logits-buf k-out-buf v-out-buf] outs
             vocab-sz (:vocab-size cfg)
-            logits-data (xla/to-host-slice logits-buf 0 vocab-sz vocab-sz)
+            logits-data (ein/to-host-slice logits-buf 0 vocab-sz vocab-sz)
             layer-seq-len 4
             head-dim 32
-            k-out-data (xla/to-host-slice k-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))
-            v-out-data (xla/to-host-slice v-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))]
+            k-out-data (ein/to-host-slice k-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))
+            v-out-data (ein/to-host-slice v-out-buf 0 (* layer-seq-len head-dim) (* layer-seq-len head-dim))]
         (is (= vocab-sz (alength ^floats logits-data)))
         (is (some #(not (zero? %)) (seq logits-data)))
         ;; Rows 0, 1, 2, 3 must have populated KV activations
@@ -215,7 +215,7 @@
   (testing "Single-token KV step produces deterministic argmax prediction on UOp"
     (let [max-seq 8
           cfg (make-compact-e2b-config max-seq)
-          ctx (xla/init-backend! :uop-cpu {:quiet? true})
+          ctx (ein/init-backend! :uop-cpu {:quiet? true})
           session {:ctx ctx :config cfg :opts {:quiet true}}
           exec (kernels/compile-gemma4-kv-executable session max-seq)
           invars (kernels/build-gemma4-kv-invars cfg max-seq)
@@ -224,8 +224,8 @@
           outs1 (exec-step ctx exec step-inputs 3)
           outs2 (exec-step ctx exec step-inputs 3)
           vocab-sz (:vocab-size cfg)
-          logits1 (xla/to-host-slice (first outs1) 0 vocab-sz vocab-sz)
-          logits2 (xla/to-host-slice (first outs2) 0 vocab-sz vocab-sz)
+          logits1 (ein/to-host-slice (first outs1) 0 vocab-sz vocab-sz)
+          logits2 (ein/to-host-slice (first outs2) 0 vocab-sz vocab-sz)
           argmax1 (rt/argmax-host logits1)
           argmax2 (rt/argmax-host logits2)]
       ;; The argmax token should be deterministic across runs

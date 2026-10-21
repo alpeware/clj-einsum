@@ -52,7 +52,7 @@
         (is (= {:ancestors 2 :descendants 0} stats-2))))))
 
 (deftest test-datalog-transitive-closure-synthetic-chain
-  (testing "datalog-transitive-closure computes complete transitive closure via OpenXLA PJRT"
+  (testing "datalog-transitive-closure computes complete transitive closure via UOp device runtime"
     (let [parent-facts #{[0 1] [1 2] [2 3] [3 4]}
           n 5
           res (sym/datalog-transitive-closure {:facts parent-facts :n n :max-iters 10})]
@@ -66,7 +66,7 @@
       (is (contains? (:facts res) [0 4])))))
 
 (deftest test-datalog-transitive-closure-scaling-large-graph
-  (testing "datalog-transitive-closure scales efficiently to large graph (N=500 nodes) in OpenXLA PJRT"
+  (testing "datalog-transitive-closure scales efficiently to large graph (N=500 nodes) in UOp device runtime"
     (let [n 500
           ;; 500-node forest: 5 trees of 100 nodes each
           edges (set (for [tree (range 5)
@@ -112,7 +112,7 @@
 ;; ==============================================================================
 
 (deftest test-matrix-composition-ast-and-execution
-  (testing "compose-matrices-ast produces valid contraction and chains via OpenXLA PJRT"
+  (testing "compose-matrices-ast produces valid contraction and chains via UOp device runtime"
     (let [d 16
           ast [:block {:name :comp-test}
                (sym/compose-matrices-ast :M12 :M1 :M2 [:i :j] :k)]]
@@ -133,7 +133,7 @@
         (is (= 1.0 (double (aget m12-data (dec (* d d))))))))))
 
 (deftest test-zero-shot-compositional-inference
-  (testing "Composed relation matrices answer zero-shot multi-hop query in OpenXLA PJRT"
+  (testing "Composed relation matrices answer zero-shot multi-hop query in UOp device runtime"
     (let [d 32
           n 4 ;; 0: Tokyo, 1: Japan, 2: Asia, 3: France
           ;; E has orthogonal unit vectors for entities
@@ -165,7 +165,7 @@
                       m1 (rand-mat)
                       m2 (rand-mat)
                       m3 (rand-mat)
-          ;; (M1 * M2) * M3 vs M1 * (M2 * M3) via OpenXLA PJRT
+          ;; (M1 * M2) * M3 vs M1 * (M2 * M3) via UOp device runtime
                       ast [:block {:name :assoc-test}
                            (sym/compose-matrices-ast :M12 :M1 :M2 [:i :j] :k)
                            (sym/compose-matrices-ast :LHS :M12 :M3 [:i :j] :k)

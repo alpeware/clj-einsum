@@ -1,5 +1,5 @@
 (ns tools.quantize
-  "Offline hardware-aware model quantization pipeline for clj-xla.
+  "Offline hardware-aware model quantization pipeline for clj-einsum.
    Automatically detects GPU VRAM and architecture, selects optimal quantization,
    and streams quantized weights into native Safetensors format."
   (:require [clojure.data.json :as json]
@@ -125,7 +125,7 @@
         _ (.mkdirs resolved-out-dir)]
 
     (when-not quiet
-      (println "=== clj-xla Hardware-Aware Offline Model Quantizer ===")
+      (println "=== clj-einsum Hardware-Aware Offline Model Quantizer ===")
       (println (format "Detected Primary Device : %s (%s, %d MB VRAM)"
                        (or (:name primary-dev) "Unknown")
                        (name (or (:arch primary-dev) :generic))
@@ -218,7 +218,7 @@
                                                                "data_offsets" (:data-offsets spec)}]]))
                                            specs))
               metadata (cond-> {"quantization" (name selected-precision)
-                                "format" "clj-xla"
+                                "format" "clj-einsum"
                                 "producer" "einsum.hardware"
                                 "target_arch" (name (get primary-dev :arch :generic))}
                          (= selected-precision :int4) (assoc "group_size" (str group-size)))

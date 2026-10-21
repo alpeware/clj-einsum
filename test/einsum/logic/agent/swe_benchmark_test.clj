@@ -2,7 +2,7 @@
   "Unit and generative tests for Experiment E7: Long-Horizon Software Engineering Agent Benchmark.
    Compares Arm A (Standard LLM full-history KV cache) vs Arm B (In-VRAM Datalog State Tracker + Ephemeral Memory).
    Rule 1: Strict TDD - generative tests for invariants defined before core implementation."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.agent.swe-benchmark :as swe]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
@@ -62,7 +62,7 @@
 
 (deftest test-arm-b-deductive-exactness
   (testing "Arm B achieves 100% deductive exactness on a multi-turn refactoring sequence"
-    (let [ctx (xla/get-context)
+    (let [ctx (ein/get-context)
           ontology (swe/build-codebase-ontology {:num-files 16
                                                  :num-functions 32
                                                  :num-tests 8
@@ -83,7 +83,7 @@
 
 (defspec prop-arm-b-constant-memory-invariant 15
   (prop/for-all [num-turns (gen/choose 10 30)]
-                (let [ctx (xla/get-context)
+                (let [ctx (ein/get-context)
                       ontology (swe/build-codebase-ontology {:num-files 8
                                                              :num-functions 16
                                                              :num-tests 4

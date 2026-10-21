@@ -2,12 +2,12 @@
   "Unified WeightStore, safetensors metadata integration, and automated invar inference."
   (:require [clojure.set :as set]
             [clojure.string :as str]
-            [einsum.compiler.pjrt :as pjrt]
             [einsum.logic.dce :as dce]
             [einsum.logic.expand :as expand]
             [einsum.logic.interpret-weights :as iw]
             [einsum.runtime.arena :as arena]
-            [einsum.runtime.safetensors :as st])
+            [einsum.runtime.safetensors :as st]
+            [einsum.uop.runtime :as uop-rt])
   (:import [java.lang.foreign Arena MemorySegment]))
 
 (defn normalize-dtype
@@ -127,7 +127,7 @@
               ctx (or (:ctx store)
                       (when-let [f (resolve 'einsum.core/get-context)] (f))
                       {})
-              cli (or (:client ctx) (:client arena) ctx)
+              _cli (or (:client ctx) (:client arena) ctx)
               shape (:shape info)
               dtype (:dtype info)
               buf (cond
@@ -163,18 +163,22 @@
                         arena
                         (arena/device-buffer arena slice shape dtype)
 
-                        (= (:backend ctx) :uop)
-                        (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)]
-                          (host->dev ctx slice shape dtype))
-
                         :else
-                        (let [dt-enum (arena/dtype->enum dtype)]
-                          (pjrt/buffer-from-host-buffer ctx cli slice shape dt-enum))))
+                        (uop-rt/host->device ctx slice shape dtype)))
 
                     ;; 3. Host array in source map
                     (and (map? source) (or (contains? source k) (contains? source canonical-name)))
                     (let [arr (or (get source k) (get source canonical-name))]
                       (cond
+                        (and (map? arr) (or (contains? arr :shape) (contains? arr "shape")))
+                        (if (= (:backend ctx) :interpreter)
+                          (let [t-buf {:dtype dtype :shape shape :data (float-array (reduce * 1 shape)) :name (str canonical-name)}]
+                            (when arena (arena/track! arena t-buf))
+                            t-buf)
+                          (let [b (uop-rt/allocate-device-buffer ctx shape dtype)]
+                            (when arena (arena/track! arena b))
+                            b))
+
                         (= (:backend ctx) :interpreter)
                         (let [t-buf {:dtype dtype :shape shape :data arr :name (str canonical-name)}]
                           (when arena (arena/track! arena t-buf))
@@ -183,13 +187,8 @@
                         arena
                         (arena/device-buffer arena arr shape dtype)
 
-                        (or (= (:backend ctx) :uop) (nil? cli))
-                        (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)]
-                          (host->dev ctx arr shape dtype))
-
                         :else
-                        (let [dt-enum (arena/dtype->enum dtype)]
-                          (pjrt/buffer-from-host-buffer ctx cli arr shape dt-enum))))
+                        (uop-rt/host->device ctx arr shape dtype)))
 
                     :else
                     (throw (ex-info (str "Unable to retrieve device buffer for tensor: " k)

@@ -2,14 +2,14 @@
   "Grafts relational memory unbinding onto frozen Gemma 4 E2B contextual representations
    and evaluates the Pointwise Fact Selectivity vs. Neighborhood Booster hypothesis on WebNLG.
    Pre-trains W_mem, relation cores R_r, and Stage 2 Non-Linear Resolver (W_Q, W_K) 100% in-VRAM
-   via OpenXLA PJRT, executes Gemma 4 forward passes in VRAM, and evaluates causal logit shifts
+   via UOp ROCm, executes Gemma 4 forward passes in VRAM, and evaluates causal logit shifts
    against distractors across frequency tiers (Head, Mid, Tail, Unseen)."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.memory.contrastive :as contrastive]
             [einsum.models.gemma :as gemma]
             [einsum.logic.symbolic :as sym]
-            [einsum.compiler.pjrt :as pjrt]
             [einsum.runtime.tokenizer.protocol :as proto]
+            [einsum.uop.runtime :as uop-rt]
             [tools.gemma4-inference :as g4]
             [clojure.java.io :as io]
             [clojure.string :as str])
@@ -133,23 +133,23 @@
         ;; 1. Initialize W_mem resident in VRAM
         w-mem-floats (sample-gaussian-floats rnd (* din dm) 0.02)
         w-mem-shorts (g4/floats->bf16-shorts w-mem-floats)
-        w-mem-buf-atom (atom (pjrt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [din dm] 13))
+        w-mem-buf-atom (atom (uop-rt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [din dm] 13))
 
         ;; 2. Initialize per-relation cores resident in VRAM
         r-bufs-atom (atom {})
         _ (doseq [[r _] rel-counts]
             (let [r-floats (init-relation-core-floats rnd dm)
                   r-shorts (g4/floats->bf16-shorts r-floats)
-                  r-buf (pjrt/buffer-from-host-buffer ctx (:client ctx) r-shorts [dm dm] 13)]
+                  r-buf (uop-rt/buffer-from-host-buffer ctx (:client ctx) r-shorts [dm dm] 13)]
               (swap! r-bufs-atom assoc r r-buf)))
 
         ;; 3. Target Identity Matrix and Mask Scale
         target-mat (float-array (* k k) 0.0)
         _ (dotimes [i k] (aset target-mat (+ (* i k) i) 1.0))
-        target-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts target-mat) [k k] 13)
+        target-b (uop-rt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts target-mat) [k k] 13)
 
         mask-mat (float-array (* k k) (float (/ 1.0 (* (double k) (double tau)))))
-        mask-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts mask-mat) [k k] 13)
+        mask-b (uop-rt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts mask-mat) [k k] 13)
 
         by-rel (group-by :rel valid-train-triples)]
 
@@ -171,25 +171,25 @@
                   (let [tr (nth triples-vec (mod i n))]
                     (aset ih-arr i (int (:h-tok tr)))
                     (aset it-arr i (int (:t-tok tr)))))
-                (let [ih-b (pjrt/buffer-from-host-buffer ctx (:client ctx) ih-arr [k] 4)
-                      it-b (pjrt/buffer-from-host-buffer ctx (:client ctx) it-arr [k] 4)
+                (let [ih-b (uop-rt/buffer-from-host-buffer ctx (:client ctx) ih-arr [k] 4)
+                      it-b (uop-rt/buffer-from-host-buffer ctx (:client ctx) it-arr [k] 4)
                       inputs [w-embed-buf ih-b it-b @w-mem-buf-atom r-buf target-b mask-b]
-                      outs (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) inputs 4)
+                      outs (uop-rt/execute-executable ctx (or (:handle step-exec) step-exec) inputs 4)
                       w-new (nth outs 0)
                       r-new (nth outs 1)
                       p-buf (nth outs 2)
                       sc-buf (nth outs 3)
-                      p-floats (pjrt/buffer-to-host-buffer ctx p-buf (* k k) :bf16)
+                      p-floats (uop-rt/buffer-to-host-buffer ctx p-buf (* k k) :bf16)
                       batch-loss (loop [i 0 l 0.0]
                                    (if (>= i k)
                                      (/ l (double k))
                                      (recur (inc i) (- l (Math/log (Math/max 1e-6 (double (aget p-floats (+ (* i k) i)))))))))]
-                  (xla/destroy-buffer! ctx ih-b)
-                  (xla/destroy-buffer! ctx it-b)
-                  (xla/destroy-buffer! ctx p-buf)
-                  (xla/destroy-buffer! ctx sc-buf)
-                  (xla/destroy-buffer! ctx @w-mem-buf-atom)
-                  (xla/destroy-buffer! ctx r-buf)
+                  (ein/destroy-buffer! ctx ih-b)
+                  (ein/destroy-buffer! ctx it-b)
+                  (ein/destroy-buffer! ctx p-buf)
+                  (ein/destroy-buffer! ctx sc-buf)
+                  (ein/destroy-buffer! ctx @w-mem-buf-atom)
+                  (ein/destroy-buffer! ctx r-buf)
                   (reset! w-mem-buf-atom w-new)
                   (swap! r-bufs-atom assoc r r-new)
                   (swap! loss-sum + batch-loss)
@@ -200,16 +200,16 @@
           (println (format "  Epoch %d/%d | Steps: %,d | Mean InfoNCE Loss: %.4f | Latency: %.2f ms (%.2f ms/step)"
                            (inc epoch) epochs @step-count avg-loss dur-ms (/ dur-ms (double (max 1 @step-count))))))))
 
-    (xla/destroy-buffer! ctx target-b)
-    (xla/destroy-buffer! ctx mask-b)
+    (ein/destroy-buffer! ctx target-b)
+    (ein/destroy-buffer! ctx mask-b)
 
     ;; Convert final resident buffers to host float arrays
     (let [w-buf @w-mem-buf-atom
-          w-floats (pjrt/buffer-to-host-buffer ctx w-buf (* din dm) :bf16)
-          _ (xla/destroy-buffer! ctx w-buf)
+          w-floats (uop-rt/buffer-to-host-buffer ctx w-buf (* din dm) :bf16)
+          _ (ein/destroy-buffer! ctx w-buf)
           r-maps (into {} (map (fn [[r b]]
-                                 (let [fa (pjrt/buffer-to-host-buffer ctx b (* dm dm) :bf16)]
-                                   (xla/destroy-buffer! ctx b)
+                                 (let [fa (uop-rt/buffer-to-host-buffer ctx b (* dm dm) :bf16)]
+                                   (ein/destroy-buffer! ctx b)
                                    [r fa]))
                                @r-bufs-atom))]
       {:w-mem w-floats
@@ -234,28 +234,28 @@
                                                               :tau tau
                                                               :lambda-tl 1.0})
         w-mem-shorts (g4/floats->bf16-shorts ^floats w-mem-floats)
-        w-mem-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [din dm] 13)
+        w-mem-dev (uop-rt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [din dm] 13)
 
         wq-floats (sample-gaussian-floats rnd (* din dm) 0.02)
         wk-floats (sample-gaussian-floats rnd (* din dm) 0.02)
         wq-shorts (g4/floats->bf16-shorts wq-floats)
         wk-shorts (g4/floats->bf16-shorts wk-floats)
-        wq-dev-atom (atom (pjrt/buffer-from-host-buffer ctx (:client ctx) wq-shorts [din dm] 13))
-        wk-dev-atom (atom (pjrt/buffer-from-host-buffer ctx (:client ctx) wk-shorts [din dm] 13))
+        wq-dev-atom (atom (uop-rt/buffer-from-host-buffer ctx (:client ctx) wq-shorts [din dm] 13))
+        wk-dev-atom (atom (uop-rt/buffer-from-host-buffer ctx (:client ctx) wk-shorts [din dm] 13))
 
         target-mat (float-array (* k k) 0.0)
         _ (dotimes [i k] (aset target-mat (+ (* i k) i) 1.0))
-        target-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts target-mat) [k k] 13)
+        target-b (uop-rt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts target-mat) [k k] 13)
 
         mask-mat (float-array (* k k) (float (/ 1.0 (* (double k) (double tau)))))
-        mask-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts mask-mat) [k k] 13)
+        mask-b (uop-rt/buffer-from-host-buffer ctx (:client ctx) (g4/floats->bf16-shorts mask-mat) [k k] 13)
 
         by-rel (group-by :rel valid-train-triples)
         r-dev-map (into {} (keep (fn [[r fa]]
                                    (when (seq fa)
-                                     [r (pjrt/buffer-from-host-buffer ctx (:client ctx)
-                                                                      (g4/floats->bf16-shorts fa)
-                                                                      [dm dm] 13)]))
+                                     [r (uop-rt/buffer-from-host-buffer ctx (:client ctx)
+                                                                        (g4/floats->bf16-shorts fa)
+                                                                        [dm dm] 13)]))
                                  r-maps))]
 
     (println (format "Training Stage 2 Non-Linear Resolver (W_Q, W_K: %d x %d) for %d epochs over %,d triples..."
@@ -275,25 +275,25 @@
                   (let [tr (nth triples-vec (mod i n))]
                     (aset ih-arr i (int (:h-tok tr)))
                     (aset it-arr i (int (:t-tok tr)))))
-                (let [ih-b (pjrt/buffer-from-host-buffer ctx (:client ctx) ih-arr [k] 4)
-                      it-b (pjrt/buffer-from-host-buffer ctx (:client ctx) it-arr [k] 4)
+                (let [ih-b (uop-rt/buffer-from-host-buffer ctx (:client ctx) ih-arr [k] 4)
+                      it-b (uop-rt/buffer-from-host-buffer ctx (:client ctx) it-arr [k] 4)
                       inputs [w-embed-buf ih-b it-b w-mem-dev r-buf @wq-dev-atom @wk-dev-atom target-b mask-b]
-                      outs (pjrt/execute-executable ctx (or (:handle step-exec) step-exec) inputs 4)
+                      outs (uop-rt/execute-executable ctx (or (:handle step-exec) step-exec) inputs 4)
                       wq-new (nth outs 0)
                       wk-new (nth outs 1)
                       p-buf (nth outs 2)
                       sc-buf (nth outs 3)
-                      p-floats (pjrt/buffer-to-host-buffer ctx p-buf (* k k) :bf16)
+                      p-floats (uop-rt/buffer-to-host-buffer ctx p-buf (* k k) :bf16)
                       batch-loss (loop [i 0 l 0.0]
                                    (if (>= i k)
                                      (/ l (double k))
                                      (recur (inc i) (- l (Math/log (Math/max 1e-6 (double (aget p-floats (+ (* i k) i)))))))))]
-                  (xla/destroy-buffer! ctx ih-b)
-                  (xla/destroy-buffer! ctx it-b)
-                  (xla/destroy-buffer! ctx p-buf)
-                  (xla/destroy-buffer! ctx sc-buf)
-                  (xla/destroy-buffer! ctx @wq-dev-atom)
-                  (xla/destroy-buffer! ctx @wk-dev-atom)
+                  (ein/destroy-buffer! ctx ih-b)
+                  (ein/destroy-buffer! ctx it-b)
+                  (ein/destroy-buffer! ctx p-buf)
+                  (ein/destroy-buffer! ctx sc-buf)
+                  (ein/destroy-buffer! ctx @wq-dev-atom)
+                  (ein/destroy-buffer! ctx @wk-dev-atom)
                   (reset! wq-dev-atom wq-new)
                   (reset! wk-dev-atom wk-new)
                   (swap! loss-sum + batch-loss)
@@ -304,17 +304,17 @@
           (println (format "  [Resolver] Epoch %d/%d | Steps: %,d | Mean InfoNCE Loss: %.4f | Latency: %.2f ms (%.2f ms/step)"
                            (inc epoch) epochs @step-count avg-loss dur-ms (/ dur-ms (double (max 1 @step-count))))))))
 
-    (xla/destroy-buffer! ctx target-b)
-    (xla/destroy-buffer! ctx mask-b)
-    (xla/destroy-buffer! ctx w-mem-dev)
-    (doseq [[_ b] r-dev-map] (xla/destroy-buffer! ctx b))
+    (ein/destroy-buffer! ctx target-b)
+    (ein/destroy-buffer! ctx mask-b)
+    (ein/destroy-buffer! ctx w-mem-dev)
+    (doseq [[_ b] r-dev-map] (ein/destroy-buffer! ctx b))
 
     (let [wq-buf @wq-dev-atom
           wk-buf @wk-dev-atom
-          wq-floats (pjrt/buffer-to-host-buffer ctx wq-buf (* din dm) :bf16)
-          wk-floats (pjrt/buffer-to-host-buffer ctx wk-buf (* din dm) :bf16)
-          _ (xla/destroy-buffer! ctx wq-buf)
-          _ (xla/destroy-buffer! ctx wk-buf)]
+          wq-floats (uop-rt/buffer-to-host-buffer ctx wq-buf (* din dm) :bf16)
+          wk-floats (uop-rt/buffer-to-host-buffer ctx wk-buf (* din dm) :bf16)
+          _ (ein/destroy-buffer! ctx wq-buf)
+          _ (ein/destroy-buffer! ctx wk-buf)]
       {:w-q wq-floats
        :w-k wk-floats})))
 
@@ -468,15 +468,15 @@
 
         ;; Allocate Resident Device Buffers
         w-mem-shorts (g4/floats->bf16-shorts ^floats w-mem)
-        w-mem-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [hidden-dim dm] 13)
+        w-mem-dev (uop-rt/buffer-from-host-buffer ctx (:client ctx) w-mem-shorts [hidden-dim dm] 13)
 
         wq-shorts (g4/floats->bf16-shorts ^floats w-q)
         wk-shorts (g4/floats->bf16-shorts ^floats w-k)
-        wq-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) wq-shorts [hidden-dim dm] 13)
-        wk-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) wk-shorts [hidden-dim dm] 13)
+        wq-dev (uop-rt/buffer-from-host-buffer ctx (:client ctx) wq-shorts [hidden-dim dm] 13)
+        wk-dev (uop-rt/buffer-from-host-buffer ctx (:client ctx) wk-shorts [hidden-dim dm] 13)
 
         cand-ids-arr (int-array (map :tok candidate-targets))
-        cand-ids-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) cand-ids-arr [k-cands] 4)
+        cand-ids-dev (uop-rt/buffer-from-host-buffer ctx (:client ctx) cand-ids-arr [k-cands] 4)
 
         ;; Evaluation helper function for a split
         eval-split-fn
@@ -522,19 +522,19 @@
                            in-arr (int-array 64)
                            _ (dotimes [i p-len] (aset in-arr i (int (nth prompt-ids i))))
                            pos-p (int-array [(dec p-len)])
-                           in-b (xla/buffer-from-host-buffer ctx (:client ctx) in-arr [1 64] 4)
-                           pos-b (xla/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
+                           in-b (ein/buffer-from-host-buffer ctx (:client ctx) in-arr [1 64] 4)
+                           pos-b (ein/buffer-from-host-buffer ctx (:client ctx) pos-p [1] 4)
                            step-inputs (into [in-b pos-b] dev-weights)
 
                            ;; 2. Gemma 4 forward pass (returns [logits normed_last])
-                           fwd-outs (pjrt/execute-executable ctx (or (:handle fwd-exec) fwd-exec) step-inputs 2)
-                           _ (xla/destroy-buffer! ctx in-b)
-                           _ (xla/destroy-buffer! ctx pos-b)
+                           fwd-outs (uop-rt/execute-executable ctx (or (:handle fwd-exec) fwd-exec) step-inputs 2)
+                           _ (ein/destroy-buffer! ctx in-b)
+                           _ (ein/destroy-buffer! ctx pos-b)
                            base-logits-b (nth fwd-outs 0)
                            normed-last-b (nth fwd-outs 1)
 
                            ;; Read base logits to host
-                           base-logits-fa (pjrt/buffer-to-host-buffer ctx base-logits-b vocab-size :bf16)
+                           base-logits-fa (uop-rt/buffer-to-host-buffer ctx base-logits-b vocab-size :bf16)
                            base-top-cand (top-candidate base-logits-fa candidate-targets)
                            base-top-str (:str base-top-cand)
                            base-top-tok (:tok base-top-cand)
@@ -543,48 +543,48 @@
                            ;; 3. Prepare Relational Core R_rel
                            r-floats (get r-maps rel (float-array (* dm dm) 0.0))
                            r-shorts (g4/floats->bf16-shorts r-floats)
-                           r-dev (pjrt/buffer-from-host-buffer ctx (:client ctx) r-shorts [dm dm] 13)
+                           r-dev (uop-rt/buffer-from-host-buffer ctx (:client ctx) r-shorts [dm dm] 13)
 
                            ;; 4. Run Stage 1 Contextual Unbinding Executable
-                           ground-outs (pjrt/execute-executable ctx (or (:handle unbinding-exec) unbinding-exec)
-                                                                [normed-last-b base-logits-b w-mem-dev r-dev w-embed-buf] 3)
+                           ground-outs (uop-rt/execute-executable ctx (or (:handle unbinding-exec) unbinding-exec)
+                                                                  [normed-last-b base-logits-b w-mem-dev r-dev w-embed-buf] 3)
                            logits-grounded-b (nth ground-outs 0)
                            delta-logits-b (nth ground-outs 1)
                            u-norm-b (nth ground-outs 2)
 
-                           grounded-fa (pjrt/buffer-to-host-buffer ctx logits-grounded-b vocab-size :bf16)
-                           delta-fa (pjrt/buffer-to-host-buffer ctx delta-logits-b vocab-size :bf16)
+                           grounded-fa (uop-rt/buffer-to-host-buffer ctx logits-grounded-b vocab-size :bf16)
+                           delta-fa (uop-rt/buffer-to-host-buffer ctx delta-logits-b vocab-size :bf16)
 
                            ;; 5. Run Stage 1 Direct Entity Unbinding Executable
-                           ih-b (pjrt/buffer-from-host-buffer ctx (:client ctx) (int-array [head-tok]) [1 1] 4)
-                           entity-outs (pjrt/execute-executable ctx (or (:handle entity-exec) entity-exec)
-                                                                [ih-b base-logits-b w-mem-dev r-dev w-embed-buf] 3)
-                           _ (xla/destroy-buffer! ctx (nth entity-outs 0))
+                           ih-b (uop-rt/buffer-from-host-buffer ctx (:client ctx) (int-array [head-tok]) [1 1] 4)
+                           entity-outs (uop-rt/execute-executable ctx (or (:handle entity-exec) entity-exec)
+                                                                  [ih-b base-logits-b w-mem-dev r-dev w-embed-buf] 3)
+                           _ (ein/destroy-buffer! ctx (nth entity-outs 0))
                            delta-ent-b (nth entity-outs 1)
                            ent-u-norm-b (nth entity-outs 2)
-                           delta-ent-fa (pjrt/buffer-to-host-buffer ctx delta-ent-b vocab-size :bf16)
-                           _ (xla/destroy-buffer! ctx delta-ent-b)
+                           delta-ent-fa (uop-rt/buffer-to-host-buffer ctx delta-ent-b vocab-size :bf16)
+                           _ (ein/destroy-buffer! ctx delta-ent-b)
 
                             ;; 6. Run Stage 2 Non-Linear Resolver (Contextual)
-                           scores-b (pjrt/execute-executable ctx (or (:handle resolver-exec) resolver-exec)
-                                                             [normed-last-b u-norm-b cand-ids-dev w-embed-buf wq-dev wk-dev] 1)
-                           scores-fa (pjrt/buffer-to-host-buffer ctx scores-b k-cands :bf16)
-                           _ (xla/destroy-buffer! ctx scores-b)
+                           scores-b (uop-rt/execute-executable ctx (or (:handle resolver-exec) resolver-exec)
+                                                               [normed-last-b u-norm-b cand-ids-dev w-embed-buf wq-dev wk-dev] 1)
+                           scores-fa (uop-rt/buffer-to-host-buffer ctx scores-b k-cands :bf16)
+                           _ (ein/destroy-buffer! ctx scores-b)
 
                             ;; 7. Run Stage 2 Non-Linear Resolver (Direct Entity)
-                           ent-scores-b (pjrt/execute-executable ctx (or (:handle ent-resolver-exec) ent-resolver-exec)
-                                                                 [ih-b ent-u-norm-b cand-ids-dev w-embed-buf wq-dev wk-dev] 1)
-                           ent-scores-fa (pjrt/buffer-to-host-buffer ctx ent-scores-b k-cands :bf16)
-                           _ (xla/destroy-buffer! ctx ent-scores-b)
+                           ent-scores-b (uop-rt/execute-executable ctx (or (:handle ent-resolver-exec) ent-resolver-exec)
+                                                                   [ih-b ent-u-norm-b cand-ids-dev w-embed-buf wq-dev wk-dev] 1)
+                           ent-scores-fa (uop-rt/buffer-to-host-buffer ctx ent-scores-b k-cands :bf16)
+                           _ (ein/destroy-buffer! ctx ent-scores-b)
 
-                           _ (xla/destroy-buffer! ctx ih-b)
-                           _ (xla/destroy-buffer! ctx u-norm-b)
-                           _ (xla/destroy-buffer! ctx ent-u-norm-b)
-                           _ (xla/destroy-buffer! ctx base-logits-b)
-                           _ (xla/destroy-buffer! ctx normed-last-b)
-                           _ (xla/destroy-buffer! ctx r-dev)
-                           _ (xla/destroy-buffer! ctx logits-grounded-b)
-                           _ (xla/destroy-buffer! ctx delta-logits-b)
+                           _ (ein/destroy-buffer! ctx ih-b)
+                           _ (ein/destroy-buffer! ctx u-norm-b)
+                           _ (ein/destroy-buffer! ctx ent-u-norm-b)
+                           _ (ein/destroy-buffer! ctx base-logits-b)
+                           _ (ein/destroy-buffer! ctx normed-last-b)
+                           _ (ein/destroy-buffer! ctx r-dev)
+                           _ (ein/destroy-buffer! ctx logits-grounded-b)
+                           _ (ein/destroy-buffer! ctx delta-logits-b)
 
                            ;; 8. Stage 1 Metrics (Linear alone)
                            s1-top-cand (top-candidate grounded-fa candidate-targets)
@@ -761,10 +761,10 @@
         ;; Run evaluation on test_seen.edn and test_unseen.edn
         seen-res (eval-split-fn "TEST_SEEN (Held-out triples from trained relations)" test-seen)
         unseen-res (eval-split-fn "TEST_UNSEEN (Triples from zero-shot unseen relations)" test-unseen)
-        _ (xla/destroy-buffer! ctx w-mem-dev)
-        _ (xla/destroy-buffer! ctx wq-dev)
-        _ (xla/destroy-buffer! ctx wk-dev)
-        _ (xla/destroy-buffer! ctx cand-ids-dev)]
+        _ (ein/destroy-buffer! ctx w-mem-dev)
+        _ (ein/destroy-buffer! ctx wq-dev)
+        _ (ein/destroy-buffer! ctx wk-dev)
+        _ (ein/destroy-buffer! ctx cand-ids-dev)]
     {:seen seen-res
      :unseen unseen-res}))
 

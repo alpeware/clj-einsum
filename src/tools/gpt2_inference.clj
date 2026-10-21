@@ -1,6 +1,6 @@
 (ns tools.gpt2-inference
-  "End-to-End GPT-2 Autoregressive Generation Loop using clj-xla PJRT backend."
-  (:require [einsum.core :as xla]
+  "End-to-End GPT-2 Autoregressive Generation Loop using clj-einsum UOp backend."
+  (:require [einsum.core :as ein]
             [einsum.models.gpt2 :as gpt2-logic]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.sampling :as sampling]
@@ -45,9 +45,9 @@
   (let [opts (parse-cli-args args)
         {:keys [prompt max-new-tokens temperature top-k backend model-dir]} opts]
     (println "==================================================================")
-    (println "      clj-xla GPT-2 End-to-End Autoregressive Generation Loop     ")
+    (println "      clj-einsum GPT-2 End-to-End Autoregressive Generation Loop     ")
     (println "==================================================================")
-    (let [ctx (xla/init-backend! (or backend :cpu))
+    (let [ctx (ein/init-backend! (or backend :cpu))
           tokenizer-dir (find-model-dir model-dir)
           safetensors-path (str tokenizer-dir "/model.safetensors")]
 
@@ -70,31 +70,31 @@
                            (count (:header weights)) num-layers))
 
           (println "Lowering & JIT Compiling full GPT-2 via Tensor Logic Hiccup AST & WeightStore...")
-          (with-open [session-arena (xla/create-arena ctx)]
-            (let [store (xla/create-weight-store ctx weights {:aliases gpt2-logic/gpt2-alias-resolver
+          (with-open [session-arena (ein/create-arena ctx)]
+            (let [store (ein/create-weight-store ctx weights {:aliases gpt2-logic/gpt2-alias-resolver
                                                               :arena session-arena})
                   ast (gpt2-logic/gpt2-model-ast {:num-layers num-layers :max-seq-len max-seq-len})
-                  gpt2-kernel (xla/compile-kernel ctx "full_gpt2_model_logic" ast
+                  gpt2-kernel (ein/compile-kernel ctx "full_gpt2_model_logic" ast
                                                   {:in {:x [:tensor [1 max-seq-len] :i32]
                                                         :pos_ids [:tensor [1 max-seq-len] :i32]}
                                                    :weights store
                                                    :out [:logits]})
                   pos-array (int-array (range max-seq-len))
-                  pos-buf (xla/device-buffer session-arena pos-array [1 max-seq-len] :i32)]
+                  pos-buf (ein/device-buffer session-arena pos-array [1 max-seq-len] :i32)]
 
               (if (= :interpreter (:backend ctx))
                 (println "Successfully lowered model for Pure-JVM Interpreter execution.")
-                (println (format "Successfully compiled model to native XLA [%s] executable handle." (name (or (:backend ctx) :cpu)))))
+                (println (format "Successfully compiled model to native UOp [%s] executable handle." (name (or (:backend ctx) :cpu)))))
               (println "\nGenerating tokens autoregressively...")
               (print prompt)
               (flush)
               (let [cur-tokens (atom encoded-tokens)]
                 (dotimes [_ max-new-tokens]
-                  (xla/with-device-arena [_step-arena session-arena]
+                  (ein/with-device-arena [_step-arena session-arena]
                     (let [seq-len (count @cur-tokens)
                           input-tensor (prepare-input-tensor @cur-tokens max-seq-len)
                           {:keys [logits]} (gpt2-kernel {:x input-tensor :pos_ids pos-buf})
-                          logits-slice (xla/to-host-slice logits (dec seq-len) 50257 (* max-seq-len 50257))
+                          logits-slice (ein/to-host-slice logits (dec seq-len) 50257 (* max-seq-len 50257))
                           next-id (sampling/sample-logits logits-slice {:temperature temperature :top-k top-k})]
                       (swap! cur-tokens conj next-id)
                       (print (bpe-token->str (get id->tok next-id next-id)))

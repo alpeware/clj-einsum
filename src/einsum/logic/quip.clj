@@ -1,5 +1,5 @@
 (ns einsum.logic.quip
-  "QuIP# Incoherence Processing (FWHT / RHT) and E8 Lattice Codebooks for OpenXLA PJRT.
+  "QuIP# Incoherence Processing (FWHT / RHT) and E8 Lattice Codebooks for UOp device runtime.
    Delegates to einsum.quant.quip for backwards compatibility."
   (:require [einsum.quant.quip :as q]))
 

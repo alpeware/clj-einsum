@@ -3,10 +3,10 @@
    Implements a consumer-hardware native model architecture designed from first principles
    with Declarative Tensor Logic layers (hybrid KG-attention and relational memory unbinding)
    and joint autoregressive LM + InfoNCE contrastive pre-training."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.memory.contrastive :as contrast]
             [einsum.logic.symbolic :as sym]
-            [einsum.compiler.pjrt :as pjrt]))
+            [einsum.uop.runtime :as uop-rt]))
 
 ;; ==============================================================================
 ;; 1. Architecture Configurations
@@ -159,7 +159,7 @@
       [:= [:logits :b :p :v] [:H_final :b :p :d] [:W_embed :v :d]]])))
 
 ;; ==============================================================================
-;; 3. OpenXLA PJRT Compilation Boundary
+;; 3. UOp device runtime Compilation Boundary
 ;; ==============================================================================
 
 (defn build-tl-nano-invars
@@ -195,9 +195,9 @@
     (vec (concat base-invars layer-invars))))
 
 (defn compile-tl-nano-forward
-  "Compiles OpenXLA PJRT executable for full TL-Nano forward pass."
+  "Compiles UOp device runtime executable for full TL-Nano forward pass."
   ([batch seq-len cfg]
-   (compile-tl-nano-forward (xla/get-context) batch seq-len cfg))
+   (compile-tl-nano-forward (ein/get-context) batch seq-len cfg))
   ([ctx batch seq-len cfg]
    (let [b (long batch)
          l (long seq-len)
@@ -213,7 +213,7 @@
      (sym/compile-query ctx "tl_nano_forward" invars ast target-heads))))
 
 (defn run-tl-nano-forward!
-  "Executes compiled TL-Nano forward pass on PJRT device runtime."
+  "Executes compiled TL-Nano forward pass on UOp device runtime."
   [exec inputs]
   (sym/run-query! exec inputs))
 
@@ -266,17 +266,17 @@
      (merge base layer-params))))
 
 (defn pin-params-in-vram
-  "Transfers and pins static layer weights in PJRT device VRAM.
+  "Transfers and pins static layer weights in UOp device VRAM.
    Returns a params map where static layer weights are MemorySegment device buffers."
   [ctx params cfg]
   (let [d (long (:hidden-dim cfg))
         dff (long (:intermediate-dim cfg))
         num-layers (long (:num-layers cfg))
-        client (:client ctx)
+        _client (:client ctx)
         pin (fn [arr shape]
               (if (instance? java.lang.foreign.MemorySegment arr)
                 arr
-                (pjrt/buffer-from-host-buffer ctx client arr shape 11)))
+                (uop-rt/host->device ctx arr shape :f32)))
         layer-pins
         (into {}
               (mapcat
@@ -299,7 +299,7 @@
   [params]
   (doseq [[_k v] params]
     (when (instance? java.lang.foreign.MemorySegment v)
-      (try (xla/destroy-buffer! v) (catch Exception _ nil)))))
+      (try (ein/destroy-buffer! v) (catch Exception _ nil)))))
 
 (defn compute-joint-loss
   "Computes joint autoregressive LM cross-entropy loss + InfoNCE relational contrastive loss:
@@ -433,15 +433,15 @@
         :outputs outputs}))))
 
 (defn compile-embedding-update
-  "Compiles OpenXLA PJRT executable for in-VRAM dW_embed contraction and SGD update:
+  "Compiles UOp device runtime executable for in-VRAM dW_embed contraction and SGD update:
    dW_embed[v, d] = G_logit[n, v]^T @ H_final[n, d]
    W_embed_new = W_embed - lr * dW_embed"
   ([batch-size seq-len cfg]
-   (compile-embedding-update (xla/get-context) batch-size seq-len cfg (or (:lr cfg) 0.01)))
+   (compile-embedding-update (ein/get-context) batch-size seq-len cfg (or (:lr cfg) 0.01)))
   ([a b c d]
    (if (map? a)
      (compile-embedding-update a b c d (or (:lr d) 0.01))
-     (compile-embedding-update (xla/get-context) a b c d)))
+     (compile-embedding-update (ein/get-context) a b c d)))
   ([ctx batch-size seq-len cfg lr]
    (let [n (* (long batch-size) (dec (long seq-len)))
          v (long (:vocab-size cfg))
@@ -457,37 +457,37 @@
      (sym/compile-query ctx "embedding_update" invars ast target-heads))))
 
 (defn compile-relational-forward
-  "Compiles OpenXLA PJRT executable for in-VRAM forward relational subspace projections:
+  "Compiles UOp device runtime executable for in-VRAM forward relational subspace projections:
    U_h = V_h * W, U_t = V_t * W, U_hr = U_h * R, Scores = (U_hr * U_t^T) / tau."
   ([batch-size hidden-dim dim-mem opts]
-   (contrast/compile-contrastive-forward (xla/get-context) batch-size hidden-dim dim-mem opts))
+   (contrast/compile-contrastive-forward (ein/get-context) batch-size hidden-dim dim-mem opts))
   ([ctx batch-size hidden-dim dim-mem opts]
    (contrast/compile-contrastive-forward ctx batch-size hidden-dim dim-mem opts)))
 
 (defn compile-relational-backward
-  "Compiles OpenXLA PJRT executable for in-VRAM relational InfoNCE adjoint contractions:
+  "Compiles UOp device runtime executable for in-VRAM relational InfoNCE adjoint contractions:
    adj_Ut = G_S^T * U_hr, adj_Uhr = G_S * U_t, dR = U_h^T * adj_Uhr,
    adj_Uh = adj_Uhr * R^T, dW_h = V_h^T * adj_Uh, dW_t = V_t^T * adj_Ut, dW = dW_h + dW_t."
   ([batch-size hidden-dim dim-mem]
-   (contrast/compile-contrastive-backward (xla/get-context) batch-size hidden-dim dim-mem))
+   (contrast/compile-contrastive-backward (ein/get-context) batch-size hidden-dim dim-mem))
   ([ctx batch-size hidden-dim dim-mem]
    (contrast/compile-contrastive-backward ctx batch-size hidden-dim dim-mem)))
 
 (defn compile-in-vram-contrastive-step
-  "Compiles OpenXLA PJRT executable for unified, 100% in-VRAM InfoNCE training step:
+  "Compiles UOp device runtime executable for unified, 100% in-VRAM InfoNCE training step:
    Gathers embeddings, projects subspaces, in-graph softmax, analytical adjoints,
    backward contractions, and SGD updates directly in GPU memory."
   ([vocab-size hidden-dim k-triples dim-mem]
-   (compile-in-vram-contrastive-step (xla/get-context) vocab-size hidden-dim k-triples dim-mem nil))
+   (compile-in-vram-contrastive-step (ein/get-context) vocab-size hidden-dim k-triples dim-mem nil))
   ([ctx vocab-size hidden-dim k-triples dim-mem]
    (compile-in-vram-contrastive-step ctx vocab-size hidden-dim k-triples dim-mem nil))
   ([ctx vocab-size hidden-dim k-triples dim-mem opts]
    (contrast/compile-in-vram-contrastive-step ctx vocab-size hidden-dim k-triples dim-mem opts)))
 
 (defn train-step
-  "Executes an OpenXLA pre-training step via algebraic autodiff adjoints.
+  "Executes an UOp pre-training step via algebraic autodiff adjoints.
    Updates W_embed, W_mem, R_mem, and output weights with learning rate `lr`.
-   Accepts optional `embed-exec` and `rel-exec` compiled OpenXLA kernels for in-VRAM contractions."
+   Accepts optional `embed-exec` and `rel-exec` compiled UOp kernels for in-VRAM contractions."
   ([exec params batch cfg lr]
    (train-step exec params batch cfg lr nil nil))
   ([exec params batch cfg lr embed-exec]

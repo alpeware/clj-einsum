@@ -1,7 +1,7 @@
 (ns einsum.models.predicate-invention-test
   "TDD tests for gradient-based predicate invention model (Experiment E16/E17).
    Enforces strict compilation, execution, probability, and metric invariants (Rule 1)."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.data.family-trees :as ft]
             [einsum.models.predicate-invention :as pi]
             [clojure.test :refer [deftest is testing]]
@@ -41,25 +41,25 @@
                   (= 1.0 closure))))
 
 ;; ==============================================================================
-;; 2. OpenXLA PJRT Compilation & Execution Unit Tests
+;; 2. UOp device runtime Compilation & Execution Unit Tests
 ;; ==============================================================================
 
 (deftest test-predicate-invention-compilation
-  (testing "Compiles OpenXLA PJRT executables for all 4 ablations (a0, a1, a2, a3)"
-    (xla/init-backend! :cpu)
-    (let [ctx (xla/get-context)
+  (testing "Compiles UOp device runtime executables for all 4 ablations (a0, a1, a2, a3)"
+    (ein/init-backend! :cpu)
+    (let [ctx (ein/get-context)
           n 16
           dim 16
           opts {:num-entities n :dim dim :rank 4 :tau-ce 0.1 :lr 0.01 :lambda-l1 1e-4}]
       (doseq [ablation [:a0 :a1 :a2 :a3]]
         (let [exec (pi/compile-predicate-invention-step ctx (assoc opts :ablation ablation))]
           (is (some? exec) (str "Compilation failed for ablation " ablation))
-          (is (some? (:handle exec)) (str "Missing PJRT handle for ablation " ablation)))))))
+          (is (some? (:handle exec)) (str "Missing UOp handle for ablation " ablation)))))))
 
 (deftest test-predicate-invention-step-execution
   (testing "Executes a single in-VRAM step for A2 and verifies probability row sums"
-    (xla/init-backend! :cpu)
-    (let [ctx (xla/get-context)
+    (ein/init-backend! :cpu)
+    (let [ctx (ein/get-context)
           n 16
           dim 16
           forest (ft/generate-family-forest {:num-entities n :num-trees 2 :seed 42})

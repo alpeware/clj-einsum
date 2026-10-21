@@ -1,6 +1,6 @@
 (ns tools.gemma3-inference
-  "End-to-End Gemma 3 Autoregressive Generation Loop using clj-xla PJRT backend."
-  (:require [einsum.core :as xla]
+  "End-to-End Gemma 3 Autoregressive Generation Loop using clj-einsum UOp backend."
+  (:require [einsum.core :as ein]
             [einsum.models.gemma3 :as gemma3-logic]
             [einsum.runtime.safetensors :as st]
             [einsum.runtime.sampling :as sampling]
@@ -42,7 +42,7 @@
   "Runs full end-to-end text generation on an initialized or discovered Gemma 3 model."
   ([opts]
    (let [{:keys [prompt max-new-tokens temperature top-k backend precision chat model-dir]} (merge DEFAULT_CLI_OPTS opts)
-         ctx (xla/init-backend! (or backend :cpu))
+         ctx (ein/init-backend! (or backend :cpu))
          resolved-dir (cli/find-model-dir model-dir :gemma-3)
          tokenizer (tok/from-file resolved-dir)
          chat? (if (some? chat) (boolean chat) (boolean (re-find #"-it" resolved-dir)))
@@ -86,25 +86,25 @@
        (println (format "Encoded Token IDs (%d tokens): %s" prompt-len prompt-ids))
 
        (println "Lowering & JIT Compiling full Gemma 3 via Tensor Logic Hiccup AST & WeightStore...")
-       (with-open [session-arena (xla/create-arena ctx)]
-         (let [store (xla/create-weight-store ctx weights {:aliases (gemma3-logic/gemma3-alias-resolver "model.")
+       (with-open [session-arena (ein/create-arena ctx)]
+         (let [store (ein/create-weight-store ctx weights {:aliases (gemma3-logic/gemma3-alias-resolver "model.")
                                                            :arena session-arena})
                ast (gemma3-logic/gemma3-model-ast config)
-               kernel (xla/compile-kernel ctx "full_gemma3_model" ast
+               kernel (ein/compile-kernel ctx "full_gemma3_model" ast
                                           {:in {:x [:tensor [1 max-seq-len] :i32]}
                                            :weights store
                                            :out [:logits]})
                cur-tokens (atom (vec prompt-ids))]
-           (println "Successfully compiled model to native XLA PjRtLoadedExecutable handle.")
+           (println "Successfully compiled model to native UOp UOpLoadedExecutable handle.")
            (println "\nGenerating tokens autoregressively...")
            (print prompt)
            (flush)
            (dotimes [_ max-new-tokens]
-             (xla/with-device-arena [_step-arena session-arena]
+             (ein/with-device-arena [_step-arena session-arena]
                (let [seq-len (count @cur-tokens)
                      input-tensor (prepare-input-tensor @cur-tokens max-seq-len)
                      {:keys [logits]} (kernel {:x input-tensor})
-                     slice (xla/to-host-slice logits (dec seq-len) vocab-size (* max-seq-len vocab-size) weight-dtype)
+                     slice (ein/to-host-slice logits (dec seq-len) vocab-size (* max-seq-len vocab-size) weight-dtype)
                      next-id (sampling/sample-logits slice {:temperature temperature :top-k top-k})]
                  (swap! cur-tokens conj next-id)
                  (print (decode tokenizer [next-id]))
@@ -121,12 +121,12 @@
    (generate-text (assoc (:opts session) :prompt prompt-text :model-dir (:model-dir session)))))
 
 (defn init-inference-session
-  "Initializes PJRT runtime and loads safetensors metadata and tokenizer.
+  "Initializes UOp runtime and loads safetensors metadata and tokenizer.
    Returns a session map for REPL workflows."
   ([] (init-inference-session {}))
   ([opts]
    (let [opts (merge DEFAULT_CLI_OPTS opts)
-         ctx (xla/init-backend! (or (:backend opts) :cpu))
+         ctx (ein/init-backend! (or (:backend opts) :cpu))
          resolved-dir (cli/find-model-dir (:model-dir opts) :gemma-3)
          tokenizer (tok/from-file resolved-dir)]
      {:ctx ctx
@@ -139,7 +139,7 @@
   [& args]
   (let [opts (parse-cli-args args)]
     (println "==================================================================")
-    (println "      clj-xla Gemma 3 End-to-End Autoregressive Generation        ")
+    (println "      clj-einsum Gemma 3 End-to-End Autoregressive Generation        ")
     (println "==================================================================")
     (generate-text opts)))
 

@@ -1,12 +1,12 @@
 (ns einsum.logic.memory.factorization
-  "Experiment E8: Dynamic In-VRAM Relation Induction via StableHLO Non-Negative Tensor Factorization.
+  "Experiment E8: Dynamic In-VRAM Relation Induction via Tensor Logic Non-Negative Tensor Factorization.
    Models multi-entity tool interactions and dynamic environment co-occurrences as an incomplete
    3-way observation tensor X in R^{N x K x N}. Compiles in-graph PARAFAC / Non-Negative Matrix
-   Factorization (NMF) multiplicative update rules into OpenXLA PJRT.
+   Factorization (NMF) multiplicative update rules into UOp device runtime.
    Discovers latent relational predicates and extracts emergent relational cores into resident fast weights.
    Rule 2: Pure Functions (core logic sans-IO).
-   Rule 4: Zero Java Escape Hatches (pure StableHLO execution via PJRT)."
-  (:require [einsum.core :as xla]
+   Rule 4: Zero Java Escape Hatches (pure Tensor Logic execution via UOp)."
+  (:require [einsum.core :as ein]
             [einsum.logic.symbolic :as sym]))
 
 ;; ==============================================================================
@@ -61,15 +61,15 @@
      [:= [:X_hat_final :h :k :t] [:A_next :h :r] [:B_next :k :r] [:C_next :t :r]]]))
 
 ;; ==============================================================================
-;; 2. In-VRAM Session Initialization & PJRT Compilation Boundary
+;; 2. In-VRAM Session Initialization & UOp Compilation Boundary
 ;; ==============================================================================
 
 (defn init-factorization-session
-  "Initializes OpenXLA PJRT factorization session:
-   ctx: OpenXLA context (optional)
+  "Initializes UOp device runtime factorization session:
+   ctx: UOp context (optional)
    opts: {:num-entities n :num-contexts k :rank r :seed seed}"
   ([opts]
-   (init-factorization-session (xla/get-context) opts))
+   (init-factorization-session (ein/get-context) opts))
   ([ctx opts]
    (let [n (long (or (:num-entities opts) 16))
          k (long (or (:num-contexts opts) 4))
@@ -116,7 +116,7 @@
 ;; ==============================================================================
 
 (defn step-factorization!
-  "Executes one turn of non-negative tensor factorization in OpenXLA PJRT:
+  "Executes one turn of non-negative tensor factorization in UOp device runtime:
    Returns {:A ... :B ... :C ... :X-hat ... :rel-error ... :fidelity ... :latency-ms ...}."
   [session x-data]
   (let [{:keys [n k r exec a-curr b-curr c-curr vram-bytes]} session

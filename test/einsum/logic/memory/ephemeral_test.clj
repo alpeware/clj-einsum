@@ -244,7 +244,7 @@
                     (let [clean-val (aget ^floats r-clean i)
                           noise (* (float 0.2) (float (Math/sin (double i))))]
                       (aset r-noisy i (+ clean-val noise))))
-      ;; Run PJRT compiled extract-threshold-re-embed denoising cycle
+      ;; Run UOp compiled extract-threshold-re-embed denoising cycle
                   (let [denoise-out (eph/denoise-relation! denoise-exec r-noisy table)
                         ^floats r-restored (:R_clean denoise-out)
                         query-out (eph/query-memory! query-exec e0 r-restored table)

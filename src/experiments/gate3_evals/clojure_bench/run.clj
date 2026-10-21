@@ -1,7 +1,7 @@
 (ns experiments.gate3-evals.clojure-bench.run
   "Stage 2 Implementation & Benchmark Runner for clojure_bench (Gate 3 Evals).
    Evaluates raw s-expression Clojure writing ability (single-shot) and loop ability (agentic)
-   on Gemma 4 family models under OpenXLA PJRT execution and hermetic SCI grading."
+   on Gemma 4 family models under UOp device runtime execution and hermetic SCI grading."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]

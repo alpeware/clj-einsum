@@ -1,14 +1,25 @@
 (ns einsum.test-helpers.telemetry
   "System telemetry collection, hardware capability inspection, and structured EDN report generation."
-  (:require [einsum.compiler.pjrt.version :as v]
-            [clojure.java.io :as io]
+  (:require [clojure.java.io :as io]
             [clojure.pprint :refer [pprint]]))
+
+(defn- probe-system-backends
+  "Probes system host and driver availability for UOp backends."
+  []
+  (let [kfd-exists? (try (.exists (io/file "/dev/kfd")) (catch Exception _ false))
+        dri-exists? (try (.exists (io/file "/dev/dri")) (catch Exception _ false))]
+    {:detected-backends (cond-> #{:uop-cpu}
+                          (or kfd-exists? dri-exists?) (conj :uop-rocm))
+     :details {:uop-cpu {:available? true}
+               :uop-rocm {:available? (boolean (or kfd-exists? dri-exists?))
+                          :kfd? kfd-exists?
+                          :dri? dri-exists?}}}))
 
 (defn collect-system-telemetry
   "Collects host platform, JVM runtime, driver diagnostic info, and detected backend capabilities."
   []
   (let [runtime (Runtime/getRuntime)
-        driver-info (v/probe-system-driver)]
+        driver-info (probe-system-backends)]
     {:timestamp (str (java.time.Instant/now))
      :host {:os-name (System/getProperty "os.name")
             :os-arch (System/getProperty "os.arch")

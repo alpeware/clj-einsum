@@ -1,7 +1,7 @@
 (ns einsum.runtime.arena
-  "Scoped Device Memory Arenas for deterministic, leak-free OpenXLA PJRT buffer management.
+  "Scoped Device Memory Arenas for deterministic, leak-free buffer management.
    Inspired by Project Panama FFM Arenas (java.lang.foreign.Arena) and babashka.ffi."
-  (:require [einsum.compiler.pjrt :as pjrt])
+  (:require [einsum.uop.runtime :as uop-rt])
   (:import [java.lang.foreign MemorySegment]
            [java.util.concurrent ConcurrentHashMap]
            [java.util.concurrent.atomic AtomicBoolean]))
@@ -11,7 +11,7 @@
   nil)
 
 (def DTYPE->ENUM
-  "Maps symbolic data type keywords to PJRT buffer type enum integers."
+  "Maps symbolic data type keywords to buffer type enum integers."
   {:i1 1 :bool 1 :pred 1
    :i8 2 :byte 2
    :i32 4 :int 4
@@ -21,7 +21,7 @@
    :bf16 13 :bfloat16 13})
 
 (defn dtype->enum
-  "Converts keyword `dt` or integer to PJRT data type enum integer."
+  "Converts keyword `dt` or integer to data type enum integer."
   [dt]
   (cond
     (integer? dt) (int dt)
@@ -33,13 +33,11 @@
   (when (and (some? buf) (not= MemorySegment/NULL buf))
     (try
       (cond
-        (when-let [uop-buf? (requiring-resolve 'einsum.uop.runtime/uop-buffer?)]
-          (uop-buf? buf))
-        (let [destroy-fn (requiring-resolve 'einsum.uop.runtime/destroy-buffer!)]
-          (destroy-fn ctx buf))
+        (uop-rt/uop-buffer? buf)
+        (uop-rt/destroy-buffer! ctx buf)
         (:destroy-fn ctx) ((:destroy-fn ctx) ctx buf)
         (:mock-destroy ctx) ((:mock-destroy ctx) ctx buf)
-        :else (pjrt/destroy-buffer! ctx buf))
+        :else nil)
       (catch Exception _ nil))))
 
 (defrecord DeviceArena [ctx ^java.util.Set buffers-set parent-arena ^AtomicBoolean closed?]
@@ -58,90 +56,88 @@
 (defn closed?
   "Returns true if `arena` has been closed."
   [^DeviceArena arena]
-  (if arena (.get ^AtomicBoolean (:closed? arena)) true))
-
-(defn tracked-buffers
-  "Returns a persistent set of all device buffers currently tracked by `arena`."
-  [^DeviceArena arena]
-  (if arena
-    (set (vec ^java.util.Set (:buffers-set arena)))
-    #{}))
-
-(defn create-arena
-  "Creates an open DeviceArena associated with PJRT `ctx` and optional `parent-arena`."
-  ([ctx]
-   (create-arena ctx nil))
-  ([ctx parent-arena]
-   (let [ctx (cond
-               (arena? ctx) (:ctx ctx)
-               :else ctx)
-         parent (cond
-                  (arena? parent-arena) parent-arena
-                  (arena? ctx) ctx
-                  :else nil)]
-     (->DeviceArena ctx (ConcurrentHashMap/newKeySet) parent (AtomicBoolean. false)))))
-
-(defn close!
-  "Explicitly closes `arena`, destroying all tracked device buffers."
-  [^DeviceArena arena]
   (when arena
+    (.get ^AtomicBoolean (:closed? arena))))
+
+(defn close-arena!
+  "Closes the `arena`, destroying all tracked resident device buffers."
+  [^DeviceArena arena]
+  (when (and arena (not (closed? arena)))
     (.close arena)))
 
-(def close-arena! close!)
+(def close! close-arena!)
+
+(defn create-arena
+  "Creates a new scoped DeviceArena associated with backend `ctx` and optional `parent-arena`."
+  ([] (create-arena nil nil))
+  ([ctx] (create-arena ctx nil))
+  ([ctx parent-arena]
+   (->DeviceArena ctx (ConcurrentHashMap/newKeySet) parent-arena (AtomicBoolean. false))))
 
 (defn track!
-  "Registers `buffer` (or collection of buffers) in `arena` (or `*active-arena*`).
-   Throws ExceptionInfo if `arena` is closed. Returns `buffer`."
-  ([buffer]
-   (track! *active-arena* buffer))
-  ([^DeviceArena arena buffer]
-   (when arena
-     (when (closed? arena)
-       (throw (ex-info "Cannot track buffer in closed DeviceArena"
-                       {:arena arena :buffer buffer})))
-     (let [^java.util.Set set-ref (:buffers-set arena)]
-       (if (sequential? buffer)
-         (doseq [b buffer] (when b (.add set-ref b)))
-         (when buffer (.add set-ref buffer)))))
-   buffer))
+  "Registers device buffer `buf` to be owned and freed by `arena` upon scope exit.
+   Throws ExceptionInfo if `arena` is closed."
+  [^DeviceArena arena buf]
+  (when (and arena buf)
+    (if (closed? arena)
+      (throw (ex-info "Cannot track buffer in closed DeviceArena"
+                      {:arena arena :buffer buf}))
+      (do (.add ^java.util.Set (:buffers-set arena) buf)
+          buf))))
 
 (defn disown!
-  "Removes `buffer` (or collection of buffers) from `arena` (or `*active-arena*`),
-   preventing it from being destroyed when the arena closes. Returns `buffer`."
-  ([buffer]
-   (disown! *active-arena* buffer))
-  ([^DeviceArena arena buffer]
-   (when arena
-     (let [^java.util.Set set-ref (:buffers-set arena)]
-       (if (sequential? buffer)
-         (doseq [b buffer] (when b (.remove set-ref b)))
-         (when buffer (.remove set-ref buffer)))))
-   buffer))
+  "Removes device buffer `buf` from `arena` management without destroying it."
+  [^DeviceArena arena buf]
+  (when (and arena buf)
+    (.remove ^java.util.Set (:buffers-set arena) buf)
+    buf))
 
 (defn promote!
-  "Transfers ownership of `buffer` (or collection of buffers) from `source-arena`
-   to `target-arena`. The buffer survives when `source-arena` closes."
-  ([target-arena buffer]
-   (promote! *active-arena* target-arena buffer))
-  ([^DeviceArena source-arena ^DeviceArena target-arena buffer]
-   (disown! source-arena buffer)
-   (track! target-arena buffer)
-   buffer))
+  "Transfers ownership of device buffer or sequential collection of buffers `buf-or-bufs`
+   from `source-arena` to `target-arena`."
+  [^DeviceArena source-arena ^DeviceArena target-arena buf-or-bufs]
+  (when (and source-arena target-arena buf-or-bufs)
+    (if (sequential? buf-or-bufs)
+      (doseq [b buf-or-bufs]
+        (promote! source-arena target-arena b))
+      (do (disown! source-arena buf-or-bufs)
+          (track! target-arena buf-or-bufs)))
+    buf-or-bufs))
 
 (defn destroy!
-  "Immediately destroys `buffer` and removes it from `arena` tracking."
-  ([buffer]
-   (destroy! *active-arena* buffer))
-  ([^DeviceArena arena buffer]
-   (when buffer
-     (disown! arena buffer)
-     (if (sequential? buffer)
-       (doseq [b buffer] (destroy-device-buffer! (:ctx arena) b))
-       (destroy-device-buffer! (:ctx arena) buffer)))
-   nil))
+  "Destroys a resident device buffer immediately and disowns it from its arena."
+  ([buf]
+   (when *active-arena*
+     (disown! *active-arena* buf))
+   (let [ctx (or (when *active-arena* (:ctx *active-arena*))
+                 (when-let [v (resolve 'einsum.core/*default-context*)] @v)
+                 (when-let [f (resolve 'einsum.core/get-context)] (f))
+                 {})]
+     (destroy-device-buffer! ctx buf)))
+  ([arena-or-ctx buf]
+   (if (arena? arena-or-ctx)
+     (let [arena ^DeviceArena arena-or-ctx]
+       (disown! arena buf)
+       (destroy-device-buffer! (:ctx arena) buf))
+     (destroy-device-buffer! arena-or-ctx buf))))
+
+(defn count-buffers
+  "Returns the number of resident buffers currently tracked by `arena`."
+  [^DeviceArena arena]
+  (if (or (nil? arena) (closed? arena))
+    0
+    (.size ^java.util.Set (:buffers-set arena))))
+
+(defn tracked-buffers
+  "Returns a persistent set of all buffers currently tracked by `arena`."
+  [^DeviceArena arena]
+  (if (or (nil? arena) (closed? arena))
+    #{}
+    (set (:buffers-set arena))))
 
 (defn device-buffer
-  "Transfers host data into a PJRT device buffer or interpreter tensor and tracks it in `arena` (or `*active-arena*`)."
+  "Allocates a device buffer for `host-data`, tracking it within `arena` (or *active-arena*).
+   Returns the device buffer."
   ([host-data shape dtype]
    (device-buffer *active-arena* host-data shape dtype))
   ([^DeviceArena arena host-data shape dtype]
@@ -157,16 +153,8 @@
          (when arena (track! arena buf))
          buf)
 
-       (or (= (:backend ctx) :uop) (nil? (or (:client ctx) (:client arena))))
-       (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)
-             buf (host->dev ctx host-data shape dtype)]
-         (when arena (track! arena buf))
-         buf)
-
        :else
-       (let [cli (or (:client ctx) (:client arena))
-             dt-enum (dtype->enum dtype)
-             buf (pjrt/buffer-from-host-buffer ctx cli host-data shape dt-enum)]
+       (let [buf (uop-rt/host->device ctx host-data shape dtype)]
          (when arena (track! arena buf))
          buf)))))
 

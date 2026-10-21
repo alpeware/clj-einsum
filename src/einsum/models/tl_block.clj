@@ -2,8 +2,8 @@
   "The Unified TL-Transformer Layer Block for Pedro Domingos' Declarative Tensor Logic (Experiment E6).
    Synthesizes Knowledge-Graph Masked Self-Attention (E2), Cross-Attention Memory Probing (E1),
    Contrastive Subspace Projection (E3), and Ephemeral Fast-Weight Contraction (E5) into an
-   end-to-end forward block lowered into StableHLO MLIR for OpenXLA PJRT execution."
-  (:require [einsum.core :as xla]
+   end-to-end forward block lowered into Tensor Logic MLIR for UOp device runtime execution."
+  (:require [einsum.core :as ein]
             [einsum.logic.symbolic :as sym]))
 
 ;; ==============================================================================
@@ -76,17 +76,17 @@
       [:+ [:H_out :b :p_q :d] [:H_tl :b :p_q :d] [:mlp_out :b :p_q :d]]])))
 
 ;; ==============================================================================
-;; 2. OpenXLA PJRT Compilation Boundary
+;; 2. UOp device runtime Compilation Boundary
 ;; ==============================================================================
 
 (defn compile-tl-transformer-block
-  "Compiles OpenXLA PJRT executable for the unified TL-Transformer layer block."
+  "Compiles UOp device runtime executable for the unified TL-Transformer layer block."
   ([batch seq-len num-heads head-dim dff dim-mem entity-count cand-count]
-   (compile-tl-transformer-block (xla/get-context) batch seq-len num-heads head-dim dff dim-mem entity-count cand-count nil))
+   (compile-tl-transformer-block (ein/get-context) batch seq-len num-heads head-dim dff dim-mem entity-count cand-count nil))
   ([a b c d e f g h i]
    (if (map? a)
      (compile-tl-transformer-block a b c d e f g h i nil)
-     (compile-tl-transformer-block (xla/get-context) a b c d e f g h i)))
+     (compile-tl-transformer-block (ein/get-context) a b c d e f g h i)))
   ([ctx batch seq-len num-heads head-dim dff dim-mem entity-count cand-count opts]
    (let [b (long batch)
          l (long seq-len)
@@ -116,10 +116,10 @@
                         [:H_out :cand_scores :clamped_scores :attn_probs :M_kg]))))
 
 ;; ==============================================================================
-;; 3. Impure Execution Wrappers (PJRT Dispatch)
+;; 3. Impure Execution Wrappers (UOp Dispatch)
 ;; ==============================================================================
 
 (defn run-tl-transformer-block!
-  "Executes the unified TL-Transformer forward pass on PJRT device runtime."
+  "Executes the unified TL-Transformer forward pass on UOp device runtime."
   [exec inputs]
   (sym/run-query! exec inputs))

@@ -1,6 +1,6 @@
 (ns einsum.models.gemma-test
   "Unit and generative tests for declarative Tensor Logic Gemma 4 model architecture."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.ast :as ast]
             [einsum.logic.expand :as expand]
             [einsum.models.gemma :as gemma]
@@ -134,8 +134,8 @@
         graph (uop-lower/ast->uop-graph "gemma4_single_layer" invars ast #{:logits})]
     (is (some? graph))
     (is (= [:logits] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)]
       (is (some? compiled)))))
 
 (deftest test-gemma4-single-layer-int8-lowering
@@ -192,8 +192,8 @@
         graph (uop-lower/ast->uop-graph "gemma4_single_layer_int8" invars ast #{:logits})]
     (is (some? graph))
     (is (= [:logits] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)]
       (is (some? compiled)))))
 
 (deftest test-gemma4-last-token-only-lowering
@@ -243,8 +243,8 @@
         graph (uop-lower/ast->uop-graph "gemma4_last_token" invars ast #{:logits})]
     (is (some? graph))
     (is (= [:logits] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)]
       (is (some? compiled)))))
 
 (defspec prop-gemma4-config-invariants 20
@@ -373,8 +373,8 @@
         graph (uop-lower/ast->uop-graph "gemma4_kv_step" invars ast [:logits :k_cache_out_0 :v_cache_out_0])]
     (is (some? graph))
     (is (= [:logits :k_cache_out_0 :v_cache_out_0] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)
           _ (is (some? compiled))
           x-data (int-array [42])
           pos-data (int-array [3])
@@ -385,16 +385,16 @@
                                  (float-array (repeat size 0.01))))
                              (subvec invars 4))
           all-inputs (into [x-data pos-data k-cache v-cache] weights-data)
-          outs (apply xla/execute compiled all-inputs)
+          outs (apply ein/execute compiled all-inputs)
           [logits-buf k-out-buf v-out-buf] (if (vector? outs) outs [outs])
-          logits (xla/to-host-slice logits-buf 0 vocab-size vocab-size)
-          k-out (xla/to-host-slice k-out-buf 0 (* max-seq-len 256) (* max-seq-len 256))]
+          logits (ein/to-host-slice logits-buf 0 vocab-size vocab-size)
+          k-out (ein/to-host-slice k-out-buf 0 (* max-seq-len 256) (* max-seq-len 256))]
       (is (= vocab-size (count logits)))
       (is (some #(not= 0.0 %) (subvec (vec k-out) (* 3 256) (* 4 256))))
       (is (every? #(= 0.0 %) (subvec (vec k-out) 0 256)))
-      (xla/destroy-buffer! logits-buf)
-      (xla/destroy-buffer! k-out-buf)
-      (xla/destroy-buffer! v-out-buf))))
+      (ein/destroy-buffer! logits-buf)
+      (ein/destroy-buffer! k-out-buf)
+      (ein/destroy-buffer! v-out-buf))))
 
 (deftest test-gemma4-kv-cache-step-ring-buffer-lowering
   (let [num-layers 1
@@ -446,8 +446,8 @@
         ast (gemma/gemma4-kv-model-ast config)
         graph (uop-lower/ast->uop-graph "gemma4_kv_ring_step" invars ast [:logits :k_cache_out_0 :v_cache_out_0])]
     (is (some? graph))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)
           x-data (int-array [42])
           pos-data (int-array [6]) ;; 6 mod 4 = 2
           k-cache (float-array (repeat (* window 256) 0.0))
@@ -457,19 +457,19 @@
                                  (float-array (repeat size 0.01))))
                              (subvec invars 4))
           all-inputs (into [x-data pos-data k-cache v-cache] weights-data)
-          outs (apply xla/execute compiled all-inputs)
+          outs (apply ein/execute compiled all-inputs)
           [logits-buf k-out-buf v-out-buf] (if (vector? outs) outs [outs])
-          logits (xla/to-host-slice logits-buf 0 vocab-size vocab-size)
-          k-out (xla/to-host-slice k-out-buf 0 (* window 256) (* window 256))]
+          logits (ein/to-host-slice logits-buf 0 vocab-size vocab-size)
+          k-out (ein/to-host-slice k-out-buf 0 (* window 256) (* window 256))]
       (is (= vocab-size (count logits)))
       ;; Slot 2 (indices 512 to 767) should be populated because 6 mod 4 = 2!
       (is (some #(not= 0.0 %) (subvec (vec k-out) (* 2 256) (* 3 256))))
       ;; Slot 0 (indices 0 to 255) and slot 1 (indices 256 to 511) should remain 0.0
       (is (every? #(= 0.0 %) (subvec (vec k-out) 0 256)))
       (is (every? #(= 0.0 %) (subvec (vec k-out) 256 512)))
-      (xla/destroy-buffer! logits-buf)
-      (xla/destroy-buffer! k-out-buf)
-      (xla/destroy-buffer! v-out-buf))))
+      (ein/destroy-buffer! logits-buf)
+      (ein/destroy-buffer! k-out-buf)
+      (ein/destroy-buffer! v-out-buf))))
 
 (deftest test-gemma4-kv-cache-step-int8-lowering
   (let [num-layers 1
@@ -528,8 +528,8 @@
         graph (uop-lower/ast->uop-graph "gemma4_kv_step_int8" invars ast [:logits :k_cache_out_0 :v_cache_out_0])]
     (is (some? graph))
     (is (= [:logits :k_cache_out_0 :v_cache_out_0] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)
           _ (is (some? compiled))
           x-data (int-array [42])
           pos-data (int-array [3])
@@ -542,16 +542,16 @@
                                    (float-array (repeat size 0.01)))))
                              (subvec invars 4))
           all-inputs (into [x-data pos-data k-cache v-cache] weights-data)
-          outs (apply xla/execute compiled all-inputs)
+          outs (apply ein/execute compiled all-inputs)
           [logits-buf k-out-buf v-out-buf] (if (vector? outs) outs [outs])
-          logits (xla/to-host-slice logits-buf 0 vocab-size vocab-size)
-          k-out (xla/to-host-slice k-out-buf 0 (* max-seq-len 256) (* max-seq-len 256))]
+          logits (ein/to-host-slice logits-buf 0 vocab-size vocab-size)
+          k-out (ein/to-host-slice k-out-buf 0 (* max-seq-len 256) (* max-seq-len 256))]
       (is (= vocab-size (count logits)))
       (is (some #(not= 0.0 %) (subvec (vec k-out) (* 3 256) (* 4 256))))
       (is (every? #(= 0.0 %) (subvec (vec k-out) 0 256)))
-      (xla/destroy-buffer! logits-buf)
-      (xla/destroy-buffer! k-out-buf)
-      (xla/destroy-buffer! v-out-buf))))
+      (ein/destroy-buffer! logits-buf)
+      (ein/destroy-buffer! k-out-buf)
+      (ein/destroy-buffer! v-out-buf))))
 
 (defspec prop-layer-is-global-schedules 50
   (prop/for-all [layer-idx (gen/choose 0 41)]
@@ -609,8 +609,8 @@
         graph (uop-lower/ast->uop-graph "gemma4_prefill" invars ast [:logits :k_ro_0 :v_heads_0])]
     (is (some? graph))
     (is (= [:logits :k_ro_0 :v_heads_0] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)]
       (is (some? compiled)))))
 
 (defspec prop-chunked-attention-ast-validity 20
@@ -822,8 +822,8 @@
                          (and (some? graph)
                               (= (get-in graph [:outputs :k_ro_sl_0 :shape]) expected-shape)
                               (= (get-in graph [:outputs :v_heads_sl_0 :shape]) expected-shape)
-                              (let [ctx (xla/init-cpu!)
-                                    exec (xla/compile-graph ctx graph)]
+                              (let [ctx (ein/init-cpu!)
+                                    exec (ein/compile-graph ctx graph)]
                                 (some? exec))))))))
 
 (defspec prop-gemma4-31b-config-invariants 10
@@ -930,8 +930,8 @@
         graph (uop-lower/ast->uop-graph "gemma4_31b_int4_kv_step" invars ast [:logits :k_cache_out_0 :v_cache_out_0])]
     (is (some? graph))
     (is (= [:logits :k_cache_out_0 :v_cache_out_0] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)]
       (is (some? compiled)))))
 
 (defspec prop-gemma4-unbinding-ast-validity 20
@@ -967,8 +967,8 @@
         graph (uop-lower/ast->uop-graph "gemma_unbinding_test" invars ast [:logits_grounded :delta_logits])]
     (is (some? graph))
     (is (= [:logits_grounded :delta_logits] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)]
       (is (some? compiled)))))
 
 (defspec prop-gemma4-two-stage-resolver-ast-validity 20
@@ -1008,8 +1008,8 @@
         graph (uop-lower/ast->uop-graph "gemma_resolver_test" invars ast [:scores])]
     (is (some? graph))
     (is (= [:scores] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)]
       (is (some? compiled)))))
 
 (deftest test-gemma4-two-stage-entity-resolver-ast-compilation
@@ -1027,12 +1027,12 @@
         graph (uop-lower/ast->uop-graph "gemma_entity_resolver_test" invars ast [:scores])]
     (is (some? graph))
     (is (= [:scores] (:outvars graph)))
-    (let [ctx (xla/get-context)
-          compiled (xla/compile-graph ctx graph)]
+    (let [ctx (ein/get-context)
+          compiled (ein/compile-graph ctx graph)]
       (is (some? compiled)))))
 
 (deftest test-in-vram-resolver-step-compilation
-  (let [ctx (xla/get-context)
+  (let [ctx (ein/get-context)
         vocab-size 2000
         dim-in 1536
         k-triples 16

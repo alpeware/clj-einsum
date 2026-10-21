@@ -1,5 +1,5 @@
 (ns einsum.logic.interpret-simd
-  "Panama Vector API (jdk.incubator.vector) accelerated SGEMM kernel for pure-JVM StableHLO.
+  "Panama Vector API (jdk.incubator.vector) accelerated SGEMM kernel for pure-JVM Tensor Logic.
    Requires --add-modules=jdk.incubator.vector at JVM launch.
 
    Parallel strategy: P-chunk static partitioning. One persistent daemon thread

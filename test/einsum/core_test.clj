@@ -1,170 +1,106 @@
 (ns einsum.core-test
-  "Unit and generative property tests for dynamic multi-backend PJRT plugin initialization in einsum.core."
-  (:require [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
+  "Unit and generative property tests for thin Declarative UOp entry point in einsum.core."
+  (:require [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [einsum.core :as xla]
-            [einsum.logic.interpret :as interpret]
-            [einsum.logic.lower :as lower])
-  (:import [java.lang.foreign Arena ValueLayout]))
+            [einsum.core :as core]
+            [einsum.uop.lower :as uop-lower]))
 
-(deftest test-backend-library-map-structure
-  (testing "BACKEND-LIBRARY-MAP contains all supported hardware targets"
-    (is (contains? xla/BACKEND-LIBRARY-MAP :cpu))
-    (is (contains? xla/BACKEND-LIBRARY-MAP :sycl))
-    (is (contains? xla/BACKEND-LIBRARY-MAP :rocm))
-    (is (contains? xla/BACKEND-LIBRARY-MAP :cuda12))
-    (doseq [[target config] xla/BACKEND-LIBRARY-MAP]
-      (is (string? (:default config)) (str "Target " target " missing string default"))
-      (is (re-find #"^bin/libpjrt_" (:default config)) (str "Target " target " default must start with bin/libpjrt_"))
-      (is (string? (:env config)) (str "Target " target " missing string env"))
-      (is (re-find #"^PJRT_.*_PATH$" (:env config)) (str "Target " target " env must match PJRT_*_PATH")))))
+(deftest test-parse-spec
+  (testing "parse-spec correctly parses explicit einsum subscript specifications"
+    (let [p1 (core/parse-spec "ij,jk->ik")]
+      (is (= [["i" "j"] ["j" "k"]] (:inputs p1)))
+      (is (= ["i" "k"] (:output p1))))
 
-(def gen-target-keyword
-  (gen/elements [:cpu :sycl :rocm :cuda12]))
+    (let [p2 (core/parse-spec "i,j->ij")]
+      (is (= [["i"] ["j"]] (:inputs p2)))
+      (is (= ["i" "j"] (:output p2))))
 
-(defspec prop-backend-resolution-invariants
+    (let [p3 (core/parse-spec "ij->ji")]
+      (is (= [["i" "j"]] (:inputs p3)))
+      (is (= ["j" "i"] (:output p3))))
+
+    (let [p4 (core/parse-spec "i,i->")]
+      (is (= [["i"] ["i"]] (:inputs p4)))
+      (is (= [] (:output p4)))))
+
+  (testing "parse-spec derives implicit output from unique indices"
+    (let [p (core/parse-spec "ij,jk")]
+      (is (= [["i" "j"] ["j" "k"]] (:inputs p)))
+      (is (= ["i" "k"] (:output p))))))
+
+(defspec prop-parse-spec-structure
   50
-  (prop/for-all [target gen-target-keyword]
-                (let [config (get xla/BACKEND-LIBRARY-MAP target)]
-                  (and (some? config)
-                       (string? (:default config))
-                       (string? (:env config))))))
+  (prop/for-all [idx-a (gen/elements ["i" "a" "m"])
+                 idx-b (gen/elements ["j" "b" "k"])
+                 idx-c (gen/elements ["k" "c" "n"])]
+                (let [spec-str (str idx-a idx-b "," idx-b idx-c "->" idx-a idx-c)
+                      parsed (core/parse-spec spec-str)]
+                  (and (map? parsed)
+                       (= [[idx-a idx-b] [idx-b idx-c]] (:inputs parsed))
+                       (= [idx-a idx-c] (:output parsed))))))
 
-(defspec prop-flag-generation-invariants
-  50
-  (prop/for-all [target gen-target-keyword
-                 autotune-level (gen/choose 1 4)]
-                (let [res (xla/determine-optimal-xla-flags target {} {:autotune-level autotune-level})
-                      {:keys [xla-flags env-vars cache-dir]} res]
-                  (and (map? res)
-                       (string? xla-flags)
-                       (map? env-vars)
-                       (or (nil? cache-dir) (string? cache-dir))
-                       (case target
-                         :rocm (re-find #"xla_gpu_autotune_level=" xla-flags)
-                         :cuda12 (re-find #"xla_gpu_enable_cublaslt=true" xla-flags)
-                         :sycl (re-find #"xla_gpu_enable_highest_priority_async_stream=true" xla-flags)
-                         :cpu (re-find #"xla_cpu_multi_thread_eigen=true" xla-flags))))))
+(deftest test-plan
+  (testing "plan infers index dimensions and output shape from operand shapes"
+    (let [pl1 (core/plan "ij,jk->ik" [[2 3] [3 4]])]
+      (is (= [2 4] (:out-shape pl1)))
+      (is (= {"i" 2 "j" 3 "k" 4} (:idx->dim pl1))))
 
-(deftest test-determine-optimal-xla-flags-overrides
-  (testing "User explicit options override auto-detected XLA flags"
-    (let [res (xla/determine-optimal-xla-flags :rocm {} {:xla-flags "--custom_flag=1" :autotune-level 2})
-          {:keys [xla-flags autotune-level]} res]
-      (is (= 2 autotune-level))
-      (is (str/includes? xla-flags "--custom_flag=1"))
-      (is (str/includes? xla-flags "--xla_gpu_autotune_level=2"))))
+    (let [pl2 (core/plan "i,j->ij" [[5] [7]])]
+      (is (= [5 7] (:out-shape pl2)))
+      (is (= {"i" 5 "j" 7} (:idx->dim pl2))))))
 
-  (testing "Disabling auto defaults preserves user flags only"
-    (let [res (xla/determine-optimal-xla-flags :rocm {} {:disable-defaults? true :xla-flags "--custom_only"})
-          {:keys [xla-flags]} res]
-      (is (= "--custom_only" xla-flags)))))
-
-(deftest test-determine-optimal-xla-flags-rocm-env-vars
-  (testing "determine-optimal-xla-flags sets ROCm environment variables including HSA_OVERRIDE_GFX_VERSION"
-    (let [orig-gfx (or (System/getProperty "HSA_OVERRIDE_GFX_VERSION") (System/getenv "HSA_OVERRIDE_GFX_VERSION"))
-          orig-rocr (or (System/getProperty "ROCR_VISIBLE_DEVICES") (System/getenv "ROCR_VISIBLE_DEVICES"))
-          orig-hip (or (System/getProperty "HIP_VISIBLE_DEVICES") (System/getenv "HIP_VISIBLE_DEVICES"))
-          orig-gfx-nat (or (xla/getenv-native "HSA_OVERRIDE_GFX_VERSION") (System/getenv "HSA_OVERRIDE_GFX_VERSION"))
-          orig-rocr-nat (or (xla/getenv-native "ROCR_VISIBLE_DEVICES") (System/getenv "ROCR_VISIBLE_DEVICES"))
-          orig-hip-nat (or (xla/getenv-native "HIP_VISIBLE_DEVICES") (System/getenv "HIP_VISIBLE_DEVICES"))]
-      (try
-        (let [res (xla/determine-optimal-xla-flags :rocm {} {:gfx-version "11.0.0" :rocr-visible-devices "0" :hip-visible-devices "0"})
-              {:keys [env-vars]} res]
-          (is (= "11.0.0" (get env-vars "HSA_OVERRIDE_GFX_VERSION")))
-          (is (= "0" (get env-vars "ROCR_VISIBLE_DEVICES")))
-          (is (= "0" (get env-vars "HIP_VISIBLE_DEVICES")))
-          (is (= "11.0.0" (System/getProperty "HSA_OVERRIDE_GFX_VERSION")))
-          (is (= "0" (System/getProperty "ROCR_VISIBLE_DEVICES")))
-          (is (= "0" (System/getProperty "HIP_VISIBLE_DEVICES"))))
-        (finally
-          (if orig-gfx
-            (System/setProperty "HSA_OVERRIDE_GFX_VERSION" orig-gfx)
-            (System/clearProperty "HSA_OVERRIDE_GFX_VERSION"))
-          (if orig-gfx-nat
-            (xla/setenv-native "HSA_OVERRIDE_GFX_VERSION" orig-gfx-nat)
-            (xla/unsetenv-native "HSA_OVERRIDE_GFX_VERSION"))
-          (if orig-rocr
-            (System/setProperty "ROCR_VISIBLE_DEVICES" orig-rocr)
-            (System/clearProperty "ROCR_VISIBLE_DEVICES"))
-          (if orig-rocr-nat
-            (xla/setenv-native "ROCR_VISIBLE_DEVICES" orig-rocr-nat)
-            (xla/unsetenv-native "ROCR_VISIBLE_DEVICES"))
-          (if orig-hip
-            (System/setProperty "HIP_VISIBLE_DEVICES" orig-hip)
-            (System/clearProperty "HIP_VISIBLE_DEVICES"))
-          (if orig-hip-nat
-            (xla/setenv-native "HIP_VISIBLE_DEVICES" orig-hip-nat)
-            (xla/unsetenv-native "HIP_VISIBLE_DEVICES")))))))
-
-(deftest test-init-interpreter-backend
-  (testing "init-backend! with :interpreter or :interp initializes pure-JVM backend without PJRT plugin"
-    (let [ctx (xla/init-backend! :interpreter {:quiet? true})]
+(deftest test-init-backend-and-context
+  (testing "init-backend! with :interpreter initializes reference backend"
+    (let [ctx (core/init-backend! :interpreter {:quiet? true})]
       (is (= :interpreter (:backend ctx)))
       (is (= :interpreter (:target ctx)))
-      (is (= "interpreter" (:platform ctx)))
-      (is (nil? (:client ctx)))
-      (is (fn? (:destroy-fn ctx)))
-      ;; Calling destroy-fn is a safe no-op
-      (is (nil? ((:destroy-fn ctx) ctx nil)))
-      (is (= ctx (xla/get-context))))
-    (let [ctx2 (xla/init-backend! :interp {:quiet? true})]
-      (is (= :interpreter (:backend ctx2))))
-    (let [ctx3 (xla/init-interpreter! {:quiet? true})]
-      (is (= :interpreter (:backend ctx3))))))
+      (is (= ctx (core/get-context)))))
 
-(deftest test-interpreter-compile-graph-and-execute
-  (testing "compile-graph and execute on interpreter backend runs pure-JVM StableHLO"
-    (let [ctx (xla/init-backend! :interpreter {:quiet? true})
-          graph (lower/ast->graph "add_test"
-                                  [[:x [:tensor [2] :f32]]
-                                   [:y [:tensor [2] :f32]]]
-                                  [:= [:z :d] [:x :d] [:y :d]]
-                                  [:z])
-          exec (xla/compile-graph ctx graph)]
-      (is (map? exec))
-      (is (= :interpreter (:backend exec)))
-      (is (some? (:graph exec)))
-      (let [x-arr (float-array [1.0 2.0])
-            y-arr (float-array [3.0 4.0])
-            res (xla/execute exec [x-arr y-arr])]
-        (is (map? res))
-        (is (= [3.0 8.0] (vec (:data res))))
-        (let [floats (xla/to-host-slice res 0 2 2 :f32)]
-          (is (= [3.0 8.0] (vec floats))))))))
+  (testing "init-backend! with :uop-cpu initializes UOp CPU backend"
+    (let [ctx (core/init-backend! :uop-cpu {:quiet? true})]
+      (is (= :uop (:backend ctx)))
+      (is (= :uop-cpu (:target ctx)))
+      (is (= ctx (core/get-context))))))
 
-(deftest test-interpreter-to-host-slice
-  (testing "to-host-slice handles interpreter tensor maps, primitive arrays, and memory segments"
-    ;; Direct float array
-    (let [f-arr (float-array [1.0 2.0 3.0 4.0])
-          sl0 (xla/to-host-slice f-arr 0 2 4 :f32)
-          sl1 (xla/to-host-slice f-arr 1 2 4 :f32)]
-      (is (= [1.0 2.0] (vec sl0)))
-      (is (= [3.0 4.0] (vec sl1))))
+(deftest test-with-device-arena
+  (testing "with-device-arena manages scoped allocations cleanly"
+    (let [ctx (core/init-backend! :uop-cpu {:quiet? true})]
+      (core/with-device-arena [arena ctx]
+        (let [arr (float-array [1.0 2.0 3.0])
+              buf (core/device-buffer arena arr [3] :f32)]
+          (is (some? buf))
+          (is (some? (core/track! arena buf))))))))
 
-    ;; Tensor map with float array
-    (let [t-map {:dtype :f32 :shape [4] :data (float-array [10.0 20.0 30.0 40.0])}
-          sl (xla/to-host-slice t-map 1 2 4 :f32)]
-      (is (= [30.0 40.0] (vec sl))))
+(deftest test-compile-graph-and-execute-uop-cpu
+  (testing "compile-graph and execute on UOp CPU backend"
+    (let [ctx (core/init-backend! :uop-cpu {:quiet? true})
+          ast [[:= [:z :d] [:x :d] [:y :d]]]
+          invars [[:x [:tensor [2] :f32]]
+                  [:y [:tensor [2] :f32]]]
+          graph (uop-lower/ast->uop-graph "mul_core_test" invars ast [:z])
+          exec (core/compile-graph ctx graph)
+          x-arr (float-array [1.5 2.5])
+          y-arr (float-array [3.5 4.5])
+          res (core/execute exec [x-arr y-arr])]
+      (is (some? res))
+      (let [slice (core/to-host-slice res 0 2 2 :f32)]
+        (is (= [5.25 11.25] (vec slice)))))))
 
-    ;; Tensor map with bf16 shorts
-    (let [bf-shorts (short-array [(interpret/f32->bf16 1.5)
-                                  (interpret/f32->bf16 2.5)
-                                  (interpret/f32->bf16 3.5)])
-          t-map {:dtype :bf16 :shape [3] :data bf-shorts}
-          sl (xla/to-host-slice t-map 0 2 3 :bf16)]
-      (is (= [1.5 2.5] (vec sl))))
-
-    ;; Tensor map with MemorySegment
-    (with-open [arena (Arena/ofConfined)]
-      (let [seg (.allocate arena (* 4 4) 4)]
-        (dotimes [i 4]
-          (.setAtIndex seg ValueLayout/JAVA_FLOAT (long i) (float (* 10 (inc i)))))
-        (let [t-map {:dtype :f32 :shape [4] :data seg}
-              sl (xla/to-host-slice t-map 1 2 4 :f32)]
-          (is (= [30.0 40.0] (vec sl))))))))
-
-
-
+(deftest test-compile-graph-and-execute-interpreter
+  (testing "compile-graph and execute on interpreter backend"
+    (let [ctx (core/init-backend! :interpreter {:quiet? true})
+          graph {:name "mul_interp_test"
+                 :invars [[:x [:tensor [2] :f32]]
+                          [:y [:tensor [2] :f32]]]
+                 :outvars [:z]
+                 :known-shapes {}
+                 :eqns [{:op :ir/multiply :invars [:x :y] :outvars [:z]}]}
+          exec (core/compile-graph ctx graph)
+          x-arr (float-array [10.0 20.0])
+          y-arr (float-array [30.0 40.0])
+          res (core/execute exec [x-arr y-arr])]
+      (is (map? res))
+      (let [slice (core/to-host-slice res 0 2 2 :f32)]
+        (is (= [300.0 800.0] (vec slice)))))))

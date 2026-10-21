@@ -11,7 +11,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [einsum.core :as xla]
+            [einsum.core :as ein]
             [einsum.models.gemma4 :as gemma4]
             [einsum.models.gemma4.kernels :as kernels]))
 
@@ -30,9 +30,9 @@
                [:rope [:y :b :p :qd] [:x :b :p :qd]
                 {:head-dim head-dim :theta 10000.0 :rope-proportion rope-prop}]]
           in-spec [[:x [:tensor [b seq-len total-dim] :f32]]]
-          cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})]
-      (with-open [k (xla/compile-kernel cpu-ctx "rope_prop" ast {:in in-spec :out [:y]})]
-        (let [out (xla/to-host-slice (k [x-floats]) 0 (* b seq-len total-dim) (* b seq-len total-dim))]
+          cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})]
+      (with-open [k (ein/compile-kernel cpu-ctx "rope_prop" ast {:in in-spec :out [:y]})]
+        (let [out (ein/to-host-slice (k [x-floats]) 0 (* b seq-len total-dim) (* b seq-len total-dim))]
           ;; Check that for token 0 (pos = 0), all dims match exactly (cos(0) = 1, sin(0) = 0)
           (dotimes [i total-dim]
             (is (<= (Math/abs (- (double (aget ^floats out i)) (double (aget ^floats x-floats i)))) 1e-4)))
@@ -67,9 +67,9 @@
                            [:rope [:y :b :p :qd] [:x :b :p :qd]
                             {:head-dim head-dim :theta 10000.0 :rope-proportion rope-prop}]]
                       in-spec [[:x [:tensor [b seq-len total-dim] :f32]]]
-                      cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})]
-                  (with-open [k (xla/compile-kernel cpu-ctx "rope_prop_p" ast {:in in-spec :out [:y]})]
-                    (let [out (xla/to-host-slice (k [x-floats]) 0 (* b seq-len total-dim) (* b seq-len total-dim))]
+                      cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})]
+                  (with-open [k (ein/compile-kernel cpu-ctx "rope_prop_p" ast {:in in-spec :out [:y]})]
+                    (let [out (ein/to-host-slice (k [x-floats]) 0 (* b seq-len total-dim) (* b seq-len total-dim))]
                       (every? (fn [p]
                                 (every? (fn [h]
                                           (let [head-offset (+ (* p total-dim) (* h head-dim))]
@@ -95,9 +95,9 @@
           ast [:block {:name :sliding_softmax_test}
                [:causal-softmax [:probs :q :k] [:scores :q :k] {:sliding-window window}]]
           in-spec [[:scores [:tensor [q-len k-len] :f32]]]
-          cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})]
-      (with-open [k (xla/compile-kernel cpu-ctx "sliding_softmax" ast {:in in-spec :out [:probs]})]
-        (let [out (xla/to-host-slice (k [scores-floats]) 0 (* q-len k-len) (* q-len k-len))]
+          cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})]
+      (with-open [k (ein/compile-kernel cpu-ctx "sliding_softmax" ast {:in in-spec :out [:probs]})]
+        (let [out (ein/to-host-slice (k [scores-floats]) 0 (* q-len k-len) (* q-len k-len))]
           ;; For each query row r:
           (dotimes [r q-len]
             (dotimes [c k-len]
@@ -124,9 +124,9 @@
                  :start-indices [0 :pos 0]}]]
           in-spec [[:normed [:tensor [1 seq-len hidden-dim] :f32]]
                    [:pos [:tensor [1] :i32]]]
-          cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})]
-      (with-open [k (xla/compile-kernel cpu-ctx "dyn_slice" ast {:in in-spec :out [:normed_last]})]
-        (let [out (xla/to-host-slice (k [x-floats pos]) 0 hidden-dim hidden-dim)]
+          cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})]
+      (with-open [k (ein/compile-kernel cpu-ctx "dyn_slice" ast {:in in-spec :out [:normed_last]})]
+        (let [out (ein/to-host-slice (k [x-floats pos]) 0 hidden-dim hidden-dim)]
           ;; Expected row 5: values [5*16 .. 5*16 + 15]
           (dotimes [i hidden-dim]
             (is (== (float (+ (* 5 hidden-dim) i)) (aget ^floats out i)))))))))
@@ -150,9 +150,9 @@
           in-spec [[:k_cache_in [:tensor [1 max-seq kv-heads head-dim] :f32]]
                    [:k_new [:tensor [1 1 kv-heads head-dim] :f32]]
                    [:pos [:tensor [1] :i32]]]
-          cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})]
-      (with-open [k (xla/compile-kernel cpu-ctx "dyn_update" ast {:in in-spec :out [:k_cache_out]})]
-        (let [out (xla/to-host-slice (k [cache-in k-new pos]) 0 total-elems total-elems)
+          cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})]
+      (with-open [k (ein/compile-kernel cpu-ctx "dyn_update" ast {:in in-spec :out [:k_cache_out]})]
+        (let [out (ein/to-host-slice (k [cache-in k-new pos]) 0 total-elems total-elems)
               step-size (* kv-heads head-dim)]
           ;; Rows other than 3 must remain 0.0
           (dotimes [r max-seq]
@@ -174,9 +174,9 @@
           ast [:block {:name :rms_norm_4d_test}
                [:rms-norm [:y :b :p :h :dh] [:x :b :p :h :dh] {:eps 1e-6}]]
           in-spec [[:x [:tensor [b seq-len heads head-dim] :f32]]]
-          cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})]
-      (with-open [k (xla/compile-kernel cpu-ctx "rms_4d" ast {:in in-spec :out [:y]})]
-        (let [out (xla/to-host-slice (k [x-floats]) 0 total-elems total-elems)]
+          cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})]
+      (with-open [k (ein/compile-kernel cpu-ctx "rms_4d" ast {:in in-spec :out [:y]})]
+        (let [out (ein/to-host-slice (k [x-floats]) 0 total-elems total-elems)]
           ;; For each 8-dim slice, sum of squares divided by 8 should be ~1.0
           (dotimes [slice-idx (* b seq-len heads)]
             (let [offset (* slice-idx head-dim)

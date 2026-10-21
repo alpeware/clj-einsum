@@ -283,7 +283,7 @@
                       {:act :sigmoid :scale (/ 1.0 t)}))))
 
 ;; ==============================================================================
-;; 3.3 Execution Boundary (Impure - PJRT Execution)
+;; 3.3 Execution Boundary (Impure - UOp Execution)
 ;; ==============================================================================
 
 (defn compile-query
@@ -618,7 +618,7 @@
     {:ancestors ancestors :descendants descendants}))
 
 (defn datalog-transitive-closure
-  "Computes transitive closure via direct Boolean/indicator tensor contraction in OpenXLA PJRT
+  "Computes transitive closure via direct Boolean/indicator tensor contraction in UOp device runtime
    (Shah & Zadrozny, arXiv:2601.17188v1 Exp 1, §3.1 & §5.1).
    `opts`: {:facts #{[0 1] ...}
             :n integer entity count
@@ -703,7 +703,7 @@
      node)))
 
 (defn predict-compositional-query
-  "Executes zero-shot multi-hop compositional query via chained relation matrices in OpenXLA PJRT
+  "Executes zero-shot multi-hop compositional query via chained relation matrices in UOp device runtime
    (Shah & Zadrozny, arXiv:2601.17188v1 Exp 2, §3.2).
    `opts`: {:subject-idx int
             :relation-matrices [float-array ...]
@@ -765,7 +765,7 @@
 (defn superposition-relation-matrix
   "Computes relation transformation matrix via Tensor Logic superposition construction:
    R_r = E^T * A_r * E = sum_{(h, t) in facts(r)} e_h (x) e_t (Shah & Zadrozny, arXiv:2601.17188v1 Exp 3, §3.3.2; Domingos §5).
-   Compiled through OpenXLA PJRT into optimized StableHLO dot_general contractions (Rule 4).
+   Compiled through UOp device runtime into optimized Tensor Logic dot_general contractions (Rule 4).
    `entity-embeddings`: {:shape [n d] :data float-array}.
    `facts`: sequence or set of [h t] integer entity index pairs.
    Returns {:shape [d d] :data float-array}."
@@ -786,7 +786,7 @@
      {:shape [d-long d-long] :data (get out :R)})))
 
 (defn predict-tail-query
-  "Evaluates tail prediction query (h, r, ?) via OpenXLA PJRT (Paper Exp 3, §3.3.3):
+  "Evaluates tail prediction query (h, r, ?) via UOp device runtime (Paper Exp 3, §3.3.3):
    v_pred = e_h * R_r, scores = (v_pred * E^T) / T.
    `opts`: {:head-idx int
             :relation-matrix {:shape [d d] :data float-array}
@@ -818,7 +818,7 @@
        :sorted-entities sorted-entities})))
 
 (defn predict-head-query
-  "Evaluates head prediction query (?, r, t) via OpenXLA PJRT (Paper Exp 3, §3.3.3):
+  "Evaluates head prediction query (?, r, t) via UOp device runtime (Paper Exp 3, §3.3.3):
    v_pred = e_t * R_r^T, scores = (v_pred * E^T) / T.
    `opts`: {:tail-idx int
             :relation-matrix {:shape [d d] :data float-array}

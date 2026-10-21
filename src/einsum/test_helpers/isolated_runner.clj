@@ -1,5 +1,5 @@
 (ns einsum.test-helpers.isolated-runner
-  "Process-isolated test runner harness for executing PJRT device tests in separate JVM subprocesses."
+  "Process-isolated test runner harness for executing UOp device tests in separate JVM subprocesses."
   (:require [clojure.edn :as edn]
             [clojure.java.shell :refer [sh]]))
 

@@ -1,7 +1,7 @@
 (ns einsum.models.tl-block-test
   "Unit and generative invariant property tests for the Unified TL-Transformer Layer Block (Experiment E6).
    Verifies shape preservation, deductive threshold gating, KG-attention distractor suppression,
-   and end-to-end forward pass execution on OpenXLA PJRT."
+   and end-to-end forward pass execution on UOp device runtime."
   (:require [einsum.models.tl-block :as tl]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
@@ -118,7 +118,7 @@
 ;; ==============================================================================
 
 (deftest test-tl-transformer-block-execution
-  (testing "Unified TL-Transformer block executes correctly on PJRT device runtime"
+  (testing "Unified TL-Transformer block executes correctly on UOp device runtime"
     (let [b 1
           l 4
           h 2

@@ -63,7 +63,7 @@
 
 (deftest end-to-end-synthetic-quantization-test
   (testing "Quantizes a small synthetic model safetensors into native INT4 safetensors"
-    (let [tmp-dir (io/file (System/getProperty "java.io.tmpdir") (str "clj_xla_quant_test_" (System/currentTimeMillis)))
+    (let [tmp-dir (io/file (System/getProperty "java.io.tmpdir") (str "clj_einsum_quant_test_" (System/currentTimeMillis)))
           out-dir (io/file tmp-dir "quantized")
           _ (.mkdirs tmp-dir)
           source-file (io/file tmp-dir "model.safetensors")
@@ -110,7 +110,7 @@
             (.delete f))))))
 
   (testing "Quantizes a synthetic model into block-wise INT4 safetensors with 2D scales"
-    (let [tmp-dir (io/file (System/getProperty "java.io.tmpdir") (str "clj_xla_quant_block_test_" (System/currentTimeMillis)))
+    (let [tmp-dir (io/file (System/getProperty "java.io.tmpdir") (str "clj_einsum_quant_block_test_" (System/currentTimeMillis)))
           out-dir (io/file tmp-dir "quantized")
           _ (.mkdirs tmp-dir)
           source-file (io/file tmp-dir "model.safetensors")

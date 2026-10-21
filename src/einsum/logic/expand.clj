@@ -269,7 +269,7 @@
 
 (defn expand-ast
   "Recursively expands Hiccup AST using fixed-point prewalk until only primitive
-   equations ([:= ...], direct StableHLO hooks) remain."
+   equations ([:= ...], direct Tensor Logic hooks) remain."
   ([ast] (expand-ast {} ast))
   ([ctx ast]
    (let [synth-counter (atom 0)

@@ -1,8 +1,6 @@
 (ns einsum.models.gemma4.kernels
-  "Gemma 4 StableHLO MLIR executable compilation for prefill, KV-cache step, and in-VRAM while loop."
-  (:require [einsum.core :as xla]
-            [einsum.logic.lower :as lower]
-            [einsum.models.gemma :as gemma-logic]
+  "Gemma 4 executable compilation for prefill, KV-cache step, and in-VRAM while loop."
+  (:require [einsum.models.gemma :as gemma-logic]
             [einsum.runtime.arena :as arena]
             [einsum.uop.runtime :as uop-rt]))
 
@@ -252,23 +250,20 @@
                   (range num-unshared))))))
 
 (defn compile-tensor-logic-executable
-  "Compiles Gemma 4 model AST into a native StableHLO MLIR executable."
+  "Compiles Gemma 4 model AST into a native executable."
   [{:keys [ctx config opts]} max-seq-len]
   (let [last-token? (get opts :last-token-only? true)
         config-with-len (assoc config :max-seq-len max-seq-len :last-token-only? last-token?)
         invars (build-tensor-logic-invars config-with-len max-seq-len)
         ast (gemma-logic/gemma4-model-ast config-with-len)
-        target-heads (or (:targets opts) #{:logits})
-        _ (when-not (:quiet opts)
-            (println (format "Lowering declarative Tensor Logic Gemma 4 AST (%d layers, max-seq-len=%d, last-token-only=%s) to StableHLO..."
-                             (:num-layers config) max-seq-len (str last-token?))))
-        graph (lower/ast->graph "gemma4_model" invars ast target-heads)]
+        target-heads (or (:targets opts) #{:logits})]
     (when-not (:quiet opts)
-      (println "Compiling native XLA PjRtLoadedExecutable..."))
-    (xla/compile-graph ctx graph)))
+      (println (format "Compiling declarative Tensor Logic Gemma 4 AST (%d layers, max-seq-len=%d, last-token-only=%s) via UOp backend..."
+                       (:num-layers config) max-seq-len (str last-token?))))
+    (uop-rt/compile-uop-executable ctx "gemma4_model" invars ast target-heads)))
 
 (defn compile-gemma4-scoring-executable
-  "Compiles Gemma 4 model AST into a native StableHLO MLIR scoring executable.
+  "Compiles Gemma 4 model AST into a native scoring executable.
    Takes prompt tokens [:x] and target tokens [:targets] of shape [1, max-seq-len],
    computes log-softmax logits and gathers target log-probs in-accelerator,
    returning only [:target_log_probs] of shape [1, max-seq-len] (f32)."
@@ -282,14 +277,11 @@
              (gemma-logic/gemma4-model-ast cfg)
              [:log-softmax [:log_probs :b :p :v] [:logits :b :p :v] {:axis 2}]
              [:gather [:target_log_probs :b :p] [:log_probs :b :p :v] [:targets :b :p] {:axis 2}]]
-        targets #{:target_log_probs}
-        _ (when-not (:quiet opts)
-            (println (format "Lowering declarative Tensor Logic Gemma 4 Scoring (%d layers, max-seq-len=%d) to StableHLO..."
-                             (:num-layers config) max-seq-len)))
-        graph (lower/ast->graph "gemma4_scoring" invars ast targets)]
+        targets #{:target_log_probs}]
     (when-not (:quiet opts)
-      (println "Compiling Gemma 4 Scoring graph to native XLA PjRtLoadedExecutable..."))
-    (xla/compile-graph ctx graph)))
+      (println (format "Compiling declarative Tensor Logic Gemma 4 Scoring (%d layers, max-seq-len=%d) via UOp backend..."
+                       (:num-layers config) max-seq-len)))
+    (uop-rt/compile-uop-executable ctx "gemma4_scoring" invars ast targets)))
 
 (defn compile-target-log-prob-executable
   "Compiles an in-accelerator target log-prob extraction kernel.
@@ -306,12 +298,11 @@
                 [:convert [:logits_f32 :b :p :v] [:logits :b :p :v] {:target-dtype :f32}])
               [:log-softmax [:log_probs :b :p :v] (if (not= (or dtype :bf16) :f32) [:logits_f32 :b :p :v] [:logits :b :p :v]) {:axis 2}]
               [:gather [:target_log_prob :b :p] [:log_probs :b :p :v] [:target :b :p] {:axis 2}]]
-         targets #{:target_log_prob}
-         graph (lower/ast->graph "target_log_prob" invars ast targets)]
-     (xla/compile-graph ctx graph))))
+         targets #{:target_log_prob}]
+     (uop-rt/compile-uop-executable ctx "target_log_prob" invars ast targets))))
 
 (defn compile-gemma4-prefill-executable
-  "Compiles Gemma 4 model AST into a native StableHLO MLIR prefill executable that produces
+  "Compiles Gemma 4 model AST into a native Tensor Logic MLIR prefill executable that produces
    the next-token logits and initial populated KV cache tensors in a single parallel step."
   [{:keys [ctx config opts]} max-seq-len]
   (let [cfg (assoc config :max-seq-len max-seq-len :last-token-only? true)
@@ -356,7 +347,7 @@
      (uop-rt/compile-uop-executable ctx "gemma4_chunked_prefill" invars ast targets))))
 
 (defn compile-gemma4-attention-decode-executable
-  "Compiles single-step Gemma 4 attention decode executable into a native StableHLO MLIR executable.
+  "Compiles single-step Gemma 4 attention decode executable into a native Tensor Logic MLIR executable.
    Supports :kv-quant (:bf16 or :turboquant / :turbo-kv) and optional device buffer slicing."
   ([ctx] (compile-gemma4-attention-decode-executable ctx 1024 {}))
   ([ctx max-seq-len] (compile-gemma4-attention-decode-executable ctx max-seq-len {}))
@@ -409,12 +400,11 @@
                          (when turboquant?
                            {:turboquant? true
                             :k-scale (double (or (:k-scale opts) 1.0))
-                            :v-scale (double (or (:v-scale opts) 1.0))}))]])]
-         graph (lower/ast->graph "gemma4_attention_decode" invars ast #{:ctx})]
-     (xla/compile-graph ctx graph))))
+                            :v-scale (double (or (:v-scale opts) 1.0))}))]])]]
+     (uop-rt/compile-uop-executable ctx "gemma4_attention_decode" invars ast #{:ctx}))))
 
 (defn compile-in-vram-loop-executable
-  "Compiles an end-to-end in-VRAM autoregressive generation loop using StableHLO while-loop lowering with loop-carried KV-Cache."
+  "Compiles an end-to-end in-VRAM autoregressive generation loop using Tensor Logic while-loop lowering with loop-carried KV-Cache."
   [{:keys [ctx config opts]} max-seq-len]
   (let [cfg (assoc config :max-seq-len max-seq-len :last-token-only? true)
         vocab-size (long (or (:vocab-size cfg) 262144))
@@ -499,11 +489,8 @@
                                   [:init_tokens [:tensor [1 max-seq-len] :i32]]]
                                  kv-invars
                                  weight-invars))
-        loop-targets (into [:final_step :final_tokens] kv-final-names)
-        _ (when-not (:quiet opts)
-            (println (format "Lowering declarative Tensor Logic In-VRAM Gemma 4 KV Loop (%d layers, max-seq-len=%d) to StableHLO..."
-                             (:num-layers config) max-seq-len)))
-        loop-graph (lower/ast->graph "gemma4_in_vram_kv_loop" loop-invars loop-ast loop-targets)]
+        loop-targets (into [:final_step :final_tokens] kv-final-names)]
     (when-not (:quiet opts)
-      (println "Compiling In-VRAM KV Loop to native XLA PjRtLoadedExecutable..."))
-    (xla/compile-graph ctx loop-graph)))
+      (println (format "Compiling declarative Tensor Logic In-VRAM Gemma 4 KV Loop (%d layers, max-seq-len=%d) via UOp backend..."
+                       (:num-layers config) max-seq-len)))
+    (uop-rt/compile-uop-executable ctx "gemma4_in_vram_kv_loop" loop-invars loop-ast loop-targets)))

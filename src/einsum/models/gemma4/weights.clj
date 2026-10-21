@@ -51,7 +51,7 @@
     {:data result :scale (float scale)}))
 
 (defn load-weight-buffer
-  "Loads a single weight tensor from `weights-mmap` into PJRT device memory in specified precision.
+  "Loads a single weight tensor from `weights-mmap` into UOp device memory in specified precision.
    Optionally registers the buffer in `arena` (or `arena/*active-arena*`)."
   ([ctx weights-mmap tensor-name shape weight-dtype weight-enum]
    (load-weight-buffer ctx weights-mmap tensor-name shape weight-dtype weight-enum 0.0 nil))
@@ -219,7 +219,7 @@
                  [w-buf scale-buf])))))))))
 
 (defn allocate-device-weights
-  "Loads individual weight tensors for Gemma 4 into PJRT device buffers matching build-tensor-logic-invars.
+  "Loads individual weight tensors for Gemma 4 into UOp device buffers matching build-tensor-logic-invars.
    Registers buffers in session-arena and populates weight-store device-buffers map."
   [{:keys [ctx weights-mmap config session-arena weight-store] :as _session}]
   (let [target-arena (or session-arena arena/*active-arena*)

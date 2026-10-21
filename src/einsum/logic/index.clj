@@ -1,9 +1,9 @@
 (ns einsum.logic.index
-  "Deterministic Einstein summation index partitioning for StableHLO dot_general lowering."
+  "Deterministic Einstein summation index partitioning for Tensor Logic dot_general lowering."
   (:require [clojure.set :as set]))
 
 (defn partition-indices
-  "Deterministically partitions indices for StableHLO dot_general lowering.
+  "Deterministically partitions indices for Tensor Logic dot_general lowering.
    All sets are sorted and converted to vectors to guarantee deterministic dimension bindings:
    - contracting: (lhs ∩ rhs) \\ head
    - batch: lhs ∩ rhs ∩ head

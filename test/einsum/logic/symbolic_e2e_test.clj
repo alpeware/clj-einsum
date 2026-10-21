@@ -1,6 +1,6 @@
 (ns einsum.logic.symbolic-e2e-test
   "End-to-end integration and generative tests for embedding-space symbolic reasoning
-   (Pedro Domingos Section 5, OpenXLA PJRT execution)."
+   (Pedro Domingos Section 5, UOp device runtime execution)."
   (:require [einsum.logic.ast :as ast]
             [einsum.logic.symbolic :as sym]
             [clojure.test :refer [deftest is testing]]
@@ -192,7 +192,7 @@
 ;; ==============================================================================
 
 (deftest test-tempered-query-sigmoid-scaling
-  (testing "tempered-query produces smooth sigmoid scaled probabilities via OpenXLA PJRT"
+  (testing "tempered-query produces smooth sigmoid scaled probabilities via UOp device runtime"
     (let [n 5 d 512
           emb (sym/random-embeddings n d 42)
           facts #{[0 1]}
@@ -291,7 +291,7 @@
                               :body [[:ancestor :x :y] [:parent :y :z]]}]
                       initial-facts {:parent sampled-parent
                                      :ancestor sampled-parent}
-                      ;; 1. Run forward-chain (OpenXLA PJRT execution)
+                      ;; 1. Run forward-chain (UOp device runtime execution)
                       fc-result (sym/forward-chain {:rules rules
                                                     :facts initial-facts
                                                     :n n

@@ -1,7 +1,7 @@
 (ns einsum.logic.agent.state-tracker-test
   "Unit and generative tests for Experiment E4: In-VRAM Datalog Fixpoint State Tracker.
    Rule 1: Strict TDD - invariants and properties defined before implementation."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.agent.state-tracker :as tracker]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
@@ -28,7 +28,7 @@
 
 (deftest test-state-tracker-execution
   (testing "In-VRAM Datalog Fixpoint compiles and tracks state exactly"
-    (let [ctx (xla/get-context)
+    (let [ctx (ein/get-context)
           n 8
           ;; Dependencies: file 0 depends on file 1, file 1 depends on file 2
           ;; Tests: test 6 tests file 0, test 7 tests file 1
@@ -53,7 +53,7 @@
 
 (deftest test-100-turn-constant-memory
   (testing "100-turn simulated agent execution retains strictly constant VRAM memory"
-    (let [ctx (xla/get-context)
+    (let [ctx (ein/get-context)
           n 32
           tracker-session (tracker/init-state-tracker ctx n {:deps #{[0 1] [1 2] [2 3] [3 4]}
                                                              :tests #{[30 0] [31 1]}})

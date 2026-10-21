@@ -8,7 +8,7 @@
             [einsum.uop.lower :as uop-lower]))
 
 ;; =============================================================================
-;; 1. StableHLO Interpreter Gather (Direct op-gather 3D Target Gathering)
+;; 1. Tensor Logic Interpreter Gather (Direct op-gather 3D Target Gathering)
 ;; =============================================================================
 
 (deftest test-gather-3d-target-elements

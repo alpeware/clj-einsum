@@ -1,5 +1,5 @@
 (ns einsum.logic.interpret-test
-  "Tests for the pure-JVM StableHLO interpreter backend (no PJRT/XLA)."
+  "Tests for the pure-JVM Tensor Logic interpreter backend (no UOp/UOp)."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]

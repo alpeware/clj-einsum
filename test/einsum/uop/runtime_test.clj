@@ -5,7 +5,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [einsum.core :as xla]
+            [einsum.core :as ein]
             [einsum.models.gpt2 :as gpt2]
             [einsum.models.smollm :as smollm]))
 
@@ -47,12 +47,12 @@
                       in-spec [[:A [:tensor [m k] :f32]]
                                [:B [:tensor [k n] :f32]]
                                [:bias [:tensor [n] :f32]]]
-                      interp-ctx (xla/init-backend! :interpreter {:quiet? true})
-                      cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})]
-                  (with-open [k-interp (xla/compile-kernel interp-ctx "mm_p" ast {:in in-spec :out [:Z]})
-                              k-cpu (xla/compile-kernel cpu-ctx "mm_p" ast {:in in-spec :out [:Z]})]
-                    (let [ref-out (xla/to-host-slice (k-interp [a b bias]) 0 (* m n) (* m n))
-                          cpu-out (xla/to-host-slice (k-cpu [a b bias]) 0 (* m n) (* m n))]
+                      interp-ctx (ein/init-backend! :interpreter {:quiet? true})
+                      cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})]
+                  (with-open [k-interp (ein/compile-kernel interp-ctx "mm_p" ast {:in in-spec :out [:Z]})
+                              k-cpu (ein/compile-kernel cpu-ctx "mm_p" ast {:in in-spec :out [:Z]})]
+                    (let [ref-out (ein/to-host-slice (k-interp [a b bias]) 0 (* m n) (* m n))
+                          cpu-out (ein/to-host-slice (k-cpu [a b bias]) 0 (* m n) (* m n))]
                       (close-floats? ref-out cpu-out 1e-4))))))
 
 (deftest test-uop-transformer-primitives-parity
@@ -70,15 +70,15 @@
           in-spec [[:x [:tensor [b p d] :f32]]
                    [:g [:tensor [d] :f32]]
                    [:bias [:tensor [d] :f32]]]
-          interp-ctx (xla/init-backend! :interpreter {:quiet? true})
-          uop-cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})
-          uop-auto-ctx (xla/init-backend! :uop {:quiet? true})]
-      (with-open [k-ref (xla/compile-kernel interp-ctx "prim" ast {:in in-spec :out [:out]})
-                  k-cpu (xla/compile-kernel uop-cpu-ctx "prim" ast {:in in-spec :out [:out]})
-                  k-auto (xla/compile-kernel uop-auto-ctx "prim" ast {:in in-spec :out [:out]})]
-        (let [ref-floats (xla/to-host-slice (k-ref [x g bias]) 0 (* b p d) (* b p d))
-              cpu-floats (xla/to-host-slice (k-cpu [x g bias]) 0 (* b p d) (* b p d))
-              auto-floats (xla/to-host-slice (k-auto [x g bias]) 0 (* b p d) (* b p d))]
+          interp-ctx (ein/init-backend! :interpreter {:quiet? true})
+          uop-cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})
+          uop-auto-ctx (ein/init-backend! :uop {:quiet? true})]
+      (with-open [k-ref (ein/compile-kernel interp-ctx "prim" ast {:in in-spec :out [:out]})
+                  k-cpu (ein/compile-kernel uop-cpu-ctx "prim" ast {:in in-spec :out [:out]})
+                  k-auto (ein/compile-kernel uop-auto-ctx "prim" ast {:in in-spec :out [:out]})]
+        (let [ref-floats (ein/to-host-slice (k-ref [x g bias]) 0 (* b p d) (* b p d))
+              cpu-floats (ein/to-host-slice (k-cpu [x g bias]) 0 (* b p d) (* b p d))
+              auto-floats (ein/to-host-slice (k-auto [x g bias]) 0 (* b p d) (* b p d))]
           (is (close-floats? ref-floats cpu-floats 1e-4))
           (is (close-floats? ref-floats auto-floats 1e-4)))))))
 
@@ -156,27 +156,27 @@
           pos-ids (int-array [0 1 2 3])
 
           run-gpt2 (fn [backend-kw]
-                     (let [ctx (xla/init-backend! backend-kw {:quiet? true})]
-                       (with-open [arena (xla/create-arena ctx)]
-                         (let [store (xla/create-weight-store ctx (assoc gpt2-weights :header gpt2-header) {:arena arena})]
-                           (with-open [k (xla/compile-kernel ctx "gpt2_1l" gpt2-ast
+                     (let [ctx (ein/init-backend! backend-kw {:quiet? true})]
+                       (with-open [arena (ein/create-arena ctx)]
+                         (let [store (ein/create-weight-store ctx (assoc gpt2-weights :header gpt2-header) {:arena arena})]
+                           (with-open [k (ein/compile-kernel ctx "gpt2_1l" gpt2-ast
                                                              {:in {:x [:tensor [1 max-seq-len] :i32]
                                                                    :pos_ids [:tensor [1 max-seq-len] :i32]}
                                                               :weights store
                                                               :out [:logits]})]
                              (let [{:keys [logits]} (k {:x toks :pos_ids pos-ids})]
-                               (xla/to-host-slice logits (dec max-seq-len) vocab-size (* max-seq-len vocab-size))))))))
+                               (ein/to-host-slice logits (dec max-seq-len) vocab-size (* max-seq-len vocab-size))))))))
 
           run-smollm (fn [backend-kw]
-                       (let [ctx (xla/init-backend! backend-kw {:quiet? true})]
-                         (with-open [arena (xla/create-arena ctx)]
-                           (let [store (xla/create-weight-store ctx (assoc smollm-weights :header smollm-header) {:arena arena})]
-                             (with-open [k (xla/compile-kernel ctx "smollm_1l" smollm-ast
+                       (let [ctx (ein/init-backend! backend-kw {:quiet? true})]
+                         (with-open [arena (ein/create-arena ctx)]
+                           (let [store (ein/create-weight-store ctx (assoc smollm-weights :header smollm-header) {:arena arena})]
+                             (with-open [k (ein/compile-kernel ctx "smollm_1l" smollm-ast
                                                                {:in {:x [:tensor [1 max-seq-len] :i32]}
                                                                 :weights store
                                                                 :out [:logits]})]
                                (let [{:keys [logits]} (k {:x toks})]
-                                 (xla/to-host-slice logits (dec max-seq-len) vocab-size (* max-seq-len vocab-size))))))))
+                                 (ein/to-host-slice logits (dec max-seq-len) vocab-size (* max-seq-len vocab-size))))))))
           gpt2-ref (run-gpt2 :interpreter)
           gpt2-cpu (run-gpt2 :uop-cpu)
           gpt2-uop (run-gpt2 :uop)
@@ -199,15 +199,15 @@
                [:= [:Y :i :j] [:A :i :k] [:B :k :j]]]
           in-spec [[:A [:tensor [m k] :f32]]
                    [:B [:tensor [k n] :bf16]]]
-          interp-ctx (xla/init-backend! :interpreter {:quiet? true})
-          cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})
-          uop-ctx (xla/init-backend! :uop {:quiet? true})]
-      (with-open [k-ref (xla/compile-kernel interp-ctx "mm_bf16_test" ast {:in in-spec :out [:Y]})
-                  k-cpu (xla/compile-kernel cpu-ctx "mm_bf16_test" ast {:in in-spec :out [:Y]})
-                  k-uop (xla/compile-kernel uop-ctx "mm_bf16_test" ast {:in in-spec :out [:Y]})]
-        (let [ref-out (xla/to-host-slice (k-ref [a-floats b-shorts]) 0 (* m n) (* m n))
-              cpu-out (xla/to-host-slice (k-cpu [a-floats b-shorts]) 0 (* m n) (* m n))
-              uop-out (xla/to-host-slice (k-uop [a-floats b-shorts]) 0 (* m n) (* m n))]
+          interp-ctx (ein/init-backend! :interpreter {:quiet? true})
+          cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})
+          uop-ctx (ein/init-backend! :uop {:quiet? true})]
+      (with-open [k-ref (ein/compile-kernel interp-ctx "mm_bf16_test" ast {:in in-spec :out [:Y]})
+                  k-cpu (ein/compile-kernel cpu-ctx "mm_bf16_test" ast {:in in-spec :out [:Y]})
+                  k-uop (ein/compile-kernel uop-ctx "mm_bf16_test" ast {:in in-spec :out [:Y]})]
+        (let [ref-out (ein/to-host-slice (k-ref [a-floats b-shorts]) 0 (* m n) (* m n))
+              cpu-out (ein/to-host-slice (k-cpu [a-floats b-shorts]) 0 (* m n) (* m n))
+              uop-out (ein/to-host-slice (k-uop [a-floats b-shorts]) 0 (* m n) (* m n))]
           (is (close-floats? ref-out cpu-out 1e-2))
           (is (close-floats? ref-out uop-out 1e-2)))))))
 
@@ -221,10 +221,10 @@
                       ast [:= [:Y :i :j] [:A :i :k] [:B :k :j]]
                       in-spec [[:A [:tensor [m k] :f32]]
                                [:B [:tensor [k n] :bf16]]]
-                      interp-ctx (xla/init-backend! :interpreter {:quiet? true})
-                      cpu-ctx (xla/init-backend! :uop-cpu {:quiet? true})]
-                  (with-open [k-ref (xla/compile-kernel interp-ctx "mm_p_bf16" ast {:in in-spec :out [:Y]})
-                              k-cpu (xla/compile-kernel cpu-ctx "mm_p_bf16" ast {:in in-spec :out [:Y]})]
-                    (let [ref-out (xla/to-host-slice (k-ref [a-floats b-shorts]) 0 (* m n) (* m n))
-                          cpu-out (xla/to-host-slice (k-cpu [a-floats b-shorts]) 0 (* m n) (* m n))]
+                      interp-ctx (ein/init-backend! :interpreter {:quiet? true})
+                      cpu-ctx (ein/init-backend! :uop-cpu {:quiet? true})]
+                  (with-open [k-ref (ein/compile-kernel interp-ctx "mm_p_bf16" ast {:in in-spec :out [:Y]})
+                              k-cpu (ein/compile-kernel cpu-ctx "mm_p_bf16" ast {:in in-spec :out [:Y]})]
+                    (let [ref-out (ein/to-host-slice (k-ref [a-floats b-shorts]) 0 (* m n) (* m n))
+                          cpu-out (ein/to-host-slice (k-cpu [a-floats b-shorts]) 0 (* m n) (* m n))]
                       (close-floats? ref-out cpu-out 1e-2))))))

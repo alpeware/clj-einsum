@@ -1,510 +1,442 @@
 (ns einsum.core
-  "High-level Public Clojure API for OpenXLA PJRT backend initialization, compilation, and execution."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str]
-            [einsum.compiler.compile :as compile]
-            [einsum.compiler.fuse :as fuse]
-            [einsum.compiler.kernel :as kernel]
-            [einsum.compiler.pjrt :as pjrt]
-            [einsum.compiler.pjrt.custom-call :as custom-call]
-            [einsum.compiler.pjrt.version :as v]
+  "High-level Public Clojure API for Declarative UOp compilation, execution, and scoped memory management."
+  (:refer-clojure :exclude [compile])
+  (:require [clojure.string :as str]
             [einsum.logic.interpret :as interpret]
             [einsum.runtime.arena :as arena]
-            [einsum.runtime.weights :as weights])
+            [einsum.runtime.weights :as weights]
+            [einsum.uop.lower :as uop-lower]
+            [einsum.uop.runtime :as uop-rt])
   (:import [java.lang.foreign MemorySegment ValueLayout]))
 
 (def ^:dynamic *default-context* nil)
 
-(def BACKEND-LIBRARY-MAP
-  {:cpu    {:default "bin/libpjrt_cpu.so"  :env "PJRT_CPU_LIBRARY_PATH"}
-   :sycl   {:default "bin/libpjrt_sycl.so" :env "PJRT_SYCL_LIBRARY_PATH"}
-   :rocm   {:default "bin/libpjrt_rocm.so" :env "PJRT_ROCM_LIBRARY_PATH"}
-   :cuda12 {:default "bin/libpjrt_cuda.so" :env "PJRT_CUDA_LIBRARY_PATH"}})
-
-(defn setenv-native [^String k ^String v]
-  (try
-    (let [linker (java.lang.foreign.Linker/nativeLinker)
-          default-lookup (.defaultLookup linker)
-          setenv-opt (.find default-lookup "setenv")]
-      (when (.isPresent setenv-opt)
-        (let [setenv-ptr ^java.lang.foreign.MemorySegment (.get setenv-opt)
-              fd (java.lang.foreign.FunctionDescriptor/of java.lang.foreign.ValueLayout/JAVA_INT
-                                                          (into-array java.lang.foreign.MemoryLayout
-                                                                      [java.lang.foreign.ValueLayout/ADDRESS
-                                                                       java.lang.foreign.ValueLayout/ADDRESS
-                                                                       java.lang.foreign.ValueLayout/JAVA_INT]))
-              handle (.downcallHandle linker setenv-ptr fd (make-array java.lang.foreign.Linker$Option 0))]
-          (with-open [arena (java.lang.foreign.Arena/ofConfined)]
-            (let [k-seg (.allocateFrom arena k)
-                  v-seg (.allocateFrom arena v)]
-              (.invokeWithArguments handle [k-seg v-seg (int 1)]))))))
-    (catch Exception _ nil)))
-
-(defn getenv-native [^String k]
-  (try
-    (let [linker (java.lang.foreign.Linker/nativeLinker)
-          default-lookup (.defaultLookup linker)
-          getenv-opt (.find default-lookup "getenv")]
-      (when (.isPresent getenv-opt)
-        (let [getenv-ptr ^java.lang.foreign.MemorySegment (.get getenv-opt)
-              fd (java.lang.foreign.FunctionDescriptor/of java.lang.foreign.ValueLayout/ADDRESS
-                                                          (into-array java.lang.foreign.MemoryLayout
-                                                                      [java.lang.foreign.ValueLayout/ADDRESS]))
-              handle (.downcallHandle linker getenv-ptr fd (make-array java.lang.foreign.Linker$Option 0))]
-          (with-open [arena (java.lang.foreign.Arena/ofConfined)]
-            (let [k-seg (.allocateFrom arena k)
-                  res-ptr ^java.lang.foreign.MemorySegment (.invokeWithArguments handle [k-seg])]
-              (when (and res-ptr (not (.equals res-ptr java.lang.foreign.MemorySegment/NULL)))
-                (.getString (.reinterpret res-ptr Long/MAX_VALUE) 0)))))))
-    (catch Exception _ nil)))
-
-(defn unsetenv-native [^String k]
-  (try
-    (let [linker (java.lang.foreign.Linker/nativeLinker)
-          default-lookup (.defaultLookup linker)
-          unsetenv-opt (.find default-lookup "unsetenv")]
-      (when (.isPresent unsetenv-opt)
-        (let [unsetenv-ptr ^java.lang.foreign.MemorySegment (.get unsetenv-opt)
-              fd (java.lang.foreign.FunctionDescriptor/of java.lang.foreign.ValueLayout/JAVA_INT
-                                                          (into-array java.lang.foreign.MemoryLayout
-                                                                      [java.lang.foreign.ValueLayout/ADDRESS]))
-              handle (.downcallHandle linker unsetenv-ptr fd (make-array java.lang.foreign.Linker$Option 0))]
-          (with-open [arena (java.lang.foreign.Arena/ofConfined)]
-            (let [k-seg (.allocateFrom arena k)]
-              (.invokeWithArguments handle [k-seg]))))))
-    (catch Exception _ nil)))
-
-(defn determine-optimal-xla-flags
-  "Pure function computing optimal XLA compiler flags and environment variables based on hardware target and user options."
-  ([target] (determine-optimal-xla-flags target {} {}))
-  ([target probe-info] (determine-optimal-xla-flags target probe-info {}))
-  ([target _probe-info opts]
-   (let [disable-defaults? (boolean (:disable-defaults? opts))
-         user-xla-flags (or (:xla-flags opts) "")
-         autotune-level (or (:autotune-level opts) 4)
-         triton? (get opts :triton? true)
-         sdpa? (get opts :sdpa? true)
-         latency-hiding? (get opts :latency-hiding? true)
-         async-stream? (get opts :async-stream? true)
-         cpus (.availableProcessors (Runtime/getRuntime))
-
-         target-kw (if (string? target)
-                     (cond
-                       (str/includes? target "cpu") :cpu
-                       (str/includes? target "rocm") :rocm
-                       (str/includes? target "cuda") :cuda12
-                       (str/includes? target "sycl") :sycl
-                       :else :cpu)
-                     target)]
-     (if disable-defaults?
-       {:xla-flags user-xla-flags
-        :env-vars {}
-        :autotune-level autotune-level
-        :cache-dir (:cache-dir opts)}
-       (let [existing-xla-flags (or (System/getenv "XLA_FLAGS") "")
-             xla-cache-dir (try
-                             (let [dir (io/file (System/getProperty "user.home") ".cache" "xla")]
-                               (.mkdirs dir)
-                               (.getAbsolutePath dir))
-                             (catch Exception _ nil))
-             base-flags (cond-> []
-                          (and (some? xla-cache-dir) (contains? #{:rocm :cuda12 :sycl} target-kw))
-                          (into [(str "--xla_gpu_per_fusion_autotune_cache_dir=" xla-cache-dir)
-                                 (str "--xla_gpu_experimental_autotuner_cache_dir=" xla-cache-dir)
-                                 (str "--xla_gpu_kernel_cache_file=" xla-cache-dir "/kernel.cache")])
-
-                          (= target-kw :cuda12)
-                          (conj "--xla_gpu_enable_cublaslt=true")
-
-                          (contains? #{:rocm :cuda12 :sycl} target-kw)
-                          (conj (str "--xla_gpu_autotune_level=" autotune-level))
-
-                          (and triton? (= target-kw :cuda12))
-                          (conj "--xla_gpu_triton_gemm_any=true")
-
-                          (and sdpa? (= target-kw :cuda12))
-                          (conj "--xla_gpu_enable_sdpa=true")
-
-                          (and latency-hiding? (contains? #{:rocm :cuda12} target-kw))
-                          (conj "--xla_gpu_enable_latency_hiding_scheduler=true")
-
-                          (and async-stream? (contains? #{:cuda12 :sycl} target-kw))
-                          (conj "--xla_gpu_enable_highest_priority_async_stream=true")
-
-                          (= target-kw :rocm)
-                          (conj "--xla_gpu_enable_command_buffer=")
-
-                          (contains? #{:rocm :cuda12 :sycl} target-kw)
-                          (conj (str "--xla_gpu_force_compilation_parallelism=" cpus))
-
-                          (= target-kw :cpu)
-                          (into ["--xla_cpu_multi_thread_eigen=true"
-                                 (str "--xla_gpu_force_compilation_parallelism=" cpus)]))
-
-             all-flags-str (str/join " " (distinct (remove str/blank? (concat (str/split existing-xla-flags #"\s+")
-                                                                              base-flags
-                                                                              (str/split user-xla-flags #"\s+")))))
-             cache-dir (or (:cache-dir opts)
-                           (when (= target-kw :rocm)
-                             (try
-                               (let [dir (io/file (System/getProperty "user.home") ".cache" "hsa_cache")]
-                                 (.mkdirs dir)
-                                 (.getAbsolutePath dir))
-                               (catch Exception _ nil))))
-
-             env-vars (cond-> {"TF_CPP_MIN_LOG_LEVEL" "3"
-                               "GLOG_minloglevel" "3"}
-                        (= target-kw :rocm)
-                        (assoc "HSA_OVERRIDE_GFX_VERSION" (or (:hsa-override-gfx-version opts)
-                                                              (:gfx-version opts)
-                                                              (getenv-native "HSA_OVERRIDE_GFX_VERSION")
-                                                              (System/getenv "HSA_OVERRIDE_GFX_VERSION")
-                                                              "11.0.0")
-                               "ROCR_VISIBLE_DEVICES" (or (:rocr-visible-devices opts)
-                                                          (:gpu-device opts)
-                                                          (getenv-native "ROCR_VISIBLE_DEVICES")
-                                                          (System/getenv "ROCR_VISIBLE_DEVICES")
-                                                          "0")
-                               "HIP_VISIBLE_DEVICES" (or (:hip-visible-devices opts)
-                                                         (:gpu-device opts)
-                                                         (getenv-native "HIP_VISIBLE_DEVICES")
-                                                         (System/getenv "HIP_VISIBLE_DEVICES")
-                                                         "0"))
-                        (some? cache-dir)
-                        (assoc "TF_XLA_HSACO_CACHE_DIR" cache-dir)
-                        (some? xla-cache-dir)
-                        (assoc "XLA_PERSISTENT_COMPILATION_CACHE_DIR" xla-cache-dir))]
-         (doseq [[k v] env-vars]
-           (System/setProperty k v)
-           (setenv-native k v))
-         (when-not (str/blank? all-flags-str)
-           (System/setProperty "XLA_FLAGS" all-flags-str)
-           (setenv-native "XLA_FLAGS" all-flags-str))
-         {:xla-flags all-flags-str
-          :env-vars env-vars
-          :autotune-level autotune-level
-          :cache-dir cache-dir})))))
+;; -----------------------------------------------------------------------------
+;; Backend Context Management
+;; -----------------------------------------------------------------------------
 
 (defn init-backend!
-  "Initializes PJRT C API client runtime, UOp backend (:uop, :uop-cpu, :uop-rocm), or pure-JVM interpreter (:interpreter, :interp).
-   Accepts optional `client-opts` map (defaults to `{:allocator \"platform\"}`).
-   Sets and returns the thread-root default context *default-context*."
-  ([] (init-backend! :cpu))
-  ([target] (init-backend! target {:allocator "platform"}))
-  ([target client-opts]
-   (cond
-     (contains? #{:interpreter :interp} target)
-     (let [ctx {:backend :interpreter
+  "Initializes UOp backend (:uop-cpu, :uop-rocm, :uop) or pure-JVM interpreter (:interpreter, :interp).
+   Accepts optional `opts` map. Sets and returns the thread-root default context *default-context*."
+  ([] (init-backend! :uop-cpu {}))
+  ([target] (init-backend! target {}))
+  ([target opts]
+   (let [ctx (cond
+               (contains? #{:interpreter :interp} target)
+               {:backend :interpreter
                 :target :interpreter
                 :platform "interpreter"
                 :client nil
-                :destroy-fn (fn [_ _] nil)}]
-       (alter-var-root #'*default-context* (constantly ctx))
-       (when-not (or (Boolean/getBoolean "clj-xla.quiet") (:quiet? client-opts))
-         (println "clj-xla initialized Pure-JVM Interpreter Backend: [interpreter] (no native PJRT required)"))
-       ctx)
+                :destroy-fn (fn [_ _] nil)}
 
-     (contains? #{:uop :uop-cpu :uop-rocm} target)
-     (let [init-uop (requiring-resolve 'einsum.uop.runtime/init-uop-context!)
-           ctx (init-uop target client-opts)]
-       (alter-var-root #'*default-context* (constantly ctx))
-       (when-not (or (Boolean/getBoolean "clj-xla.quiet") (:quiet? client-opts))
-         (println (format "clj-xla initialized Native UOp Backend: [%s] (zero OpenXLA PJRT required)" (:platform ctx))))
-       ctx)
+               (contains? #{:uop :uop-cpu :uop-rocm} target)
+               (uop-rt/init-uop-context! target opts)
 
-     :else
-     (let [probe-info (try (v/probe-system-driver) (catch Exception _ {}))
-           flag-config (determine-optimal-xla-flags target probe-info client-opts)
-           {:keys [xla-flags env-vars]} flag-config]
-       (doseq [[k v] env-vars]
-         (System/setProperty k v)
-         (setenv-native k v))
-       (when-not (str/blank? xla-flags)
-         (System/setProperty "XLA_FLAGS" xla-flags)
-         (setenv-native "XLA_FLAGS" xla-flags))
+               :else
+               (uop-rt/init-uop-context! :uop-cpu opts))]
+     (alter-var-root #'*default-context* (constantly ctx))
+     (when-not (or (Boolean/getBoolean "clj-einsum.quiet") (:quiet? opts))
+       (println (format "clj-einsum initialized Backend: [%s]" (or (:platform ctx) (name target)))))
+     ctx)))
 
-       (let [lib-path (cond
-                        (string? target) target
-                        (keyword? target) (let [{:keys [default env]} (get BACKEND-LIBRARY-MAP target)]
-                                            (or (when env (System/getenv env))
-                                                default
-                                                (throw (ex-info "Unknown backend target" {:target target}))))
-                        :else (throw (ex-info "Invalid backend target specifier" {:target target})))
-             api-ctx (pjrt/load-plugin! lib-path)
-             client (pjrt/create-client api-ctx (or client-opts {}))
-             pname (pjrt/platform-name api-ctx client)
-             ctx (assoc api-ctx
-                        :client client
-                        :platform pname
-                        :target target
-                        :probe probe-info
-                        :xla-flags flag-config)]
-         (alter-var-root #'*default-context* (constantly ctx))
-         (when (= target :rocm)
-           (try (custom-call/register-w4a16-gemv-kernel! ctx) (catch Exception _ nil)))
-         (when-not (or (Boolean/getBoolean "clj-xla.quiet") (:quiet? client-opts))
-           (println (format "clj-xla initialized PJRT Backend: [%s] via plugin [%s]" pname lib-path))
-           (when-not (str/blank? xla-flags)
-             (println (format "  ↳ Autotuned XLA_FLAGS: %s" xla-flags))))
-         ctx)))))
-
-(defn init-cpu! [] (init-backend! :cpu))
-(defn init-sycl! [] (init-backend! :sycl))
-(defn init-rocm! [] (init-backend! :rocm))
-(defn init-cuda! [] (init-backend! :cuda12))
-(defn init-uop!
-  "Initializes the native UOp backend (:uop, :uop-cpu, or :uop-rocm)."
-  ([] (init-backend! :uop))
-  ([opts] (init-backend! :uop opts)))
 (defn init-interpreter!
-  "Initializes the pure-JVM StableHLO interpreter backend (zero native PJRT required).
-   Sets and returns the thread-root default context *default-context*."
-  ([] (init-backend! :interpreter))
+  "Initializes and returns a pure-JVM reference interpreter backend context."
+  ([] (init-interpreter! {}))
   ([opts] (init-backend! :interpreter opts)))
 
+(defn init-cpu!
+  "Initializes and returns a default UOp CPU backend context."
+  ([] (init-cpu! {}))
+  ([opts] (init-backend! :uop-cpu opts)))
+
+(defn init-rocm!
+  "Initializes and returns a default UOp ROCm backend context."
+  ([] (init-rocm! {}))
+  ([opts] (init-backend! :uop-rocm opts)))
+
+(defn init-uop!
+  "Initializes and returns a native UOp backend context."
+  ([] (init-uop! :uop-cpu {}))
+  ([target] (init-uop! target {}))
+  ([target opts] (init-backend! target opts)))
+
 (defn get-context
-  "Returns current default PJRT context or initializes CPU client."
+  "Returns the currently active backend context, initializing default `:uop-cpu` if nil."
   []
-  (or *default-context* (init-cpu!)))
+  (or *default-context* (init-backend! :uop-cpu {:quiet? true})))
+
+;; -----------------------------------------------------------------------------
+;; Classic Einsum Spec & Planning
+;; -----------------------------------------------------------------------------
+
+(defn parse-spec
+  "Parses an Einstein summation subscript string (e.g. \"ij,jk->ik\" or \"i,j->ij\")
+   into input and output index vector sequences."
+  [spec-str]
+  (let [spec-str (str/trim spec-str)
+        [in-part out-part] (str/split spec-str #"->")
+        in-subs (mapv (fn [s] (mapv str (remove str/blank? (str/split (str/trim s) #""))))
+                      (str/split in-part #","))
+        out-sub (if out-part
+                  (mapv str (remove str/blank? (str/split (str/trim out-part) #"")))
+                  (let [freqs (frequencies (apply concat in-subs))]
+                    (vec (sort (for [[idx cnt] freqs :when (= cnt 1)] idx)))))]
+    {:inputs in-subs :output out-sub}))
+
+(defn plan
+  "Creates an execution contraction plan from a spec string or parsed spec and operand shapes."
+  [spec-str-or-parsed shapes]
+  (let [parsed (if (string? spec-str-or-parsed) (parse-spec spec-str-or-parsed) spec-str-or-parsed)
+        {:keys [inputs output]} parsed
+        idx->dim (reduce (fn [acc [in-idxs shape]]
+                           (reduce (fn [m [idx dim]] (assoc m idx dim))
+                                   acc
+                                   (map vector in-idxs shape)))
+                         {}
+                         (map vector inputs shapes))
+        out-shape (mapv #(get idx->dim %) output)]
+    {:spec parsed
+     :inputs inputs
+     :output output
+     :idx->dim idx->dim
+     :out-shape out-shape}))
+
+;; -----------------------------------------------------------------------------
+;; UOp Compilation & Execution
+;; -----------------------------------------------------------------------------
+
+(declare execute)
+
+(defrecord CompiledExecutable [backend name graph invars outvars uop-executable uop-graph ctx schedule module handle prepared-kernels num-slots slot-ptrs intermediate-buffers output-pool exec-turn exec-arena warmed-up? lock]
+  java.lang.AutoCloseable
+  (close [this]
+    (when (or (:uop-executable? this) (:intermediate-buffers this))
+      (try
+        (uop-rt/destroy-uop-executable! ctx this)
+        (catch Exception _ nil))))
+  clojure.lang.IFn
+  (invoke [this]
+    (execute this []))
+  (invoke [this a]
+    (execute this a))
+  (invoke [this a b]
+    (execute this [a b]))
+  (invoke [this a b c]
+    (execute this [a b c]))
+  (invoke [this a b c d]
+    (execute this [a b c d]))
+  (invoke [this a b c d e]
+    (execute this [a b c d e]))
+  (applyTo [this args]
+    (execute this (vec args))))
 
 (defn compile-graph
-  "Compiles EDN SSA graph to a native PJRT loaded executable or pure-JVM interpreter executable."
-  ([graph]
-   (compile-graph (get-context) graph))
+  "Compiles an AST or lowered UOp graph into an executable for the given or current context."
+  ([graph] (compile-graph (get-context) graph))
   ([ctx graph]
-   (cond
-     (= (:backend ctx) :interpreter)
-     (let [fused (fuse/fuse-graph graph)]
-       {:handle fused
-        :graph fused
-        :backend :interpreter
-        :ctx ctx})
+   (let [lowered-graph (if (or (contains? graph :outputs) (contains? graph :eqns))
+                         graph
+                         (uop-lower/ast->uop-graph (:name graph "graph") (:invars graph) (or (:ast graph) graph) (:outvars graph)))
+         res (if (contains? lowered-graph :eqns)
+               {:backend :interpreter :graph lowered-graph :ctx ctx :invars (:invars lowered-graph) :outvars (:outvars lowered-graph)}
+               (let [uop-target (if (or (= (:backend ctx) :interpreter) (= (:target ctx) :interpreter))
+                                  :cpu
+                                  (or (:uop-target ctx) :cpu))
+                     exec-ctx (assoc ctx :uop-target uop-target)]
+                 (uop-rt/compile-uop-executable exec-ctx lowered-graph)))]
+     (map->CompiledExecutable res))))
 
-     (or (= (:backend ctx) :uop)
-         (= (:backend ctx) :uop-cpu)
-         (= (:backend ctx) :uop-rocm)
-         (contains? graph :outputs)
-         (contains? graph :uops)
-         (contains? graph :ast))
-     (let [uop-ctx (if (or (= (:backend ctx) :uop)
-                           (= (:backend ctx) :uop-cpu)
-                           (= (:backend ctx) :uop-rocm))
-                     ctx
-                     (let [init-fn (requiring-resolve 'einsum.uop.runtime/init-uop-context)]
-                       (init-fn :uop-cpu {:quiet? true})))
-           compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
-       (if compile-uop
-         (compile-uop uop-ctx (:name graph "graph") (:invars graph) (if (contains? graph :outputs) graph (or (:ast graph) graph)) (:outvars graph))
-         (throw (ex-info "UOp backend runtime not found" {:ctx ctx}))))
+(defn compile-kernel
+  "Compiles a named kernel AST or graph with signature options into an executable.
+   Supports automatic invar inference and weight binding when :weights is passed in `opts`."
+  ([ctx name-str ast-or-graph] (compile-kernel ctx name-str ast-or-graph {}))
+  ([ctx name-str ast-or-graph opts]
+   (let [in-arg (or (:in opts) (:inputs opts) (:invars opts) (:invars ast-or-graph))
+         weights-store (or (:weights opts) (:weight-store opts))
+         out-arg (or (:out opts) (:outputs opts) (:targets opts) (:outvars ast-or-graph) [:logits])
+         out-spec (cond
+                    (vector? out-arg) out-arg
+                    (set? out-arg) (vec out-arg)
+                    (keyword? out-arg) [out-arg]
+                    :else (vec out-arg))
+         in-spec (cond
+                   (and (vector? in-arg) (seq in-arg) (vector? (first in-arg)))
+                   (if weights-store
+                     (weights/infer-invars ast-or-graph in-arg weights-store)
+                     in-arg)
 
-     :else
-     (let [exec (compile/compile-graph ctx (:client ctx) graph)]
-       (if (map? exec)
-         (assoc exec :ctx ctx)
-         exec)))))
+                   weights-store
+                   (weights/infer-invars ast-or-graph (or in-arg {}) weights-store)
 
-(defn buffer-from-host-buffer
-  "Transfers host primitive array/buffer into native PJRT device memory buffer or UOp device buffer."
-  ([host-data shape dtype-enum]
-   (let [ctx (get-context)]
-     (buffer-from-host-buffer ctx (:client ctx) host-data shape dtype-enum)))
-  ([ctx client host-data shape dtype-enum]
-   (if (= (:backend ctx) :uop)
-     (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)
-           dt (if (keyword? dtype-enum)
-                dtype-enum
-                (case (int dtype-enum) 1 :i1 2 :i8 4 :i32 10 :f16 11 :f32 13 :bf16 :f32))]
-       (host->dev ctx host-data shape dt))
-     (pjrt/buffer-from-host-buffer ctx client host-data shape dtype-enum))))
+                   (map? in-arg)
+                   (mapv (fn [[k spec]] [k spec]) in-arg)
+
+                   :else
+                   (or in-arg []))
+         lowered-graph (if (or (contains? ast-or-graph :outputs) (contains? ast-or-graph :eqns))
+                         ast-or-graph
+                         (uop-lower/ast->uop-graph name-str in-spec ast-or-graph out-spec))
+         res (if (contains? lowered-graph :eqns)
+               {:backend :interpreter
+                :name name-str
+                :graph lowered-graph
+                :opts opts
+                :weights weights-store
+                :ctx ctx
+                :invars in-spec
+                :outvars out-spec}
+               (let [uop-target (if (or (= (:backend ctx) :interpreter) (= (:target ctx) :interpreter))
+                                  :cpu
+                                  (or (:uop-target ctx) :cpu))
+                     exec-ctx (assoc ctx :uop-target uop-target)
+                     uop-exec (uop-rt/compile-uop-executable exec-ctx name-str in-spec lowered-graph out-spec)]
+                 (assoc uop-exec :opts opts :weights weights-store :backend (or (:backend ctx) :uop))))]
+     (map->CompiledExecutable res))))
+
+(defn compile
+  "Compiles an AST or lowered UOp graph into an executable."
+  ([ast-or-graph] (compile-graph (get-context) ast-or-graph))
+  ([ctx ast-or-graph] (compile-graph ctx ast-or-graph)))
+
+(defn- normalize-invars
+  [raw-invars]
+  (let [entries (cond
+                  (vector? raw-invars) raw-invars
+                  (map? raw-invars) (vec raw-invars)
+                  (sequential? raw-invars) (vec raw-invars)
+                  :else [])]
+    (mapv (fn [entry]
+            (if (and (vector? entry) (= 2 (count entry)))
+              (let [[v-name spec] entry]
+                (cond
+                  (vector? spec)
+                  [v-name (second spec) (nth spec 2 :f32)]
+                  (map? spec)
+                  [v-name (:shape spec) (:dtype spec :f32)]
+                  :else
+                  [v-name nil :f32]))
+              [(first entry) nil :f32]))
+          entries)))
 
 (defn execute
-  "Executes a compiled StableHLO graph executable on the PJRT device runtime or pure-JVM interpreter."
+  "Executes a compiled executable, interpreter graph, or callable with given inputs."
   [exec & inputs]
-  (let [flat-inputs (if (and (= 1 (count inputs)) (vector? (first inputs)))
-                      (first inputs)
-                      inputs)
-        ctx (or (when (map? exec) (:ctx exec)) (get-context))
-        exec-handle (cond
-                      (map? exec) (or (:handle exec) exec)
-                      :else exec)]
-    (if-not exec-handle
-      (throw (ex-info "Invalid executable handle" {:exec exec}))
-      (cond
-        (= (:backend ctx) :interpreter)
-        (let [invars (or (get-in exec [:graph :invars]) [])
-              input-tensors (mapv (fn [idx input-data]
-                                    (if (and (map? input-data) (contains? input-data :data))
-                                      input-data
-                                      (let [[_var-name [_kw shape dtype]] (nth invars idx)
-                                            shape-vec (vec shape)
-                                            dt (or dtype :f32)]
-                                        {:dtype (weights/normalize-dtype dt)
-                                         :shape shape-vec
-                                         :data input-data})))
-                                  (range (count flat-inputs))
-                                  flat-inputs)
-              bindings (zipmap (map first invars) input-tensors)
-              out-map (interpret/execute (:graph exec) bindings)]
-          (if (= 1 (count (get-in exec [:graph :outvars])))
-            (val (first out-map))
-            out-map))
+  (let [ctx (or (when (map? exec) (:ctx exec)) (get-context))
+        weights-store (or (:weights exec) (get-in exec [:opts :weights]))
+        raw-invars (or (get-in exec [:graph :invars])
+                       (get-in exec [:uop-graph :invars])
+                       (:invars exec)
+                       [])
+        norm-invars (normalize-invars raw-invars)
+        single-map-input? (and (= 1 (count inputs))
+                               (map? (first inputs))
+                               (not (:uop-buffer? (first inputs)))
+                               (not (contains? (first inputs) :data)))
+        input-map (when single-map-input? (first inputs))
+        flat-inputs (cond
+                      single-map-input?
+                      (mapv (fn [[v-name _shape _dtype]]
+                              (if (contains? input-map v-name)
+                                (get input-map v-name)
+                                (when weights-store (weights/get-device-buffer weights-store v-name))))
+                            norm-invars)
 
-        (or (= (:backend ctx) :uop) (:uop-executable? exec))
-        (let [exec-uop (requiring-resolve 'einsum.uop.runtime/execute-uop-executable)
-              out-map (exec-uop ctx exec flat-inputs)
-              outvars (or (get-in exec [:uop-graph :outvars]) (get-in exec [:graph :outvars]))
-              ordered (if (seq outvars)
-                        (mapv #(get out-map %) outvars)
-                        (vec (vals out-map)))]
-          (if (= 1 (count ordered))
-            (first ordered)
-            ordered))
+                      (and (= 1 (count inputs)) (vector? (first inputs)))
+                      (let [in-vec (first inputs)]
+                        (if (and weights-store (> (count norm-invars) (count in-vec)))
+                          (mapv (fn [idx [v-name _shape _dtype]]
+                                  (if (< idx (count in-vec))
+                                    (nth in-vec idx)
+                                    (weights/get-device-buffer weights-store v-name)))
+                                (range (count norm-invars))
+                                norm-invars)
+                          in-vec))
 
-        :else
-        (let [invars (or (get-in exec [:graph :invars]) [])
-              all-segs? (every? #(instance? MemorySegment %) flat-inputs)
-              device-buffers (if all-segs?
-                               flat-inputs
-                               (mapv (fn [idx input-data]
-                                       (if (instance? MemorySegment input-data)
-                                         input-data
-                                         (let [[_var-name [_kw shape dtype]] (nth invars idx)
-                                               dtype-enum (case dtype :i1 1 :bool 1 :pred 1 :i8 2 :i32 4 :f32 11 :bf16 13 :f16 10 11)]
-                                           (pjrt/buffer-from-host-buffer ctx (:client ctx) input-data shape dtype-enum))))
-                                     (range (count flat-inputs))
-                                     flat-inputs))
-              num-outputs (if (map? exec) (count (get-in exec [:graph :outvars] [1])) 1)
-              out-buf (pjrt/execute-executable ctx exec-handle device-buffers num-outputs)]
-          out-buf)))))
+                      :else
+                      (let [in-vec (vec inputs)]
+                        (if (and weights-store (> (count norm-invars) (count in-vec)))
+                          (mapv (fn [idx [v-name _shape _dtype]]
+                                  (if (< idx (count in-vec))
+                                    (nth in-vec idx)
+                                    (weights/get-device-buffer weights-store v-name)))
+                                (range (count norm-invars))
+                                norm-invars)
+                          in-vec)))]
+    (cond
+      (and (fn? exec) (not (instance? CompiledExecutable exec)))
+      (if single-map-input?
+        (exec input-map)
+        (exec flat-inputs))
+
+      (contains? (:graph exec) :eqns)
+      (let [graph (:graph exec)
+            bindings (into {}
+                           (map-indexed (fn [idx [v-name shape dtype]]
+                                          (let [val (nth flat-inputs idx)
+                                                t-val (cond
+                                                        (and (map? val) (contains? val :data))
+                                                        val
+
+                                                        (and (map? val) (:uop-buffer? val))
+                                                        {:dtype (or dtype :f32)
+                                                         :shape (when shape (vec shape))
+                                                         :data (uop-rt/device->host-floats ctx val (reduce * 1 (or shape [1])))}
+
+                                                        :else
+                                                        {:dtype (weights/normalize-dtype (or dtype :f32))
+                                                         :shape (when shape (vec shape))
+                                                         :data val})]
+                                            [v-name t-val]))
+                                        norm-invars))
+            out-map (interpret/execute graph bindings)
+            out-spec (or (:outvars exec)
+                         (:outvars graph)
+                         (vec (keys out-map)))]
+        (cond
+          single-map-input?
+          out-map
+
+          (= 1 (count out-spec))
+          (get out-map (first out-spec))
+
+          :else
+          (mapv #(get out-map %) out-spec)))
+
+      :else
+      (let [out-map (uop-rt/execute-uop-executable ctx exec flat-inputs)
+            out-spec (or (:outvars exec)
+                         (when-let [outs (get-in exec [:uop-graph :outputs])] (vec (keys outs)))
+                         (vec (keys out-map)))]
+        (cond
+          single-map-input?
+          out-map
+
+          (= 1 (count out-spec))
+          (get out-map (first out-spec))
+
+          :else
+          (mapv #(get out-map %) out-spec))))))
+
+(def execute! execute)
+
+;; -----------------------------------------------------------------------------
+;; Scoped Arena & Buffer Transfers
+;; -----------------------------------------------------------------------------
+
+(defn create-arena
+  ([] (create-arena (get-context)))
+  ([ctx] (arena/create-arena ctx)))
+
+(defn close-arena! [arena] (arena/close-arena! arena))
+
+(defmacro with-device-arena [[binding-sym & [ctx]] & body]
+  `(arena/with-device-arena [~binding-sym ~(or ctx `(get-context))]
+     ~@body))
+
+(defn device-buffer
+  ([data shape dtype] (device-buffer (get-context) data shape dtype {}))
+  ([ctx-or-arena data shape dtype]
+   (if (arena/arena? ctx-or-arena)
+     (arena/device-buffer ctx-or-arena data shape dtype)
+     (device-buffer ctx-or-arena data shape dtype {})))
+  ([ctx data shape dtype _opts]
+   (uop-rt/host->device ctx data shape dtype)))
+
+(defn track! [arena buf] (arena/track! arena buf))
+(defn disown! [arena buf] (arena/disown! arena buf))
+(defn promote! [src-arena dst-arena buf] (arena/promote! src-arena dst-arena buf))
+(defn destroy! [buf] (arena/destroy! buf))
+(defn destroy-buffer!
+  ([buf] (destroy-buffer! (get-context) buf))
+  ([ctx buf] (uop-rt/destroy-buffer! ctx buf)))
+
+(defn create-weight-store
+  ([weights-map] (create-weight-store (get-context) weights-map {}))
+  ([ctx weights-map] (create-weight-store ctx weights-map {}))
+  ([ctx weights-map opts] (weights/create-weight-store ctx weights-map opts)))
 
 (def ^:private ^Class FLOAT-ARRAY-CLASS (Class/forName "[F"))
 (def ^:private ^Class SHORT-ARRAY-CLASS (Class/forName "[S"))
 (def ^:private ^Class INT-ARRAY-CLASS (Class/forName "[I"))
 
 (defn to-host-slice
-  "Transfers a slice of PJRT output device buffer, UOp device buffer, or interpreter tensor back to host float array.
-   Supports optional `dtype` parameter (:f32 or :bf16), converting bfloat16 to float32 on transfer."
-  ([out-buf]
-   (to-host-slice out-buf 0 256000 (* 128 256000) :f32))
-  ([out-buf slice-idx]
-   (to-host-slice out-buf slice-idx 256000 (* 128 256000) :f32))
-  ([out-buf slice-idx vocab-size]
-   (to-host-slice out-buf slice-idx vocab-size (* 128 vocab-size) :f32))
-  ([out-buf slice-idx vocab-size total-elements]
-   (to-host-slice out-buf slice-idx vocab-size total-elements :f32))
+  "Transfers a slice of UOp device buffer, primitive array, or interpreter tensor back to host float array."
+  ([out-buf] (to-host-slice out-buf 0 256000 (* 128 256000) :f32))
+  ([out-buf slice-idx] (to-host-slice out-buf slice-idx 256000 (* 128 256000) :f32))
+  ([out-buf slice-idx vocab-size] (to-host-slice out-buf slice-idx vocab-size (* 128 vocab-size) :f32))
+  ([out-buf slice-idx vocab-size total-elements] (to-host-slice out-buf slice-idx vocab-size total-elements :f32))
   ([out-buf slice-idx vocab-size total-elements dtype]
    (let [ctx (get-context)
+         target-buf (if (and (map? out-buf)
+                             (not (:uop-buffer? out-buf))
+                             (not (contains? out-buf :data))
+                             (pos? (count out-buf)))
+                      (first (vals out-buf))
+                      out-buf)
          n-elements (max (long total-elements) (long (* (inc slice-idx) vocab-size)))
          all-floats (cond
-                      ;; 1. Direct float array
-                      (instance? FLOAT-ARRAY-CLASS out-buf)
-                      ^floats out-buf
+                      (instance? FLOAT-ARRAY-CLASS target-buf)
+                      ^floats target-buf
 
-                      ;; 2. UOp device buffer map {:uop-buffer? true ...}
-                      (and (map? out-buf) (true? (:uop-buffer? out-buf)))
-                      (let [dev->floats (requiring-resolve 'einsum.uop.runtime/device->host-floats)]
-                        ^floats (dev->floats ctx out-buf n-elements))
+                      (and (map? target-buf) (true? (:uop-buffer? target-buf)))
+                      ^floats (uop-rt/device->host-floats ctx target-buf n-elements)
 
-                      ;; 3. Interpreter tensor map {:dtype ... :shape ... :data ...}
-                      (and (map? out-buf) (contains? out-buf :data))
-                      (let [data (:data out-buf)
-                            dt (or (:dtype out-buf) dtype :f32)]
+                      (and (map? target-buf) (contains? target-buf :data))
+                      (let [data (:data target-buf)
+                            dt (or (:dtype target-buf) dtype :f32)]
                         (cond
-                          (instance? FLOAT-ARRAY-CLASS data)
-                          ^floats data
-
+                          (instance? FLOAT-ARRAY-CLASS data) ^floats data
                           (instance? SHORT-ARRAY-CLASS data)
                           (let [^shorts s-arr data
                                 len (alength s-arr)
                                 f-arr (float-array len)]
-                            (dotimes [i len]
-                              (aset f-arr i (interpret/bf16->f32 (aget s-arr i))))
+                            (dotimes [i len] (aset f-arr i (interpret/bf16->f32 (aget s-arr i))))
                             f-arr)
-
                           (instance? MemorySegment data)
                           (let [^MemorySegment seg data
                                 elem-size (if (= dt :bf16) 2 4)
                                 len (long (min (quot (.byteSize seg) elem-size) n-elements))
                                 f-arr (float-array len)]
                             (if (= dt :bf16)
-                              (dotimes [i len]
-                                (let [s (.getAtIndex seg ValueLayout/JAVA_SHORT (long i))]
-                                  (aset f-arr i (interpret/bf16->f32 s))))
-                              (dotimes [i len]
-                                (aset f-arr i (.getAtIndex seg ValueLayout/JAVA_FLOAT (long i)))))
+                              (dotimes [i len] (aset f-arr i (interpret/bf16->f32 (.getAtIndex seg ValueLayout/JAVA_SHORT (long i)))))
+                              (dotimes [i len] (aset f-arr i (.getAtIndex seg ValueLayout/JAVA_FLOAT (long i)))))
                             f-arr)
+                          :else (float-array (map float data))))
 
-                          :else
-                          (float-array (map float data))))
-
-                      ;; 4. MemorySegment in interpreter mode
-                      (and (instance? MemorySegment out-buf) (= (:backend ctx) :interpreter))
-                      (let [^MemorySegment seg out-buf
+                      (instance? MemorySegment target-buf)
+                      (let [^MemorySegment seg target-buf
                             len (long (min (quot (.byteSize seg) 4) n-elements))
                             f-arr (float-array len)]
-                        (dotimes [i len]
-                          (aset f-arr i (.getAtIndex seg ValueLayout/JAVA_FLOAT (long i))))
+                        (dotimes [i len] (aset f-arr i (.getAtIndex seg ValueLayout/JAVA_FLOAT (long i))))
                         f-arr)
 
-                      ;; 5. PJRT native device buffer
                       :else
-                      (pjrt/buffer-to-host-buffer ctx out-buf n-elements (or dtype :f32)))
-         offset (* (long slice-idx) (long vocab-size))]
-     (cond
-       (instance? INT-ARRAY-CLASS all-floats)
-       all-floats
+                      (float-array (map float (if (sequential? target-buf) target-buf [target-buf]))))
+         start-idx (* slice-idx vocab-size)
+         slice-len (min (long vocab-size) (long (max 0 (- (alength ^floats all-floats) start-idx))))
+         target (float-array vocab-size)]
+     (when (pos? slice-len)
+       (if (instance? INT-ARRAY-CLASS all-floats)
+         (let [^ints i-arr (cast ints all-floats)]
+           (dotimes [i slice-len] (aset target i (float (aget i-arr (+ start-idx i))))))
+         (System/arraycopy all-floats (int start-idx) target 0 (int slice-len))))
+     target)))
 
-       (and (>= offset 0) (<= (+ offset vocab-size) (alength ^floats all-floats)))
-       (let [slice (float-array vocab-size)]
-         (System/arraycopy all-floats offset slice 0 vocab-size)
-         slice)
+(defn buffer-from-host-buffer
+  "Compatibility helper for allocating and transferring host buffer to device memory."
+  ([ctx data shape dtype-or-code]
+   (uop-rt/buffer-from-host-buffer ctx data shape dtype-or-code))
+  ([ctx client data shape dtype-or-code]
+   (uop-rt/buffer-from-host-buffer ctx client data shape dtype-or-code)))
 
-       :else
-       all-floats))))
+(defn buffer-to-host-buffer
+  "Compatibility helper for transferring device memory back to host floats."
+  ([ctx buf] (uop-rt/buffer-to-host-buffer ctx buf))
+  ([ctx buf n-elements] (uop-rt/buffer-to-host-buffer ctx buf n-elements))
+  ([ctx buf n-elements dtype] (uop-rt/buffer-to-host-buffer ctx buf n-elements dtype)))
 
-(defn destroy-buffer!
-  "Frees native device PJRT_Buffer or UOpBuffer `buffer-handle`."
-  ([buffer-handle]
-   (destroy-buffer! (get-context) buffer-handle))
-  ([ctx buffer-handle]
-   (if (and (map? buffer-handle) (true? (:uop-buffer? buffer-handle)))
-     (let [destroy-fn (requiring-resolve 'einsum.uop.runtime/destroy-buffer!)]
-       (destroy-fn ctx buffer-handle))
-     (pjrt/destroy-buffer! ctx buffer-handle))))
+(defn execute-executable
+  "Compatibility helper for executing compiled executables."
+  ([ctx exec inputs] (uop-rt/execute-executable ctx exec inputs))
+  ([ctx exec inputs n-outputs] (uop-rt/execute-executable ctx exec inputs n-outputs)))
 
-;; -----------------------------------------------------------------------------
-;; Scoped Device Arenas & Memory Management (Proposal 1)
-;; -----------------------------------------------------------------------------
-
-(def create-arena arena/create-arena)
-(def arena? arena/arena?)
-(def track! arena/track!)
-(def disown! arena/disown!)
-(def promote! arena/promote!)
-(def destroy! arena/destroy!)
-(def close-arena! arena/close!)
-(def device-buffer arena/device-buffer)
-(defmacro with-device-arena
-  "Executes `body` in a scoped DeviceArena. Automatically destroys all tracked
-   device buffers when the block exits (even on unhandled exception)."
-  [& args]
-  `(arena/with-device-arena ~@args))
-
-;; -----------------------------------------------------------------------------
-;; WeightStore & Automated Invar Inference (Proposal 2)
-;; -----------------------------------------------------------------------------
-
-(def create-weight-store weights/create-weight-store)
-(def infer-invars weights/infer-invars)
-(def get-device-buffer weights/get-device-buffer)
-(def load-device-buffers! weights/load-device-buffers!)
-
-;; -----------------------------------------------------------------------------
-;; Callable Compiled Kernels (Proposal 3)
-;; -----------------------------------------------------------------------------
-
-(def compile-kernel kernel/compile-kernel)
-(defmacro defkernel
-  "Defines a var bound to a compiled kernel function."
-  [& args]
-  `(kernel/defkernel ~@args))

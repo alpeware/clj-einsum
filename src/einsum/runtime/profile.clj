@@ -43,7 +43,7 @@
                                               :duration-us dur-us#}))
      (when *active-trace-spans*
        (swap! *active-trace-spans* conj {"name" ~span-name
-                                         "cat" "clj-xla"
+                                         "cat" "clj-einsum"
                                          "ph" "X"
                                          "ts" start-us#
                                          "dur" dur-us#

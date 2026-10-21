@@ -1,6 +1,6 @@
 (ns einsum.logic.exl3-test
   "Generative property and unit tests for EXL3 Quantization (turboderp-org/exllamav3)."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.core :as logic]
             [einsum.logic.exl3 :as exl3]
             [einsum.logic.expand :as expand]
@@ -221,11 +221,11 @@
           invars [[:x [:tensor [1 128] :f32]]]
           compiled (logic/compile-ast ctx "fwht128_graph" invars ast #{:y})
           in-data (float-array (range 1 129))
-          out-buf (xla/execute compiled in-data)
-          actual (vec (xla/to-host-slice out-buf 0 128 4))
+          out-buf (ein/execute compiled in-data)
+          actual (vec (ein/to-host-slice out-buf 0 128 4))
           expected (exl3/hadamard-block-128-ref (vec in-data))]
       (is (vec-close? actual expected 1e-3))
-      (xla/destroy-buffer! out-buf))))
+      (ein/destroy-buffer! out-buf))))
 
 (deftest test-dequant-exl3-matrix-parity
   (testing "Verify dequant-exl3-matrix matches unquantized model weights with high cosine similarity."

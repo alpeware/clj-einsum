@@ -1,5 +1,5 @@
 (ns einsum.quant.quip
-  "QuIP# Incoherence Processing (FWHT / RHT) and E8 Lattice Codebooks for OpenXLA PJRT.")
+  "QuIP# Incoherence Processing (FWHT / RHT) and E8 Lattice Codebooks for UOp device runtime.")
 
 ;; --- Reference FWHT and RHT Implementations (Pure Sans-IO) ---
 
@@ -97,7 +97,7 @@
 (defn quip-linear-ast
   "Constructs a Declarative Tensor Logic AST block for a QuIP# linear projection:
    y = RHT( ( RHT(x, SU) * dequant(codes, codebook, scales) ), SV ).
-   All operations are pure relational tensor equations lowerable to StableHLO."
+   All operations are pure relational tensor equations lowerable to Tensor Logic."
   ([out-head x-term su-term codes-term codebook-term scales-term sv-term]
    (quip-linear-ast out-head x-term su-term codes-term codebook-term scales-term sv-term {}))
   ([out-head x-term su-term codes-term codebook-term scales-term sv-term attrs]

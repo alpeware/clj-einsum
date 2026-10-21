@@ -486,7 +486,7 @@
                              (:head-dim cfg)
                              (double (get-in report [:gate2 :rocm-decode :baseline-attention-us]))
                              (double (get-in report [:gate2 :rocm-decode :turboquant-attention-us])))))
-                 "Staged; Forward Attention Decode Kernel not wired in ROCm PJRT")]
+                 "Staged; Forward Attention Decode Kernel not wired in ROCm UOp")]
               ["QJL Inner Product Estimator Bias"
                "0.0"
                (format "%.2e" (double (get-in report [:gate3 :qjl-bias])))

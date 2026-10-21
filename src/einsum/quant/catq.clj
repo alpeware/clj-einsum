@@ -764,7 +764,7 @@
                         specs))
 
           metadata {"quantization" "ternary"
-                    "format" "clj-xla"
+                    "format" "clj-einsum"
                     "producer" "einsum.quant.catq"
                     "group_size" "128"}
           full-header-map (assoc header-tensors "__metadata__" metadata)

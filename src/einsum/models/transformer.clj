@@ -86,7 +86,7 @@
 ;; ==============================================================================
 
 (defn compile-transformer-block
-  "Compiles canonical transformer block into an OpenXLA PJRT executable."
+  "Compiles canonical transformer block into an UOp device runtime executable."
   [ctx batch num-heads seq-len head-dim dff & [opts]]
   (let [model-dim (* num-heads head-dim)
         ast (transformer-block-ast head-dim (merge {:causal? true :act :relu} opts))
@@ -100,6 +100,6 @@
     (sym/compile-query ctx "transformer_block" invars ast [:out])))
 
 (defn run-transformer-block!
-  "Executes the canonical transformer forward pass on PJRT device runtime."
+  "Executes the canonical transformer forward pass on UOp device runtime."
   [exec inputs]
   (sym/run-query! exec inputs))

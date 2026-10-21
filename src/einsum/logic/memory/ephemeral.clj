@@ -1,9 +1,9 @@
 (ns einsum.logic.memory.ephemeral
   "Zero-Gradient Ephemeral Online Learning for Pedro Domingos' Declarative Tensor Logic (Experiment E5).
    Compiles Hebbian outer-product fast-weight writes, batch superposition, fact retractions,
-   in-graph relational composition, and extract-threshold-re-embed denoising cycles into OpenXLA PJRT.
-   Strictly adheres to Rule 2 (Pure Functions) and Rule 4 (Zero Java bypasses / pure XLA execution)."
-  (:require [einsum.core :as xla]
+   in-graph relational composition, and extract-threshold-re-embed denoising cycles into UOp device runtime.
+   Strictly adheres to Rule 2 (Pure Functions) and Rule 4 (Zero Java bypasses / pure UOp execution)."
+  (:require [einsum.core :as ein]
             [einsum.logic.symbolic :as sym]))
 
 ;; ==============================================================================
@@ -115,17 +115,17 @@
       [:= [:R_clean :i :j] [:ETA :i :t] [:E :t :j]]])))
 
 ;; ==============================================================================
-;; 2. OpenXLA PJRT Compilation Boundary
+;; 2. UOp device runtime Compilation Boundary
 ;; ==============================================================================
 
 (defn compile-write-fact
-  "Compiles OpenXLA PJRT executable for single fact write."
+  "Compiles UOp device runtime executable for single fact write."
   ([dim]
-   (compile-write-fact (xla/get-context) dim nil))
+   (compile-write-fact (ein/get-context) dim nil))
   ([a b]
    (if (map? a)
      (compile-write-fact a b nil)
-     (compile-write-fact (xla/get-context) a b)))
+     (compile-write-fact (ein/get-context) a b)))
   ([ctx dim opts]
    (let [d (long dim)
          invars [[:R [:tensor [d d] :f32]]
@@ -135,13 +135,13 @@
      (sym/compile-query ctx "ephemeral_write_fact" invars ast [:R_updated]))))
 
 (defn compile-write-facts-batch
-  "Compiles OpenXLA PJRT executable for batch fact superposition."
+  "Compiles UOp device runtime executable for batch fact superposition."
   ([batch-size dim]
-   (compile-write-facts-batch (xla/get-context) batch-size dim nil))
+   (compile-write-facts-batch (ein/get-context) batch-size dim nil))
   ([a b c]
    (if (map? a)
      (compile-write-facts-batch a b c nil)
-     (compile-write-facts-batch (xla/get-context) a b c)))
+     (compile-write-facts-batch (ein/get-context) a b c)))
   ([ctx batch-size dim opts]
    (let [b (long batch-size)
          d (long dim)
@@ -152,9 +152,9 @@
      (sym/compile-query ctx "ephemeral_write_facts_batch" invars ast [:R_updated]))))
 
 (defn compile-retract-fact
-  "Compiles OpenXLA PJRT executable for single fact retraction."
+  "Compiles UOp device runtime executable for single fact retraction."
   ([dim]
-   (compile-retract-fact (xla/get-context) dim))
+   (compile-retract-fact (ein/get-context) dim))
   ([ctx dim]
    (let [d (long dim)
          invars [[:R [:tensor [d d] :f32]]
@@ -164,9 +164,9 @@
      (sym/compile-query ctx "ephemeral_retract_fact" invars ast [:R_updated]))))
 
 (defn compile-retract-facts-batch
-  "Compiles OpenXLA PJRT executable for batch fact retraction."
+  "Compiles UOp device runtime executable for batch fact retraction."
   ([batch-size dim]
-   (compile-retract-facts-batch (xla/get-context) batch-size dim))
+   (compile-retract-facts-batch (ein/get-context) batch-size dim))
   ([ctx batch-size dim]
    (let [b (long batch-size)
          d (long dim)
@@ -177,13 +177,13 @@
      (sym/compile-query ctx "ephemeral_retract_facts_batch" invars ast [:R_updated]))))
 
 (defn compile-query-memory
-  "Compiles OpenXLA PJRT executable for unbinding and scoring against entity dictionary."
+  "Compiles UOp device runtime executable for unbinding and scoring against entity dictionary."
   ([dim entity-count]
-   (compile-query-memory (xla/get-context) dim entity-count nil))
+   (compile-query-memory (ein/get-context) dim entity-count nil))
   ([a b c]
    (if (map? a)
      (compile-query-memory a b c nil)
-     (compile-query-memory (xla/get-context) a b c)))
+     (compile-query-memory (ein/get-context) a b c)))
   ([ctx dim entity-count opts]
    (let [d (long dim)
          n (long entity-count)
@@ -194,9 +194,9 @@
      (sym/compile-query ctx "ephemeral_query_memory" invars ast [:scores]))))
 
 (defn compile-compose-relations
-  "Compiles OpenXLA PJRT executable for transitive relational composition."
+  "Compiles UOp device runtime executable for transitive relational composition."
   ([dim]
-   (compile-compose-relations (xla/get-context) dim))
+   (compile-compose-relations (ein/get-context) dim))
   ([ctx dim]
    (let [d (long dim)
          invars [[:R1 [:tensor [d d] :f32]]
@@ -205,13 +205,13 @@
      (sym/compile-query ctx "ephemeral_compose_relations" invars ast [:R_composed]))))
 
 (defn compile-denoise-relation
-  "Compiles OpenXLA PJRT executable for extract-threshold-re-embed denoising cycle."
+  "Compiles UOp device runtime executable for extract-threshold-re-embed denoising cycle."
   ([dim entity-count]
-   (compile-denoise-relation (xla/get-context) dim entity-count nil))
+   (compile-denoise-relation (ein/get-context) dim entity-count nil))
   ([a b c]
    (if (map? a)
      (compile-denoise-relation a b c nil)
-     (compile-denoise-relation (xla/get-context) a b c)))
+     (compile-denoise-relation (ein/get-context) a b c)))
   ([ctx dim entity-count opts]
    (let [d (long dim)
          n (long entity-count)
@@ -221,7 +221,7 @@
      (sym/compile-query ctx "ephemeral_denoise_relation" invars ast [:R_clean :A_crisp]))))
 
 ;; ==============================================================================
-;; 3. Impure Execution Wrappers (PJRT Dispatch)
+;; 3. Impure Execution Wrappers (UOp Dispatch)
 ;; ==============================================================================
 
 (defn write-fact!

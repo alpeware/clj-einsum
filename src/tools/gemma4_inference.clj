@@ -1,5 +1,5 @@
 (ns tools.gemma4-inference
-  "Top-level runnable CLI entrypoint and REPL API for end-to-end Gemma 4 text generation via pure XLA execution."
+  "Top-level runnable CLI entrypoint and REPL API for end-to-end Gemma 4 text generation via pure UOp execution."
   (:require [einsum.models.gemma4.config :as cfg]
             [einsum.models.gemma4.kernels :as kernels]
             [einsum.models.gemma4.runtime :as rt]
@@ -101,7 +101,7 @@
     (let [opts (parse-cli-args args)]
       (when-not (:quiet opts)
         (println "==================================================================")
-        (println (str "  clj-xla Gemma 4 Single-Pass Prefill & " (case (:precision opts) :int8 "INT8" :int4 "INT4" "BF16") " Generation "))
+        (println (str "  clj-einsum Gemma 4 Single-Pass Prefill & " (case (:precision opts) :int8 "INT8" :int4 "INT4" "BF16") " Generation "))
         (println "=================================================================="))
       (let [session (init-inference-session opts)]
         (generate-text session (:prompt opts))))

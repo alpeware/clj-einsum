@@ -1,7 +1,7 @@
 (ns einsum.logic.stratify
   "Stratified Negation Engine for Tensor Logic (Pedro Domingos, arXiv:2510.12269).
    Implements dependency graph cycle analysis, rejection of unstratifiable negative cycles,
-   topological stratum decomposition, and multi-stage fixpoint execution via OpenXLA PJRT (Rule 4)."
+   topological stratum decomposition, and multi-stage fixpoint execution via UOp device runtime (Rule 4)."
   (:require [einsum.logic.symbolic :as sym]
             [clojure.set :as set]))
 
@@ -87,11 +87,11 @@
     final-strata))
 
 ;; ==============================================================================
-;; 3. Stratified Fixpoint Evaluation via OpenXLA PJRT
+;; 3. Stratified Fixpoint Evaluation via UOp device runtime
 ;; ==============================================================================
 
 (defn eval-stratified
-  "Evaluates a stratified Datalog program with negation stratum by stratum via OpenXLA PJRT.
+  "Evaluates a stratified Datalog program with negation stratum by stratum via UOp device runtime.
    Each stratum is evaluated to fixpoint. When moving to stratum k, negated relations
    from lower strata (< k) are frozen and their active-domain complement is injected as fixed EDB.
    Supports multiple rules per head relation within any stratum.

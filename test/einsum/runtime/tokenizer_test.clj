@@ -104,7 +104,7 @@
       (hf/load-hf-json-tokenizer hf-path))))
 
 (defspec prop-tokenizer-encode-decode 20
-  (prop/for-all [words (gen/vector (gen/elements ["Hello" "world" "Clojure" "XLA" "compiler" "AI"]) 1 5)]
+  (prop/for-all [words (gen/vector (gen/elements ["Hello" "world" "Clojure" "UOp" "compiler" "AI"]) 1 5)]
                 (let [input-text (str/join " " words)
                       tokenizer @test-bpe-tokenizer
                       ids (encode tokenizer input-text)

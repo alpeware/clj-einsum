@@ -1,5 +1,5 @@
 (ns tools.cli
-  "Shared CLI argument parsing, model directory discovery, and input marshaling for clj-xla tools."
+  "Shared CLI argument parsing, model directory discovery, and input marshaling for clj-einsum tools."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]))
 
@@ -113,7 +113,7 @@
 (defn parse-cli-args
   "Parses command-line flags against `default-opts` (defaulting to DEFAULT_INFERENCE_OPTS).
    Supports optional `custom-handlers` map of {flag-str (fn [opts remaining-args]) -> [new-opts consumed-count]}.
-   Supported backend targets include :cpu, :rocm, :sycl, :cuda12, and :interpreter (pure-JVM StableHLO)."
+   Supported backend targets include :cpu, :rocm, :sycl, :cuda12, and :interpreter (pure-JVM Tensor Logic)."
   ([args]
    (parse-cli-args args DEFAULT_INFERENCE_OPTS {}))
   ([args default-opts]
@@ -186,8 +186,8 @@
              ;; Keyword flags (strip leading colons)
              (= arg "--backend")
              (let [b (keyword (str/replace val #"^:+" ""))]
-               (if (contains? #{:rocm :pjrt :cuda12 :sycl :cpu} b)
-                 (throw (ex-info (str "Backend " b " is no longer supported. OpenXLA/PJRT has been excised. Supported backends are :uop-rocm and :uop-cpu.")
+               (if (contains? #{:rocm :UOp :cuda12 :sycl :cpu} b)
+                 (throw (ex-info (str "Backend " b " is no longer supported. UOp/UOp has been excised. Supported backends are :uop-rocm and :uop-cpu.")
                                  {:backend b}))
                  (recur (subvec remaining 2) (assoc opts :backend (if (= b :interp) :interpreter b)))))
 
@@ -217,7 +217,7 @@
              (recur (subvec remaining 1) (assoc opts :verbose true))
 
              (= arg "--quiet")
-             (do (System/setProperty "clj-xla.quiet" "true")
+             (do (System/setProperty "clj-einsum.quiet" "true")
                  (recur (subvec remaining 1) (assoc opts :quiet true)))
 
              (or (= arg "--thinking") (= arg "--think"))

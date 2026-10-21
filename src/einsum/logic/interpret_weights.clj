@@ -1,5 +1,5 @@
 (ns einsum.logic.interpret-weights
-  "Zero-copy weight bindings for the JVM StableHLO interpreter.
+  "Zero-copy weight bindings for the JVM Tensor Logic interpreter.
 
   Memory-maps a .safetensors file and exposes each tensor as an interpreter
   tensor map {:dtype ... :shape [...] :data <MemorySegment slice>} pointing

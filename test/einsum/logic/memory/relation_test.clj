@@ -1,7 +1,7 @@
 (ns einsum.logic.memory.relation-test
   "Unit and generative tests for In-Tensor Relational Memory
    and Factual Grounding (Superposition, Memory Probing, and Extract-Threshold-Re-embed Denoising)."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.memory.relation :as mem]
             [einsum.models.gemma :as gemma]
             [einsum.uop.lower :as uop-lower]
@@ -89,7 +89,7 @@
 ;; ==============================================================================
 
 (deftest test-extract-threshold-reembed
-  (testing "applying the denoising cycle to a noise-injected matrix restores exact binary indicator relation via PJRT"
+  (testing "applying the denoising cycle to a noise-injected matrix restores exact binary indicator relation via UOp"
     (let [n 10
           d 64
           rel-id 0
@@ -113,7 +113,7 @@
             (let [noise (float (* 0.05 (.nextGaussian rnd)))]
               (aset-float noisy-core i (+ (aget pristine-core i) noise))))
 
-          ;; Compile and execute the denoising cycle via OpenXLA PJRT
+          ;; Compile and execute the denoising cycle via UOp device runtime
           (let [denoise-res (mem/denoise-relation-core {:relation-core noisy-core
                                                         :entity-table e-table
                                                         :entity-count n
@@ -306,7 +306,7 @@
       (is (some? compiled)))))
 
 (testing "compile-relation-denoiser uses in-graph threshold scalar without host-side O(N^2) buffer"
-  (let [ctx (xla/get-context)
+  (let [ctx (ein/get-context)
         d 64
         n 100
         exec (mem/compile-relation-denoiser ctx d n 0.5)

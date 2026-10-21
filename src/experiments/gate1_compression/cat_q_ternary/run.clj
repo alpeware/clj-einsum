@@ -1,6 +1,6 @@
 (ns experiments.gate1-compression.cat-q-ternary.run
   "Stage 2 Implementation Harness for RFC cat-q-ternary:
-   Cost-Efficient Accurate Ternary Quantization (CAT-Q / 1.58b) in OpenXLA PJRT.
+   Cost-Efficient Accurate Ternary Quantization (CAT-Q / 1.58b) in UOp device runtime.
    Evaluates Ghodsi's 4 RSI Gates on Gemma 4 E2B:
    - Gate 1: Resource Efficiency (bytes/param <= 0.25, compression ratio >= 7.5x, tok/s throughput)
    - Gate 2: Time Efficiency (zero-backprop calibration & packing latency < 30min)
@@ -332,7 +332,7 @@
         precision (or (:precision opts)
                       (if (str/includes? model-path "int4") :int4 :ternary))
         out-dir (or (:out-dir opts) "proposals/gate1_compression/cat_q_ternary")
-        _ (println (format "\nInitializing PJRT Backend [%s] for %s Stage 2 Evaluation..."
+        _ (println (format "\nInitializing UOp Backend [%s] for %s Stage 2 Evaluation..."
                            (name backend)
                            (if (= precision :int4) "INT4" "CAT-Q")))
         session-opts (assoc opts :backend backend :model-dir model-path :precision precision)

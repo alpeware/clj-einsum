@@ -5,8 +5,8 @@
      - Arm B (TL-Agent): Fixed 512-token static prompt + In-VRAM Datalog State Tracker + Ephemeral Memory.
    Evaluates State Deductive Accuracy, Tok/s Throughput Stability, and VRAM Memory Scaling.
    Rule 2: Pure Functions (core logic sans-IO).
-   Rule 4: Zero Java Escape Hatches (all tensor math compiled to StableHLO via PJRT)."
-  (:require [einsum.core :as xla]
+   Rule 4: Zero Java Escape Hatches (all tensor math compiled to Tensor Logic via UOp)."
+  (:require [einsum.core :as ein]
             [einsum.logic.memory.ephemeral :as ephemeral]
             [einsum.logic.symbolic :as sym]))
 
@@ -221,11 +221,11 @@
      (range num-turns))))
 
 ;; ==============================================================================
-;; 4. Arm B: In-VRAM Datalog State Tracker + Ephemeral Memory (OpenXLA PJRT)
+;; 4. Arm B: In-VRAM Datalog State Tracker + Ephemeral Memory (UOp device runtime)
 ;; ==============================================================================
 
 (defn transitive-closure-squaring-ast
-  "Constructs Tensor Logic AST computing full transitive closure via repeated squaring in OpenXLA PJRT:
+  "Constructs Tensor Logic AST computing full transitive closure via repeated squaring in UOp device runtime:
    A_0 = P
    A_1 = clamp(A_0 + A_0 @ A_0, 0, 1)
    ...
@@ -256,7 +256,7 @@
 
 (defn init-arm-b-session
   "Initializes Arm B In-VRAM session:
-   Compiles OpenXLA PJRT executables for:
+   Compiles UOp device runtime executables for:
      1. Transitive closure fixpoint squaring (7 steps -> up to 128-hop paths)
      2. Invalidation propagation
      3. Ephemeral fast-weight memory writes & queries (D=64)
@@ -287,7 +287,7 @@
         closure-invars [[:P [:tensor [n-funcs n-funcs] :f32]]]
         closure-exec (sym/compile-query ctx "transitive_closure" closure-invars closure-ast [:A_6])
 
-        ;; Initial closure calculation in PJRT
+        ;; Initial closure calculation in UOp
         closure-out (sym/run-query! closure-exec {:P p-dep})
         ^floats a-closure (:A_6 closure-out)
 
@@ -339,7 +339,7 @@
      :state-vram-bytes state-vram-bytes}))
 
 (defn step-arm-b!
-  "Executes one turn of Arm B autonomous agent execution in OpenXLA PJRT:
+  "Executes one turn of Arm B autonomous agent execution in UOp device runtime:
    Maintains state in VRAM with O(1) constant prompt context (512 tokens).
    Returns telemetry map."
   [session action-map ontology]
@@ -414,7 +414,7 @@
         (if (= op :add)
           (swap! active-deps conj [caller callee])
           (swap! active-deps disj [caller callee]))
-        ;; Update p-dep in VRAM and recompute transitive closure in PJRT
+        ;; Update p-dep in VRAM and recompute transitive closure in UOp
         (let [p-dep (float-array (* n-funcs n-funcs))]
           (doseq [[c-ler c-lee] @active-deps]
             (when (and (< (long c-ler) n-funcs) (< (long c-lee) n-funcs))
@@ -518,13 +518,13 @@
   [opts]
   (let [backend (or (:backend opts) :cpu)
         ctx (if (= backend :rocm)
-              (xla/init-backend! :rocm)
-              (xla/init-backend! :cpu))
+              (ein/init-backend! :rocm)
+              (ein/init-backend! :cpu))
         num-turns (long (or (:turns opts) 100))
         ontology (build-codebase-ontology opts)
         actions (generate-benchmark-actions ontology num-turns (or (:seed opts) 42))
 
-        ;; Initialize Arm B session in PJRT
+        ;; Initialize Arm B session in UOp
         session-b (init-arm-b-session ctx ontology)
 
         ;; Initial Arm A state

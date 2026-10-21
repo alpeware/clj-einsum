@@ -1,5 +1,5 @@
 (ns einsum.quant.exl3
-  "EXL3 Quantization (turboderp-org/exllamav3) Procedural Codebooks, Trellis Decoding, and OpenXLA PJRT Lowers."
+  "EXL3 Quantization (turboderp-org/exllamav3) Procedural Codebooks, Trellis Decoding, and UOp device runtime Lowers."
   (:require [einsum.quant.quip :as quip])
   (:import [java.lang.foreign MemorySegment]
            [java.util.function IntConsumer]

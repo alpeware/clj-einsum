@@ -241,7 +241,7 @@
     (vec al)))
 
 ;; Note: This test verifies host-side reference contraction semantics against the pure Clojure
-;; Horn-clause deductive oracle; full OpenXLA PJRT compiler-path coverage is provided by the e2e tests.
+;; Horn-clause deductive oracle; full UOp device runtime compiler-path coverage is provided by the e2e tests.
 (defspec prop-embedding-space-deductive-oracle-parity 20
   (prop/for-all [n (gen/choose 4 6)
                  num-facts (gen/choose 1 5)

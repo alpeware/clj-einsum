@@ -1,8 +1,8 @@
 (ns einsum.logic.memory.factorization-test
   "Unit and generative tests for Experiment E8: Dynamic In-VRAM Relation Induction.
-   Compiles non-negative tensor factorization (PARAFAC/NMF) into StableHLO MLIR via OpenXLA PJRT.
+   Compiles non-negative tensor factorization (PARAFAC/NMF) into Tensor Logic MLIR via UOp device runtime.
    Rule 1: Strict TDD - generative tests for invariants defined before core implementation."
-  (:require [einsum.core :as xla]
+  (:require [einsum.core :as ein]
             [einsum.logic.memory.factorization :as fact]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
@@ -17,7 +17,7 @@
   (prop/for-all [n (gen/choose 4 8)
                  k (gen/choose 2 4)
                  r (gen/choose 2 3)]
-                (let [ctx (xla/get-context)
+                (let [ctx (ein/get-context)
                       session (fact/init-factorization-session ctx {:num-entities n
                                                                     :num-contexts k
                                                                     :rank r})
@@ -42,7 +42,7 @@
 
 (defspec prop-factorization-loss-descent 15
   (prop/for-all [steps (gen/choose 5 15)]
-                (let [ctx (xla/get-context)
+                (let [ctx (ein/get-context)
                       n 8
                       k 3
                       r 2
@@ -66,7 +66,7 @@
 
 (deftest test-relation-induction-fidelity
   (testing "In-VRAM tensor factorization achieves > 85% reconstruction fidelity on 3-way relation observations"
-    (let [ctx (xla/get-context)
+    (let [ctx (ein/get-context)
           n 12
           k 4
           r 3
@@ -85,7 +85,7 @@
 
 (deftest test-induced-relational-core-extraction
   (testing "Induced factors can be extracted as crisp relational core matrices"
-    (let [ctx (xla/get-context)
+    (let [ctx (ein/get-context)
           n 8
           k 2
           r 2

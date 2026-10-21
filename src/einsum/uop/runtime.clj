@@ -833,102 +833,104 @@
 (defn compile-uop-executable
   "Compiles a Tensor Logic AST (or pre-lowered UOp graph) into a native `UOpExecutable`
    with deduplicated native kernels and pre-allocated intermediate stage buffers."
-  [ctx name-str in-spec ast out-spec]
-  (let [uop-target (or (:uop-target ctx) :cpu)
-        uop-graph (if (and (map? ast) (contains? ast :outputs))
-                    ast
-                    (uop-lower/ast->uop-graph name-str in-spec ast out-spec))
-        sched (schedule/schedule-graph uop-graph)
-        opt-kernels (vec (pmap #(opt/optimize-kernel % {:target uop-target}) (:kernels sched)))
-        rendered-kernels (vec (pmap #(render/render-kernel % {:target uop-target}) opt-kernels))
-        unique-kernels (->> rendered-kernels
-                            (reduce (fn [[seen acc] rk]
-                                      (if (contains? seen (:canonical-fn-name rk))
-                                        [seen acc]
-                                        [(conj seen (:canonical-fn-name rk)) (conj acc rk)]))
-                                    [#{} []])
-                            second)
-        compiled-mod (if (= uop-target :rocm)
-                       (compile-rocm-module! ctx unique-kernels)
-                       (compile-cpu-module! unique-kernels))
-        fn-handles (:fn-handles compiled-mod)
+  ([ctx graph]
+   (compile-uop-executable ctx (or (:name graph) "uop_graph") (:invars graph) graph (:outvars graph)))
+  ([ctx name-str in-spec ast out-spec]
+   (let [uop-target (or (:uop-target ctx) :cpu)
+         uop-graph (if (and (map? ast) (contains? ast :outputs))
+                     ast
+                     (uop-lower/ast->uop-graph name-str in-spec ast out-spec))
+         sched (schedule/schedule-graph uop-graph)
+         opt-kernels (vec (pmap #(opt/optimize-kernel % {:target uop-target}) (:kernels sched)))
+         rendered-kernels (vec (pmap #(render/render-kernel % {:target uop-target}) opt-kernels))
+         unique-kernels (->> rendered-kernels
+                             (reduce (fn [[seen acc] rk]
+                                       (if (contains? seen (:canonical-fn-name rk))
+                                         [seen acc]
+                                         [(conj seen (:canonical-fn-name rk)) (conj acc rk)]))
+                                     [#{} []])
+                             second)
+         compiled-mod (if (= uop-target :rocm)
+                        (compile-rocm-module! ctx unique-kernels)
+                        (compile-cpu-module! unique-kernels))
+         fn-handles (:fn-handles compiled-mod)
         ;; Pre-allocate intermediate stage buffers once per executable for zero-allocation step execution
-        intermediate-buffers (into {}
-                                   (keep (fn [[slot buf-info]]
-                                           (when (= :intermediate (:role buf-info))
-                                             [slot (allocate-device-buffer ctx (:shape buf-info) (:dtype buf-info))]))
-                                         (:buffers sched)))
+         intermediate-buffers (into {}
+                                    (keep (fn [[slot buf-info]]
+                                            (when (= :intermediate (:role buf-info))
+                                              [slot (allocate-device-buffer ctx (:shape buf-info) (:dtype buf-info))]))
+                                          (:buffers sched)))
         ;; Pre-allocate 2 sets of output buffers (ping-pong) for zero-allocation step execution
-        output-pool [(into {}
-                           (map (fn [[_out-kw slot]]
-                                  (let [b-info (get (:buffers sched) slot)]
-                                    [slot (assoc (allocate-device-buffer ctx (:shape b-info) (:dtype b-info))
-                                                 :owned? false)]))
-                                (:output-slots sched)))
-                     (into {}
-                           (map (fn [[_out-kw slot]]
-                                  (let [b-info (get (:buffers sched) slot)]
-                                    [slot (assoc (allocate-device-buffer ctx (:shape b-info) (:dtype b-info))
-                                                 :owned? false)]))
-                                (:output-slots sched)))]
-        exec-turn (atom 0)
-        num-slots (inc (long (reduce max 0 (keys (:buffers sched)))))
-        slot-ptrs (make-array MemorySegment num-slots)
+         output-pool [(into {}
+                            (map (fn [[_out-kw slot]]
+                                   (let [b-info (get (:buffers sched) slot)]
+                                     [slot (assoc (allocate-device-buffer ctx (:shape b-info) (:dtype b-info))
+                                                  :owned? false)]))
+                                 (:output-slots sched)))
+                      (into {}
+                            (map (fn [[_out-kw slot]]
+                                   (let [b-info (get (:buffers sched) slot)]
+                                     [slot (assoc (allocate-device-buffer ctx (:shape b-info) (:dtype b-info))
+                                                  :owned? false)]))
+                                 (:output-slots sched)))]
+         exec-turn (atom 0)
+         num-slots (inc (long (reduce max 0 (keys (:buffers sched)))))
+         slot-ptrs (make-array MemorySegment num-slots)
         ;; Pre-allocate native argument pointer tables per kernel in a shared arena
-        exec-arena (Arena/ofShared)
-        prepared-kernels (mapv (fn [rk]
-                                 (let [slots (:buffer-slots rk)
-                                       n-args (count slots)
-                                       slot-arr (int-array slots)
-                                       [gx gy gz] (:global-size rk)
-                                       [lx ly lz] (:local-size rk)
-                                       fn-handle (get fn-handles (:canonical-fn-name rk))
+         exec-arena (Arena/ofShared)
+         prepared-kernels (mapv (fn [rk]
+                                  (let [slots (:buffer-slots rk)
+                                        n-args (count slots)
+                                        slot-arr (int-array slots)
+                                        [gx gy gz] (:global-size rk)
+                                        [lx ly lz] (:local-size rk)
+                                        fn-handle (get fn-handles (:canonical-fn-name rk))
                                        ;; arg-vals holds the actual buffer pointers (void* / hipDeviceptr_t)
-                                       arg-vals-seg (.allocate exec-arena ValueLayout/ADDRESS n-args)
+                                        arg-vals-seg (.allocate exec-arena ValueLayout/ADDRESS n-args)
                                        ;; kernel-params holds pointers TO each entry in arg-vals-seg (for hipModuleLaunchKernel)
-                                       kernel-params-seg (.allocate exec-arena ValueLayout/ADDRESS n-args)
-                                       launch-args (when (= uop-target :rocm)
-                                                     (object-array [fn-handle
-                                                                    (int gx) (int gy) (int gz)
-                                                                    (int lx) (int ly) (int lz)
-                                                                    (int 0)
-                                                                    MemorySegment/NULL
-                                                                    kernel-params-seg
-                                                                    MemorySegment/NULL]))
-                                       cpu-launch-args (when (not= uop-target :rocm)
-                                                         (object-array [arg-vals-seg]))]
-                                   (dotimes [i n-args]
-                                     (.setAtIndex kernel-params-seg ValueLayout/ADDRESS (long i)
-                                                  (.asSlice arg-vals-seg (* i 8) 8)))
-                                   (assoc rk
-                                          :fn-handle fn-handle
-                                          :slot-arr slot-arr
-                                          :arg-vals-seg arg-vals-seg
-                                          :kernel-params-seg kernel-params-seg
-                                          :launch-args launch-args
-                                          :cpu-launch-args cpu-launch-args)))
-                               rendered-kernels)]
-    {:uop-executable? true
-     :name name-str
-     :backend :uop
-     :uop-target uop-target
-     :ctx ctx
-     :invars in-spec
-     :outvars out-spec
-     :graph uop-graph
-     :uop-graph uop-graph
-     :schedule sched
-     :module compiled-mod
-     :handle (or compiled-mod true)
-     :prepared-kernels prepared-kernels
-     :num-slots num-slots
-     :slot-ptrs slot-ptrs
-     :intermediate-buffers intermediate-buffers
-     :output-pool output-pool
-     :exec-turn exec-turn
-     :exec-arena exec-arena
-     :warmed-up? (atom false)
-     :lock (ReentrantLock.)}))
+                                        kernel-params-seg (.allocate exec-arena ValueLayout/ADDRESS n-args)
+                                        launch-args (when (= uop-target :rocm)
+                                                      (object-array [fn-handle
+                                                                     (int gx) (int gy) (int gz)
+                                                                     (int lx) (int ly) (int lz)
+                                                                     (int 0)
+                                                                     MemorySegment/NULL
+                                                                     kernel-params-seg
+                                                                     MemorySegment/NULL]))
+                                        cpu-launch-args (when (not= uop-target :rocm)
+                                                          (object-array [arg-vals-seg]))]
+                                    (dotimes [i n-args]
+                                      (.setAtIndex kernel-params-seg ValueLayout/ADDRESS (long i)
+                                                   (.asSlice arg-vals-seg (* i 8) 8)))
+                                    (assoc rk
+                                           :fn-handle fn-handle
+                                           :slot-arr slot-arr
+                                           :arg-vals-seg arg-vals-seg
+                                           :kernel-params-seg kernel-params-seg
+                                           :launch-args launch-args
+                                           :cpu-launch-args cpu-launch-args)))
+                                rendered-kernels)]
+     {:uop-executable? true
+      :name name-str
+      :backend :uop
+      :uop-target uop-target
+      :ctx ctx
+      :invars in-spec
+      :outvars out-spec
+      :graph uop-graph
+      :uop-graph uop-graph
+      :schedule sched
+      :module compiled-mod
+      :handle (or compiled-mod true)
+      :prepared-kernels prepared-kernels
+      :num-slots num-slots
+      :slot-ptrs slot-ptrs
+      :intermediate-buffers intermediate-buffers
+      :output-pool output-pool
+      :exec-turn exec-turn
+      :exec-arena exec-arena
+      :warmed-up? (atom false)
+      :lock (ReentrantLock.)})))
 
 (defn destroy-uop-executable!
   "Frees pre-allocated intermediate stage buffers, ping-pong output buffers, and parameter pointer segments for `uop-exec`."
@@ -1043,3 +1045,48 @@
                    output-slots)))
       (finally
         (.unlock lock)))))
+
+;; -----------------------------------------------------------------------------
+;; 6. Compatibility & Delegation Helpers
+;; -----------------------------------------------------------------------------
+
+(defn buffer-from-host-buffer
+  "Compatibility helper for allocating and transferring a host buffer to device memory."
+  ([ctx data shape dtype-or-code]
+   (let [dt (cond
+              (keyword? dtype-or-code) dtype-or-code
+              (= (int dtype-or-code) 4) :i32
+              (= (int dtype-or-code) 13) :bf16
+              (= (int dtype-or-code) 2) :i8
+              (= (int dtype-or-code) 10) :f32
+              :else :f32)]
+     (host->device ctx data shape dt)))
+  ([ctx _client data shape dtype-or-code]
+   (buffer-from-host-buffer ctx data shape dtype-or-code)))
+
+(defn buffer-to-host-buffer
+  "Compatibility helper for transferring device memory back to host floats."
+  ([ctx buf] (device->host-floats ctx buf))
+  ([ctx buf n-elements] (device->host-floats ctx buf (long n-elements)))
+  ([ctx buf n-elements _dtype] (device->host-floats ctx buf (long n-elements))))
+
+(defn execute-executable
+  "Compatibility helper for executing compiled executables."
+  ([ctx exec inputs]
+   (execute-executable ctx exec inputs nil))
+  ([ctx exec inputs n-outputs]
+   (let [handle (or (:handle exec) exec)
+         uop-exec (if (:uop-executable? handle) handle exec)]
+     (if (:uop-executable? uop-exec)
+       (let [out-map (execute-uop-executable ctx uop-exec inputs)
+             outvars (or (get-in uop-exec [:uop-graph :outvars]) (get-in uop-exec [:graph :outvars]))
+             ordered (if (seq outvars)
+                       (mapv #(get out-map %) outvars)
+                       (vec (vals out-map)))]
+         (if (and n-outputs (= 1 (int n-outputs)))
+           (first ordered)
+           ordered))
+       (if (fn? uop-exec)
+         (uop-exec inputs)
+         (throw (ex-info "Unknown executable type for execute-executable" {:exec exec})))))))
+
