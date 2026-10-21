@@ -3,8 +3,8 @@
   (:require [einsum.core :as xla]
             [einsum.logic.lower :as lower]
             [einsum.models.gemma :as gemma-logic]
-            [einsum.models.gemma4.config :as cfg]
-            [einsum.runtime.arena :as arena]))
+            [einsum.runtime.arena :as arena]
+            [einsum.uop.runtime :as uop-rt]))
 
 (def GEMMA4-STOP-TOKEN-IDS
   "Special token IDs marking end-of-turn or end-of-generation in Gemma 4.
@@ -16,21 +16,11 @@
 (defn build-tensor-logic-invars
   "Constructs EDN SSA signature invars for full Gemma 4 model forward pass."
   [config max-seq-len]
-  (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size backend target]} config
+  (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size]} config
         int4? (boolean (or is-int4 (= weight-dtype :int4)))
         is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
         norm-dtype (if (or is-int8 int4? is-ternary) :bf16 (or weight-dtype :bf16))
         has-ple? (pos? (long (or total-pl-dim 0)))
-        use-w4a16? (and int4?
-                        (if (some? (:use-w4a16-gemv config))
-                          (boolean (:use-w4a16-gemv config))
-                          (and (or (= backend :rocm) (= target :rocm))
-                               (not (contains? #{:uop :uop-rocm :uop-cpu} backend))
-                               (not (contains? #{:uop :uop-rocm :uop-cpu} target)))))
-        scale-groups-fn (fn [in-dim]
-                          (if (and group-size (zero? (mod in-dim group-size)))
-                            (quot in-dim group-size)
-                            1))
         scale-shape-fn (fn [rows cols]
                          (cond
                            (and int4? group-size (zero? (mod cols group-size)))
@@ -66,8 +56,7 @@
                                  skipped? (contains? (set (:skip-layers config)) i)
                                  layer-is-ternary (and is-ternary (not skipped?))
                                  layer-is-int4 (and int4? (not skipped?))
-                                 layer-is-int8 (and is-int8 (not skipped?))
-                                 layer-use-w4a16 (and use-w4a16? (not skipped?))]
+                                 layer-is-int8 (and is-int8 (not skipped?))]
                              (concat
                               [[(keyword (str "input_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]
                                [(keyword (str "layer_scalar_" i)) [:tensor [1] norm-dtype]]]
@@ -81,15 +70,6 @@
                                  [(keyword (str "v_scale_" i)) [:tensor (scale-shape-fn kv-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "o_w_" i)) [:tensor [hidden-dim (quot q-dim 4)] :i8]]
                                  [(keyword (str "o_scale_" i)) [:tensor (scale-shape-fn hidden-dim q-dim) norm-dtype]]]
-                                layer-use-w4a16
-                                [[(keyword (str "q_w_" i)) [:tensor [(quot hidden-dim 8) q-dim] :i32]]
-                                 [(keyword (str "q_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) q-dim] norm-dtype]]
-                                 [(keyword (str "k_w_" i)) [:tensor [(quot hidden-dim 8) kv-dim] :i32]]
-                                 [(keyword (str "k_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) kv-dim] norm-dtype]]
-                                 [(keyword (str "v_w_" i)) [:tensor [(quot hidden-dim 8) kv-dim] :i32]]
-                                 [(keyword (str "v_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) kv-dim] norm-dtype]]
-                                 [(keyword (str "o_w_" i)) [:tensor [(quot q-dim 8) hidden-dim] :i32]]
-                                 [(keyword (str "o_scale_" i)) [:tensor [(scale-groups-fn q-dim) hidden-dim] norm-dtype]]]
                                 layer-is-int4
                                 [[(keyword (str "q_w_" i)) [:tensor [q-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "q_scale_" i)) [:tensor (scale-shape-fn q-dim hidden-dim) norm-dtype]]
@@ -126,13 +106,6 @@
                                  [(keyword (str "up_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "down_w_" i)) [:tensor [hidden-dim (quot mlp-dim 4)] :i8]]
                                  [(keyword (str "down_scale_" i)) [:tensor (scale-shape-fn hidden-dim mlp-dim) norm-dtype]]]
-                                layer-use-w4a16
-                                [[(keyword (str "gate_w_" i)) [:tensor [(quot hidden-dim 8) mlp-dim] :i32]]
-                                 [(keyword (str "gate_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) mlp-dim] norm-dtype]]
-                                 [(keyword (str "up_w_" i)) [:tensor [(quot hidden-dim 8) mlp-dim] :i32]]
-                                 [(keyword (str "up_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) mlp-dim] norm-dtype]]
-                                 [(keyword (str "down_w_" i)) [:tensor [(quot mlp-dim 8) hidden-dim] :i32]]
-                                 [(keyword (str "down_scale_" i)) [:tensor [(scale-groups-fn mlp-dim) hidden-dim] norm-dtype]]]
                                 layer-is-int4
                                 [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "gate_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
@@ -264,16 +237,17 @@
                           [k-buf v-buf] (if turboquant?
                                           (let [packed-dim (quot h-dim 4)
                                                 zeros (byte-array (* seq-l n-kv packed-dim))]
-                                            [(xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)
-                                             (xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv packed-dim] 2)])
-                                          (let [zeros (if (and (cfg/uop-backend? config) (= norm-enum 13))
+                                            [(uop-rt/host->device ctx zeros [1 seq-l n-kv packed-dim] :i8)
+                                             (uop-rt/host->device ctx zeros [1 seq-l n-kv packed-dim] :i8)])
+                                          (let [dtype (if (= norm-enum 11) :f32 :bf16)
+                                                zeros (if (= dtype :bf16)
                                                         (short-array (* seq-l n-kv h-dim))
                                                         (float-array (* seq-l n-kv h-dim)))]
-                                            [(xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)
-                                             (xla/buffer-from-host-buffer ctx (:client ctx) zeros [1 seq-l n-kv h-dim] norm-enum)]))]
+                                            [(uop-rt/host->device ctx zeros [1 seq-l n-kv h-dim] dtype)
+                                             (uop-rt/host->device ctx zeros [1 seq-l n-kv h-dim] dtype)]))]
                       (when target-arena
-                        (xla/track! target-arena k-buf)
-                        (xla/track! target-arena v-buf))
+                        (arena/track! target-arena k-buf)
+                        (arena/track! target-arena v-buf))
                       [k-buf v-buf]))
                   (range num-unshared))))))
 
@@ -344,45 +318,25 @@
         invars (build-tensor-logic-invars cfg max-seq-len)
         targets (build-gemma4-prefill-outvars cfg)
         ast (gemma-logic/gemma4-model-ast cfg)]
-    (if (= (:backend ctx) :uop)
-      (let [compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
-        (when-not (:quiet opts)
-          (println (format "Compiling declarative Tensor Logic Gemma 4 Prefill (%d layers, max-seq-len=%d) via pure-Clojure UOp backend..."
-                           (:num-layers config) max-seq-len)))
-        (compile-uop ctx "gemma4_prefill" invars ast targets))
-      (do
-        (when-not (:quiet opts)
-          (println (format "Lowering declarative Tensor Logic Gemma 4 Prefill (%d layers, max-seq-len=%d) to StableHLO..."
-                           (:num-layers config) max-seq-len)))
-        (let [graph (lower/ast->graph "gemma4_prefill" invars ast targets)]
-          (when-not (:quiet opts)
-            (println "Compiling Gemma 4 Prefill graph to native XLA PjRtLoadedExecutable..."))
-          (xla/compile-graph ctx graph))))))
+    (when-not (:quiet opts)
+      (println (format "Compiling declarative Tensor Logic Gemma 4 Prefill (%d layers, max-seq-len=%d) via pure-Clojure UOp backend..."
+                       (:num-layers config) max-seq-len)))
+    (uop-rt/compile-uop-executable ctx "gemma4_prefill" invars ast targets)))
 
 (defn compile-gemma4-kv-executable
-  "Compiles single-step Gemma 4 KV-Cache AST into a native StableHLO MLIR executable."
+  "Compiles single-step Gemma 4 KV-Cache AST into a native executable."
   [{:keys [ctx config opts]} max-seq-len]
   (let [cfg (assoc config :max-seq-len max-seq-len :last-token-only? true)
         invars (build-gemma4-kv-invars cfg max-seq-len)
         targets (build-gemma4-kv-outvars cfg)
         ast (gemma-logic/gemma4-kv-model-ast cfg)]
-    (if (= (:backend ctx) :uop)
-      (let [compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
-        (when-not (:quiet opts)
-          (println (format "Compiling declarative Tensor Logic Gemma 4 KV Cache Step (%d layers, max-seq-len=%d) via pure-Clojure UOp backend..."
-                           (:num-layers config) max-seq-len)))
-        (compile-uop ctx "gemma4_kv_step" invars ast targets))
-      (do
-        (when-not (:quiet opts)
-          (println (format "Lowering declarative Tensor Logic Gemma 4 KV Cache Step (%d layers, max-seq-len=%d) to StableHLO..."
-                           (:num-layers config) max-seq-len)))
-        (let [graph (lower/ast->graph "gemma4_kv_step" invars ast targets)]
-          (when-not (:quiet opts)
-            (println "Compiling Gemma 4 KV Cache step graph to native XLA PjRtLoadedExecutable..."))
-          (xla/compile-graph ctx graph))))))
+    (when-not (:quiet opts)
+      (println (format "Compiling declarative Tensor Logic Gemma 4 KV Cache Step (%d layers, max-seq-len=%d) via pure-Clojure UOp backend..."
+                       (:num-layers config) max-seq-len)))
+    (uop-rt/compile-uop-executable ctx "gemma4_kv_step" invars ast targets)))
 
 (defn compile-gemma4-chunked-prefill-executable
-  "Compiles chunked Gemma 4 KV-Cache AST into a native StableHLO MLIR executable.
+  "Compiles chunked Gemma 4 KV-Cache AST into a native executable.
    Takes an input chunk of tokens of length `chunk-size` (default 128) and start position `pos`."
   ([session max-seq-len]
    (compile-gemma4-chunked-prefill-executable session max-seq-len 128))
@@ -396,20 +350,10 @@
          invars (build-gemma4-kv-invars cfg max-seq-len)
          targets (build-gemma4-kv-outvars cfg)
          ast (gemma-logic/gemma4-kv-model-ast cfg)]
-     (if (= (:backend ctx) :uop)
-       (let [compile-uop (requiring-resolve 'einsum.uop.runtime/compile-uop-executable)]
-         (when-not (:quiet opts)
-           (println (format "Compiling declarative Tensor Logic Gemma 4 Chunked Prefill (%d layers, chunk-size=%d, max-seq-len=%d) via pure-Clojure UOp backend..."
-                            (:num-layers config) chunk-sz max-seq-len)))
-         (compile-uop ctx "gemma4_chunked_prefill" invars ast targets))
-       (do
-         (when-not (:quiet opts)
-           (println (format "Lowering declarative Tensor Logic Gemma 4 Chunked Prefill (%d layers, chunk-size=%d, max-seq-len=%d) to StableHLO..."
-                            (:num-layers config) chunk-sz max-seq-len)))
-         (let [graph (lower/ast->graph "gemma4_chunked_prefill" invars ast targets)]
-           (when-not (:quiet opts)
-             (println "Compiling Gemma 4 Chunked Prefill graph to native XLA PjRtLoadedExecutable..."))
-           (xla/compile-graph ctx graph)))))))
+     (when-not (:quiet opts)
+       (println (format "Compiling declarative Tensor Logic Gemma 4 Chunked Prefill (%d layers, chunk-size=%d, max-seq-len=%d) via pure-Clojure UOp backend..."
+                        (:num-layers config) chunk-sz max-seq-len)))
+     (uop-rt/compile-uop-executable ctx "gemma4_chunked_prefill" invars ast targets))))
 
 (defn compile-gemma4-attention-decode-executable
   "Compiles single-step Gemma 4 attention decode executable into a native StableHLO MLIR executable.

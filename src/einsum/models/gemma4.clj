@@ -200,8 +200,7 @@
   ([out-term x-term w-term is-int8? is-int4? scale-var norm-dtype attrs]
    (gemma4-linear-proj out-term x-term w-term is-int8? is-int4? false scale-var norm-dtype attrs))
   ([out-term x-term w-term is-int8? is-int4? is-ternary? scale-var norm-dtype attrs]
-   (let [use-w4a16? (and is-int4? (:use-w4a16-gemv? attrs))
-         clean-attrs (dissoc attrs :use-w4a16-gemv?)]
+   (let [clean-attrs attrs]
      (cond
        is-ternary?
        (let [head-name (first out-term)
@@ -216,16 +215,6 @@
           (cond-> [:= out-term]
             (seq clean-attrs) (conj clean-attrs)
             :always (conj x-term (into [w-scaled] w-idxs)))])
-
-       use-w4a16?
-       (let [head-name (first out-term)
-             w-name (first w-term)
-             w-idxs (vec (rest w-term))
-             out-dim (first w-idxs)
-             in-dim (second w-idxs)]
-         [:block {:name (keyword (str (name head-name) "_w4a16_proj"))}
-          (cond-> [:w4a16-gemv out-term x-term [w-name in-dim out-dim] [scale-var out-dim]]
-            (seq clean-attrs) (conj clean-attrs))])
 
        is-int4?
        (let [head-name (first out-term)
@@ -301,13 +290,7 @@
          layer-is-int8? (and is-int8? (not skipped?))
          layer-is-int4? (and is-int4? (not skipped?))
          layer-is-ternary? (and is-ternary? (not skipped?))
-         use-w4a16? (boolean (and layer-is-int4?
-                                  (if (some? (:use-w4a16-gemv config))
-                                    (:use-w4a16-gemv config)
-                                    (and (or (= (:backend config) :rocm) (= (:target config) :rocm))
-                                         (not (contains? #{:uop :uop-rocm :uop-cpu} (:backend config)))
-                                         (not (contains? #{:uop :uop-rocm :uop-cpu} (:target config)))))))
-         proj-attrs {:use-w4a16-gemv? use-w4a16?}
+         proj-attrs {}
          norm-dtype (get config :norm-dtype (if (or is-int8? is-int4? is-ternary?) :bf16 (get config :weight-dtype :bf16)))
 
          actual-k-ro (if is-shared? shared-k [:k_ro i])
@@ -635,13 +618,7 @@
          layer-is-int4? (and is-int4? (not skipped?))
          layer-is-ternary? (and is-ternary? (not skipped?))
          q-len (long (or (:q-len config) (:chunk-size config) 1))
-         use-w4a16? (boolean (and layer-is-int4?
-                                  (if (some? (:use-w4a16-gemv config))
-                                    (:use-w4a16-gemv config)
-                                    (and (or (= (:backend config) :rocm) (= (:target config) :rocm))
-                                         (not (contains? #{:uop :uop-rocm :uop-cpu} (:backend config)))
-                                         (not (contains? #{:uop :uop-rocm :uop-cpu} (:target config)))))))
-         proj-attrs {:use-w4a16-gemv? use-w4a16?}
+         proj-attrs {}
          norm-dtype (get config :norm-dtype (if (or is-int8? is-int4? is-ternary?) :bf16 (get config :weight-dtype :bf16)))
          turboquant? (boolean (or (:turboquant-kv? config)
                                   (= (:kv-quant config) :turboquant)
@@ -836,19 +813,11 @@
 (defn build-tensor-logic-invars
   "Constructs EDN SSA signature invars for full Gemma 4 model forward pass."
   [config max-seq-len]
-  (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size backend target]} config
+  (let [{:keys [vocab-size hidden-dim total-pl-dim pl-dim num-layers weight-dtype is-int8 is-int4 is-ternary layer-configs last-token-only? group-size]} config
         int4? (boolean (or is-int4 (= weight-dtype :int4)))
         is-ternary (boolean (or is-ternary (= weight-dtype :ternary) (= (:quant-type config) :ternary)))
         norm-dtype (if (or is-int8 int4? is-ternary) :bf16 (or weight-dtype :bf16))
         has-ple? (pos? total-pl-dim)
-        use-w4a16? (and int4?
-                        (if (some? (:use-w4a16-gemv config))
-                          (boolean (:use-w4a16-gemv config))
-                          (or (= backend :rocm) (= target :rocm))))
-        scale-groups-fn (fn [in-dim]
-                          (if (and group-size (zero? (mod in-dim group-size)))
-                            (quot in-dim group-size)
-                            1))
         scale-shape-fn (fn [rows cols]
                          (cond
                            (and int4? group-size (zero? (mod cols group-size)))
@@ -884,8 +853,7 @@
                                  skipped? (contains? (set (:skip-layers config)) i)
                                  layer-is-ternary (and is-ternary (not skipped?))
                                  layer-is-int4 (and int4? (not skipped?))
-                                 layer-is-int8 (and is-int8 (not skipped?))
-                                 layer-use-w4a16 (and use-w4a16? (not skipped?))]
+                                 layer-is-int8 (and is-int8 (not skipped?))]
                              (concat
                               [[(keyword (str "input_ln_w_" i)) [:tensor [hidden-dim] norm-dtype]]
                                [(keyword (str "layer_scalar_" i)) [:tensor [1] norm-dtype]]]
@@ -899,15 +867,6 @@
                                  [(keyword (str "v_scale_" i)) [:tensor (scale-shape-fn kv-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "o_w_" i)) [:tensor [hidden-dim (quot q-dim 4)] :i8]]
                                  [(keyword (str "o_scale_" i)) [:tensor (scale-shape-fn hidden-dim q-dim) norm-dtype]]]
-                                layer-use-w4a16
-                                [[(keyword (str "q_w_" i)) [:tensor [(quot hidden-dim 8) q-dim] :i32]]
-                                 [(keyword (str "q_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) q-dim] norm-dtype]]
-                                 [(keyword (str "k_w_" i)) [:tensor [(quot hidden-dim 8) kv-dim] :i32]]
-                                 [(keyword (str "k_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) kv-dim] norm-dtype]]
-                                 [(keyword (str "v_w_" i)) [:tensor [(quot hidden-dim 8) kv-dim] :i32]]
-                                 [(keyword (str "v_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) kv-dim] norm-dtype]]
-                                 [(keyword (str "o_w_" i)) [:tensor [(quot q-dim 8) hidden-dim] :i32]]
-                                 [(keyword (str "o_scale_" i)) [:tensor [(scale-groups-fn q-dim) hidden-dim] norm-dtype]]]
                                 layer-is-int4
                                 [[(keyword (str "q_w_" i)) [:tensor [q-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "q_scale_" i)) [:tensor (scale-shape-fn q-dim hidden-dim) norm-dtype]]
@@ -944,13 +903,6 @@
                                  [(keyword (str "up_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]
                                  [(keyword (str "down_w_" i)) [:tensor [hidden-dim (quot mlp-dim 4)] :i8]]
                                  [(keyword (str "down_scale_" i)) [:tensor (scale-shape-fn hidden-dim mlp-dim) norm-dtype]]]
-                                layer-use-w4a16
-                                [[(keyword (str "gate_w_" i)) [:tensor [(quot hidden-dim 8) mlp-dim] :i32]]
-                                 [(keyword (str "gate_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) mlp-dim] norm-dtype]]
-                                 [(keyword (str "up_w_" i)) [:tensor [(quot hidden-dim 8) mlp-dim] :i32]]
-                                 [(keyword (str "up_scale_" i)) [:tensor [(scale-groups-fn hidden-dim) mlp-dim] norm-dtype]]
-                                 [(keyword (str "down_w_" i)) [:tensor [(quot mlp-dim 8) hidden-dim] :i32]]
-                                 [(keyword (str "down_scale_" i)) [:tensor [(scale-groups-fn mlp-dim) hidden-dim] norm-dtype]]]
                                 layer-is-int4
                                 [[(keyword (str "gate_w_" i)) [:tensor [mlp-dim (quot hidden-dim 2)] :i8]]
                                  [(keyword (str "gate_scale_" i)) [:tensor (scale-shape-fn mlp-dim hidden-dim) norm-dtype]]

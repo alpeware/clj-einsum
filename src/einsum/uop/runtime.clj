@@ -590,27 +590,29 @@
     (MemorySegment/copy seg ValueLayout/JAVA_FLOAT (long 0) out 0 (int elem-count))))
 
 (defn device->host-floats
-  "Transfers `n-elements` from `uop-buf` back to a host `float[]` array."
-  ^floats [ctx uop-buf ^long n-elements]
-  (let [elem-count (min (long (:size uop-buf n-elements)) n-elements)
-        dt (:dtype uop-buf :f32)
-        ^floats out (float-array elem-count)]
-    (if (= :rocm (:target uop-buf))
-      (let [hip (or (:hip ctx) (init-hip-bindings!))
-            ^MethodHandle hipMemcpy (:hipMemcpy hip)
-            byte-len (* elem-count (dtype-byte-size dt))]
-        (with-open [staging (Arena/ofConfined)]
-          (let [stage-seg (.allocate staging (long (max 8 byte-len)) 64)
-                rc (int (.invokeWithArguments hipMemcpy
-                                              (into-array Object [stage-seg
-                                                                  (:ptr uop-buf)
-                                                                  (long byte-len)
-                                                                  (int 2)])))]
-            (check-hip! rc "hipMemcpy(DtoH)")
-            (segment->floats! stage-seg out elem-count dt))))
-      (let [^MemorySegment seg (:ptr uop-buf)]
-        (segment->floats! seg out elem-count dt)))
-    out))
+  "Transfers `n-elements` (or all elements) from `uop-buf` back to a host `float[]` array."
+  (^floats [ctx uop-buf]
+   (device->host-floats ctx uop-buf (long (or (:size uop-buf) 0))))
+  (^floats [ctx uop-buf ^long n-elements]
+   (let [elem-count (min (long (:size uop-buf n-elements)) n-elements)
+         dt (:dtype uop-buf :f32)
+         ^floats out (float-array elem-count)]
+     (if (= :rocm (:target uop-buf))
+       (let [hip (or (:hip ctx) (init-hip-bindings!))
+             ^MethodHandle hipMemcpy (:hipMemcpy hip)
+             byte-len (* elem-count (dtype-byte-size dt))]
+         (with-open [staging (Arena/ofConfined)]
+           (let [stage-seg (.allocate staging (long (max 8 byte-len)) 64)
+                 rc (int (.invokeWithArguments hipMemcpy
+                                               (into-array Object [stage-seg
+                                                                   (:ptr uop-buf)
+                                                                   (long byte-len)
+                                                                   (int 2)])))]
+             (check-hip! rc "hipMemcpy(DtoH)")
+             (segment->floats! stage-seg out elem-count dt))))
+       (let [^MemorySegment seg (:ptr uop-buf)]
+         (segment->floats! seg out elem-count dt)))
+     out)))
 
 (defn device->host-ints
   "Transfers `n-elements` from `uop-buf` back to a host `int[]` array."
@@ -825,6 +827,8 @@
               :opts opts
               :destroy-fn destroy-buffer!}]
      ctx)))
+
+(def init-uop-context init-uop-context!)
 
 (defn compile-uop-executable
   "Compiles a Tensor Logic AST (or pre-lowered UOp graph) into a native `UOpExecutable`

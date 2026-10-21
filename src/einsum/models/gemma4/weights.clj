@@ -1,12 +1,21 @@
 (ns einsum.models.gemma4.weights
   "Gemma 4 device weight allocation, format conversion, and quantization unpacking."
   (:require [clojure.string :as str]
-            [einsum.core :as xla]
             [einsum.logic.exl3 :as exl3]
             [einsum.models.gemma :as gemma-logic]
             [einsum.quant.ternary :as ternary]
             [einsum.runtime.arena :as arena]
-            [einsum.runtime.safetensors :as st]))
+            [einsum.runtime.safetensors :as st]
+            [einsum.uop.runtime :as uop-rt]))
+
+(defn- enum->dtype [enum]
+  (cond
+    (keyword? enum) enum
+    (= enum 11) :f32
+    (= enum 13) :bf16
+    (= enum 2) :i8
+    (= enum 4) :i32
+    :else :bf16))
 
 (defn floats->bf16-shorts
   "Converts float array to short array of bfloat16 bit-patterns."
@@ -81,7 +90,7 @@
                      target-format (if (= weight-enum 11) :f32 :bf16)
                      dequant-arr (exl3/dequant-exl3-matrix trellis-slice in-features out-features bits suh-slice svh-slice
                                                            {:as target-format :transpose? true})]
-                 (xla/buffer-from-host-buffer ctx (:client ctx) dequant-arr shape weight-enum))
+                 (uop-rt/host->device ctx dequant-arr shape (if (= weight-enum 11) :f32 :bf16)))
 
                (or (zero? (reduce * 1 shape))
                    (not (or (contains? header actual-tensor-name)
@@ -96,17 +105,17 @@
                                   bf-bits (short (bit-shift-right (Float/floatToRawIntBits default-f) 16))]
                               (java.util.Arrays/fill arr bf-bits)
                               arr))]
-                 (xla/buffer-from-host-buffer ctx (:client ctx) data shape weight-enum))
+                 (uop-rt/host->device ctx data shape (enum->dtype weight-enum)))
 
                :else
                (let [slice (st/get-tensor-slice weights-mmap actual-tensor-name)]
-                 (xla/buffer-from-host-buffer ctx (:client ctx) slice shape weight-enum)))]
+                 (uop-rt/host->device ctx slice shape (enum->dtype weight-enum))))]
      (when target-arena
-       (xla/track! target-arena buf))
+       (arena/track! target-arena buf))
      buf)))
 
 (defn load-linear-projection-buffers
-  "Loads a linear projection matrix as either a single unquantized PJRT buffer,
+  "Loads a linear projection matrix as either a single unquantized buffer,
    or if is-int8/is-int4/is-ternary is true, a pair [w-buf scale-buf] with in-graph quantization.
    Optionally registers allocated buffers in `arena` (or `arena/*active-arena*`)."
   ([ctx weights-mmap tensor-name shape is-int8 norm-enum weight-enum]
@@ -117,9 +126,7 @@
    (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum 128 nil))
   ([ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size]
    (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size nil))
-  ([ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size arena]
-   (load-linear-projection-buffers ctx weights-mmap tensor-name shape is-int8 is-int4 is-ternary norm-enum weight-enum group-size arena false))
-  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 is-ternary norm-enum _weight-enum group-size arena use-w4a16?]
+  ([ctx weights-mmap tensor-name [rows cols :as shape] is-int8 is-int4 is-ternary norm-enum _weight-enum group-size arena]
    (let [target-arena (or arena arena/*active-arena*)]
      (if-not (or is-int8 is-int4 is-ternary)
        [(load-weight-buffer ctx weights-mmap tensor-name shape (if (= norm-enum 11) :f32 :bf16) norm-enum 0.0 target-arena)]
@@ -136,26 +143,17 @@
          (if prequantized?
            (let [w-slice (st/get-tensor-slice weights-mmap actual-tensor-name)
                  scale-slice (st/get-tensor-slice weights-mmap scale-name)
-                 num-groups (if (and group-size (zero? (mod cols group-size)))
-                              (quot cols group-size)
-                              1)
-                 w-buf (if (and is-int4 use-w4a16?)
-                         (let [repacked (exl3/repack-int4-to-rdna3 w-slice rows cols)]
-                           (xla/buffer-from-host-buffer ctx (:client ctx) repacked [(quot cols 8) rows] 4))
-                         (let [w-shape (cond is-ternary [rows (quot cols 4)] is-int4 [rows (quot cols 2)] :else [rows cols])]
-                           (xla/buffer-from-host-buffer ctx (:client ctx) w-slice w-shape 2)))
-                 scale-buf (if (and is-int4 use-w4a16?)
-                             (let [transposed (exl3/transpose-scales-for-rdna3 scale-slice rows num-groups)]
-                               (xla/buffer-from-host-buffer ctx (:client ctx) transposed [num-groups rows] norm-enum))
-                             (let [scale-shape (or (get-in header [scale-name "shape"])
-                                                   (get-in (:tensors weights-mmap) [scale-name :info "shape"])
-                                                   (if (and (or is-int4 is-ternary) group-size (zero? (mod cols group-size)))
-                                                     [rows (quot cols group-size)]
-                                                     [rows]))]
-                               (xla/buffer-from-host-buffer ctx (:client ctx) scale-slice scale-shape norm-enum)))]
+                 w-shape (cond is-ternary [rows (quot cols 4)] is-int4 [rows (quot cols 2)] :else [rows cols])
+                 w-buf (uop-rt/host->device ctx w-slice w-shape :i8)
+                 scale-shape (or (get-in header [scale-name "shape"])
+                                 (get-in (:tensors weights-mmap) [scale-name :info "shape"])
+                                 (if (and (or is-int4 is-ternary) group-size (zero? (mod cols group-size)))
+                                   [rows (quot cols group-size)]
+                                   [rows]))
+                 scale-buf (uop-rt/host->device ctx scale-slice scale-shape (enum->dtype norm-enum))]
              (when target-arena
-               (xla/track! target-arena w-buf)
-               (xla/track! target-arena scale-buf))
+               (arena/track! target-arena w-buf)
+               (arena/track! target-arena scale-buf))
              [w-buf scale-buf])
            (let [trellis-name (when (str/ends-with? tensor-name ".weight")
                                 (str/replace tensor-name #"\.weight$" ".trellis"))
@@ -193,40 +191,31 @@
                (let [{:keys [data scales scale-shape]} (ternary/quantize-weights-per-row-ternary raw-arr rows cols
                                                                                                  {:as scale-format
                                                                                                   :group-size group-size})
-                     w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 4)] 2)
-                     scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum)]
+                     w-buf (uop-rt/host->device ctx data [rows (quot cols 4)] :i8)
+                     scale-buf (uop-rt/host->device ctx scales (or scale-shape [rows]) (enum->dtype norm-enum))]
                  (when target-arena
-                   (xla/track! target-arena w-buf)
-                   (xla/track! target-arena scale-buf))
+                   (arena/track! target-arena w-buf)
+                   (arena/track! target-arena scale-buf))
                  [w-buf scale-buf])
 
                is-int4
                (let [{:keys [data scales scale-shape]} (exl3/quantize-weights-per-row-int4 raw-arr rows cols
                                                                                            {:as scale-format
                                                                                             :group-size group-size})
-                     num-groups (if (and group-size (zero? (mod cols group-size)))
-                                  (quot cols group-size)
-                                  1)
-                     w-buf (if use-w4a16?
-                             (let [repacked (exl3/repack-int4-to-rdna3 data rows cols)]
-                               (xla/buffer-from-host-buffer ctx (:client ctx) repacked [(quot cols 8) rows] 4))
-                             (xla/buffer-from-host-buffer ctx (:client ctx) data [rows (quot cols 2)] 2))
-                     scale-buf (if use-w4a16?
-                                 (let [transposed (exl3/transpose-scales-for-rdna3 scales rows num-groups)]
-                                   (xla/buffer-from-host-buffer ctx (:client ctx) transposed [num-groups rows] norm-enum))
-                                 (xla/buffer-from-host-buffer ctx (:client ctx) scales (or scale-shape [rows]) norm-enum))]
+                     w-buf (uop-rt/host->device ctx data [rows (quot cols 2)] :i8)
+                     scale-buf (uop-rt/host->device ctx scales (or scale-shape [rows]) (enum->dtype norm-enum))]
                  (when target-arena
-                   (xla/track! target-arena w-buf)
-                   (xla/track! target-arena scale-buf))
+                   (arena/track! target-arena w-buf)
+                   (arena/track! target-arena scale-buf))
                  [w-buf scale-buf])
 
                :else
                (let [{:keys [data scales]} (exl3/quantize-weights-per-row-int8 raw-arr rows cols {:as scale-format})
-                     w-buf (xla/buffer-from-host-buffer ctx (:client ctx) data shape 2)
-                     scale-buf (xla/buffer-from-host-buffer ctx (:client ctx) scales [rows] norm-enum)]
+                     w-buf (uop-rt/host->device ctx data shape :i8)
+                     scale-buf (uop-rt/host->device ctx scales [rows] (enum->dtype norm-enum))]
                  (when target-arena
-                   (xla/track! target-arena w-buf)
-                   (xla/track! target-arena scale-buf))
+                   (arena/track! target-arena w-buf)
+                   (arena/track! target-arena scale-buf))
                  [w-buf scale-buf])))))))))
 
 (defn allocate-device-weights
@@ -241,14 +230,8 @@
                                   (swap! (:device-buffers weight-store) assoc k buf))
                                 buf)]
     (binding [arena/*active-arena* target-arena]
-      (let [{:keys [prefix-base vocab-size hidden-dim total-pl-dim pl-dim weight-dtype weight-enum norm-enum layer-configs num-layers is-int8 is-int4 is-ternary group-size backend target]} config
+      (let [{:keys [prefix-base vocab-size hidden-dim total-pl-dim pl-dim weight-dtype weight-enum norm-enum layer-configs num-layers is-int8 is-int4 is-ternary group-size]} config
             int4? (boolean (or is-int4 (= weight-dtype :int4)))
-            use-w4a16? (and int4?
-                            (if (some? (:use-w4a16-gemv config))
-                              (boolean (:use-w4a16-gemv config))
-                              (and (or (= backend :rocm) (= target :rocm))
-                                   (not (contains? #{:uop :uop-rocm :uop-cpu} backend))
-                                   (not (contains? #{:uop :uop-rocm :uop-cpu} target)))))
             has-ple? (pos? total-pl-dim)
             load-fn (fn
                       ([name shape enum] (load-weight-buffer ctx weights-mmap name shape weight-dtype enum 0.0 target-arena))
@@ -274,10 +257,9 @@
                                        layer-is-ternary (and is-ternary (not skipped?))
                                        layer-is-int8 (and is-int8 (not skipped?))
                                        layer-is-int4 (and int4? (not skipped?))
-                                       layer-use-w4a16? (and use-w4a16? (not skipped?))
                                        quantized? (or layer-is-ternary layer-is-int8 layer-is-int4)
                                        load-linear-fn (fn [name shape w-kw scale-kw]
-                                                        (let [bufs (load-linear-projection-buffers ctx weights-mmap name shape layer-is-int8 layer-is-int4 layer-is-ternary norm-enum weight-enum group-size target-arena layer-use-w4a16?)]
+                                                        (let [bufs (load-linear-projection-buffers ctx weights-mmap name shape layer-is-int8 layer-is-int4 layer-is-ternary norm-enum weight-enum group-size target-arena)]
                                                           (if quantized?
                                                             (do (register-store-entry! w-kw (first bufs))
                                                                 (register-store-entry! scale-kw (second bufs)))
@@ -334,19 +316,13 @@
         (vec (concat [embed-buf] ple-bufs layer-bufs [final-norm-buf]))))))
 
 (defn allocate-relational-buffers
-  "Allocates device PJRT buffers for relational memory tensors:
+  "Allocates device buffers for relational memory tensors:
    w_mem_proj, r_active, entity_table, threshold_const, w_entity_to_vocab."
   [{:keys [ctx config]} mem & [{:keys [w-mem-proj w-entity-to-vocab threshold rel-id]}]]
   (let [{:keys [norm-enum is-int8 is-int4 is-ternary weight-dtype]} config
-        norm-dt (if (or is-int8 is-int4 is-ternary) :bf16 weight-dtype)
-        is-bf16? (= norm-dt :bf16)
+        norm-dt (if (or is-int8 is-int4 is-ternary) :bf16 (or weight-dtype (enum->dtype norm-enum)))
         to-dev-buf (fn [data shape]
-                     (if is-bf16?
-                       (let [sa (if (instance? (Class/forName "[S") data)
-                                  ^shorts data
-                                  (floats->bf16-shorts ^floats data))]
-                         (xla/buffer-from-host-buffer ctx (:client ctx) sa shape 13))
-                       (xla/buffer-from-host-buffer ctx (:client ctx) data shape (or norm-enum 11))))
+                     (uop-rt/host->device ctx data shape norm-dt))
         rel-cfg (or (:relational-memory config) {})
         hidden-dim (long (or (:hidden-dim config) 1536))
         mem-dim (long (or (:dim rel-cfg) (:memory-dim rel-cfg) 256))
@@ -372,9 +348,9 @@
      (to-dev-buf w-vocab [entity-count vocab-size])]))
 
 (defn destroy-relational-buffers!
-  "Releases device PJRT buffers for relational memory."
+  "Releases device buffers for relational memory."
   [arena-or-ctx buffers]
   (if (arena/arena? arena-or-ctx)
     (arena/destroy! arena-or-ctx buffers)
     (doseq [b buffers]
-      (when b (xla/destroy-buffer! arena-or-ctx b)))))
+      (when b (uop-rt/destroy-buffer! arena-or-ctx b)))))

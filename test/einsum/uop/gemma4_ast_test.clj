@@ -217,8 +217,9 @@
       ;; Verify uop-rocm emits standard [rows cols/2] :i8 and [rows cols/group-size] :bf16
       (is (= [:tensor [256 128] :i8] (get uop-invars :q_w_0)))
       (is (= [:tensor [256 2] :bf16] (get uop-invars :q_scale_0)))
-      ;; Verify rocm emits W4A16 repacked [cols/8 rows] :i32
-      (is (= [:tensor [32 256] :i32] (get rocm-invars :q_w_0)))
+      ;; Verify rocm emits standard [rows cols/2] :i8 and [rows cols/group-size] :bf16 (no W4A16)
+      (is (= [:tensor [256 128] :i8] (get rocm-invars :q_w_0)))
+      (is (= [:tensor [256 2] :bf16] (get rocm-invars :q_scale_0)))
 
       ;; 2. AST equation routing verification
       (let [uop-ast (gemma4/build-gemma4-kv-ast uop-cfg 128)
@@ -229,9 +230,8 @@
             uop-w4a16-count (count (filter #(= % :w4a16-gemv) uop-ops))
             rocm-unpack-count (count (filter #(= % :int4-unpack) rocm-ops))
             rocm-w4a16-count (count (filter #(= % :w4a16-gemv) rocm-ops))]
-        ;; UOp backend uses in-accelerator :int4-unpack and zero :w4a16-gemv
+        ;; Both use in-accelerator :int4-unpack and zero :w4a16-gemv
         (is (> uop-unpack-count 0))
         (is (zero? uop-w4a16-count))
-        ;; OpenXLA ROCm backend uses custom-call :w4a16-gemv and zero :int4-unpack
-        (is (> rocm-w4a16-count 0))
-        (is (zero? rocm-unpack-count))))))
+        (is (> rocm-unpack-count 0))
+        (is (zero? rocm-w4a16-count))))))

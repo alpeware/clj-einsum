@@ -2,8 +2,6 @@
   "Gemma 4 generation runtime engines, decoding loops, and persistent session management."
   (:require [clojure.pprint :as pprint]
             [clojure.string :as str]
-            [einsum.compiler.pjrt :as pjrt]
-            [einsum.core :as xla]
             [einsum.models.gemma :as gemma-logic]
             [einsum.models.gemma4.config :as cfg]
             [einsum.models.gemma4.kernels :as kernels]
@@ -14,7 +12,8 @@
             [einsum.runtime.sampling :as sampling]
             [einsum.runtime.tokenizer.core :as tok]
             [einsum.runtime.tokenizer.protocol :refer [bos-id decode encode eos-id]]
-            [einsum.runtime.weights :as rw])
+            [einsum.runtime.weights :as rw]
+            [einsum.uop.runtime :as uop-rt])
   (:import [java.lang.foreign Arena]))
 
 (defn argmax-host
@@ -95,19 +94,39 @@
       (reduce min wins))))
 
 (defn- execute-step-executable
-  "Executes a compiled step, chunk, or prefill executable (PJRT or UOp) given step inputs."
+  "Executes a compiled UOp step, chunk, or prefill executable given step inputs."
   [ctx exec step-inputs num-outs]
-  (if (or (= (:backend ctx) :uop) (:uop-executable? exec))
-    (let [exec-uop (requiring-resolve 'einsum.uop.runtime/execute-uop-executable)
-          out-map (exec-uop ctx exec step-inputs)]
-      (if (== (long num-outs) 1)
-        (first (vals out-map))
-        (let [sched-outvars (get-in exec [:uop-graph :outvars])
-              ordered (if (seq sched-outvars)
-                        (mapv #(get out-map %) sched-outvars)
-                        (vec (vals out-map)))]
-          ordered)))
-    (pjrt/execute-executable ctx (or (:handle exec) exec) step-inputs num-outs)))
+  (let [out-map (uop-rt/execute-uop-executable ctx exec step-inputs)]
+    (if (== (long num-outs) 1)
+      (first (vals out-map))
+      (let [sched-outvars (get-in exec [:uop-graph :outvars])
+            ordered (if (seq sched-outvars)
+                      (mapv #(get out-map %) sched-outvars)
+                      (vec (vals out-map)))]
+        ordered))))
+
+(defn- to-host-slice
+  "Transfers a slice of UOp output device buffer or array back to host float array."
+  ([ctx-or-buf out-buf-or-slice-idx slice-idx-or-vsize vocab-size-or-total total-or-dt & [maybe-dt]]
+   (let [[ctx out-buf slice-idx vocab-size total-elements _dtype]
+         (if maybe-dt
+           [ctx-or-buf out-buf-or-slice-idx (long slice-idx-or-vsize) (long vocab-size-or-total) (long total-or-dt) maybe-dt]
+           [nil ctx-or-buf (long out-buf-or-slice-idx) (long slice-idx-or-vsize) (long vocab-size-or-total) total-or-dt])
+         n-elements (max (long total-elements) (long (* (inc (long slice-idx)) (long vocab-size))))
+         ^floats all-floats (cond
+                              (instance? (Class/forName "[F") out-buf)
+                              ^floats out-buf
+
+                              (uop-rt/uop-buffer? out-buf)
+                              (uop-rt/device->host-floats ctx out-buf n-elements)
+
+                              :else
+                              (float-array (map float out-buf)))
+         offset (int (* (long slice-idx) (long vocab-size)))
+         v-size (int vocab-size)
+         slice (float-array v-size)]
+     (System/arraycopy all-floats offset slice 0 v-size)
+     slice)))
 
 (defn run-vram-loop-generation
   "Executes autoregressive token generation entirely within device VRAM using 1-shot prefill
@@ -117,7 +136,7 @@
   (let [exec (or exec (:executable session) (:exec session))
         device-weights (or device-weights (:device-weights session))
         {:keys [ctx opts config kv-state prefill-executable session-arena tokenizer]} session
-        session-arena (or session-arena (xla/create-arena ctx))
+        session-arena (or session-arena (arena/create-arena ctx))
         {:keys [max-new-tokens quiet]} opts
         stop-pred (or (:stop-predicate opts) (:stop-predicate session))
         chunk-size (long (or (:chunk-size opts) (:chunk-size session) 32))
@@ -190,17 +209,17 @@
                            cur-kv initial-kv]
                       (if (< p prefill-limit)
                         (let [new-kv
-                              (xla/with-device-arena [iter-arena session-arena]
+                              (arena/with-device-arena [iter-arena session-arena]
                                 (let [tok (int (nth clamped-prompt-ids p))
                                       _ (aset x-arr 0 tok)
                                       _ (aset pos-arr 0 p)
-                                      x-b (xla/device-buffer iter-arena x-arr [1 1] :i32)
-                                      pos-b (xla/device-buffer iter-arena pos-arr [1] :i32)
+                                      x-b (arena/device-buffer iter-arena x-arr [1 1] :i32)
+                                      pos-b (arena/device-buffer iter-arena pos-arr [1] :i32)
                                       step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                      outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                                      outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
                                       outs-vec (if (vector? outs) outs [outs])
                                       nk (vec (subvec outs-vec 1))]
-                                  (xla/promote! iter-arena session-arena nk)
+                                  (arena/promote! iter-arena session-arena nk)
                                   nk))]
                           (arena/destroy! session-arena cur-kv)
                           (recur (inc p) new-kv))
@@ -208,17 +227,17 @@
 
               ;; Path B: 1-shot parallel prefill
               (and (not uop?) (some? prefill-exec))
-              (xla/with-device-arena [prefill-arena session-arena]
+              (arena/with-device-arena [prefill-arena session-arena]
                 (let [pos-p (int-array [(dec p-count)])
-                      in-b (xla/device-buffer prefill-arena in-arr [1 seq-len] :i32)
-                      pos-b (xla/device-buffer prefill-arena pos-p [1] :i32)
+                      in-b (arena/device-buffer prefill-arena in-arr [1 seq-len] :i32)
+                      pos-b (arena/device-buffer prefill-arena pos-p [1] :i32)
                       prefill-inputs (into [in-b pos-b] device-weights)
                       num-prefill-outs (inc (* 2 num-unshared))
-                      prefill-outs (xla/track! prefill-arena
-                                               (execute-step-executable ctx (or (:handle prefill-exec) prefill-exec) prefill-inputs num-prefill-outs))
+                      prefill-outs (arena/track! prefill-arena
+                                                 (execute-step-executable ctx (or (:handle prefill-exec) prefill-exec) prefill-inputs num-prefill-outs))
                       prefill-outs-vec (if (vector? prefill-outs) prefill-outs [prefill-outs])
                       kv-outs (vec (subvec prefill-outs-vec 1))]
-                  (xla/promote! prefill-arena session-arena kv-outs)
+                  (arena/promote! prefill-arena session-arena kv-outs)
                   kv-outs))
 
               ;; Path C: Chunked prefill (with sequential fallback for tail)
@@ -244,18 +263,18 @@
                           (if (< c num-full-chunks)
                             (let [start-p (* c chunk-sz)
                                   new-kv
-                                  (xla/with-device-arena [iter-arena session-arena]
+                                  (arena/with-device-arena [iter-arena session-arena]
                                     (let [chunk-toks (int-array chunk-sz)
                                           _ (dotimes [ci chunk-sz]
                                               (aset chunk-toks ci (int (nth clamped-prompt-ids (+ start-p ci)))))
                                           pos-c (int-array [start-p])
-                                          x-b (xla/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
-                                          pos-b (xla/device-buffer iter-arena pos-c [1] :i32)
+                                          x-b (arena/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
+                                          pos-b (arena/device-buffer iter-arena pos-c [1] :i32)
                                           step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                          outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-step-outs))
+                                          outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-step-outs))
                                           outs-vec (if (vector? outs) outs [outs])
                                           nk (vec (subvec outs-vec 1))]
-                                      (xla/promote! iter-arena session-arena nk)
+                                      (arena/promote! iter-arena session-arena nk)
                                       nk))]
                               (arena/destroy! session-arena cur-kv)
                               (recur (inc c) new-kv))
@@ -265,17 +284,17 @@
                          cur-kv post-chunk-kv]
                     (if (< p prefill-limit)
                       (let [new-kv
-                            (xla/with-device-arena [iter-arena session-arena]
+                            (arena/with-device-arena [iter-arena session-arena]
                               (let [tok (int (nth clamped-prompt-ids p))
                                     _ (aset x-arr 0 tok)
                                     _ (aset pos-arr 0 p)
-                                    x-b (xla/device-buffer iter-arena x-arr [1 1] :i32)
-                                    pos-b (xla/device-buffer iter-arena pos-arr [1] :i32)
+                                    x-b (arena/device-buffer iter-arena x-arr [1 1] :i32)
+                                    pos-b (arena/device-buffer iter-arena pos-arr [1] :i32)
                                     step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                    outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                                    outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
                                     outs-vec (if (vector? outs) outs [outs])
                                     nk (vec (subvec outs-vec 1))]
-                                (xla/promote! iter-arena session-arena nk)
+                                (arena/promote! iter-arena session-arena nk)
                                 nk))]
                         (arena/destroy! session-arena cur-kv)
                         (recur (inc p) new-kv))
@@ -299,25 +318,25 @@
                                      target-max)
                       t-chunk-0 (System/nanoTime)
                       [new-step new-kv-promoted stopped-by-eos?]
-                      (xla/with-device-arena [chunk-arena session-arena]
-                        (let [b-step (xla/device-buffer chunk-arena (int-array [cur-step]) [] :i32)
-                              b-max (xla/device-buffer chunk-arena (int-array [chunk-target]) [] :i32)
-                              b-toks (xla/device-buffer chunk-arena cur-toks-arr [1 seq-len] :i32)
+                      (arena/with-device-arena [chunk-arena session-arena]
+                        (let [b-step (arena/device-buffer chunk-arena (int-array [cur-step]) [] :i32)
+                              b-max (arena/device-buffer chunk-arena (int-array [chunk-target]) [] :i32)
+                              b-toks (arena/device-buffer chunk-arena cur-toks-arr [1 seq-len] :i32)
                               loop-inputs (into [b-step b-max b-toks] (concat cur-kv device-weights))
-                              loop-outs (xla/track! chunk-arena (pjrt/execute-executable ctx (or (:handle exec) exec) loop-inputs num-loop-outs))
+                              loop-outs (arena/track! chunk-arena (execute-step-executable ctx (or (:handle exec) exec) loop-inputs num-loop-outs))
                               loop-outs-vec (if (vector? loop-outs) loop-outs [loop-outs])
                               out-step (nth loop-outs-vec 0)
                               out-toks (nth loop-outs-vec 1)
                               nk (vec (subvec loop-outs-vec 2))
 
-                              step-floats (pjrt/buffer-to-host-buffer ctx out-step 1 :f32)
+                              step-floats (uop-rt/device->host-floats ctx out-step 1)
                               step-val (int (Float/floatToIntBits (aget step-floats 0)))
-                              toks-floats (pjrt/buffer-to-host-buffer ctx out-toks seq-len :f32)
+                              toks-floats (uop-rt/device->host-floats ctx out-toks seq-len)
                               step-bounded (min (max cur-step step-val) seq-len)]
                           (dotimes [i (- step-bounded cur-step)]
                             (let [idx (+ cur-step i)]
                               (aset cur-toks-arr idx (Float/floatToIntBits (aget toks-floats idx)))))
-                          (xla/promote! chunk-arena session-arena nk)
+                          (arena/promote! chunk-arena session-arena nk)
                           [step-bounded nk (< step-val chunk-target)]))
                       t-chunk-1 (System/nanoTime)
                       chunk-ms (/ (- t-chunk-1 t-chunk-0) 1e6)
@@ -390,18 +409,18 @@
          (let [s-len (count @cur-tokens)
                _ (when last-token? (aset pos-arr 0 (dec s-len)))
                next-id
-               (xla/with-device-arena [step-arena (or session-arena ctx)]
-                 (let [in-b (xla/device-buffer step-arena in-arr [1 seq-len] :i32)
+               (arena/with-device-arena [step-arena (or session-arena ctx)]
+                 (let [in-b (arena/device-buffer step-arena in-arr [1 seq-len] :i32)
                        pos-b (when last-token?
-                               (xla/device-buffer step-arena pos-arr [1] :i32))
+                               (arena/device-buffer step-arena pos-arr [1] :i32))
                        args (let [base (if last-token? [in-b pos-b] [in-b])
                                   rel-bufs (get session :relational-buffers [])]
                               (into base (concat device-weights rel-bufs)))
-                       out (xla/track! step-arena (xla/execute exec args))
+                       out (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) args 1))
                        out-buf (if (sequential? out) (first out) out)
                        logits (if last-token?
-                                (xla/to-host-slice out-buf 0 vocab-size vocab-size weight-dt)
-                                (xla/to-host-slice out-buf (dec s-len) vocab-size (* seq-len vocab-size) weight-dt))]
+                                (to-host-slice out-buf 0 vocab-size vocab-size weight-dt)
+                                (to-host-slice out-buf (dec s-len) vocab-size (* seq-len vocab-size) weight-dt))]
                    (sample-next-token logits opts prompt-ids (subvec @cur-tokens (count prompt-ids)))))]
            (when (< s-len seq-len)
              (aset in-arr s-len (int next-id)))
@@ -431,7 +450,7 @@
   ([session exec device-weights prompt-ids]
    (run-cached-kv-generation session exec device-weights prompt-ids nil))
   ([{:keys [ctx opts config tokenizer kv-state prefill-executable session-arena] :as session} exec device-weights prompt-ids max-seq-len]
-   (let [session-arena (or session-arena (xla/create-arena ctx))
+   (let [session-arena (or session-arena (arena/create-arena ctx))
          uop? (= (:backend ctx) :uop)
          {:keys [max-new-tokens quiet mode]} opts
          is-agent? (= mode :agent)
@@ -482,22 +501,22 @@
                                    (pos? target-chunk-sz))
                           (kernels/compile-gemma4-chunked-prefill-executable session seq-len target-chunk-sz)))
          _ (when (and uop? (= (:uop-target ctx) :rocm))
-             (xla/with-device-arena [warmup-arena session-arena]
+             (arena/with-device-arena [warmup-arena session-arena]
                (let [zero-pos (int-array 1)
-                     pos-b (xla/device-buffer warmup-arena zero-pos [1] :i32)]
+                     pos-b (arena/device-buffer warmup-arena zero-pos [1] :i32)]
                  (when (and chunk-exec
                             (pos? target-chunk-sz)
                             (:warmed-up? chunk-exec)
                             (compare-and-set! (:warmed-up? chunk-exec) false true))
                    (let [zero-chunk (int-array target-chunk-sz)
-                         x-b (xla/device-buffer warmup-arena zero-chunk [1 target-chunk-sz] :i32)
+                         x-b (arena/device-buffer warmup-arena zero-chunk [1 target-chunk-sz] :i32)
                          step-inputs (into [x-b pos-b] (concat initial-kv device-weights))]
                      (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-outs)))
                  (when (and exec
                             (:warmed-up? exec)
                             (compare-and-set! (:warmed-up? exec) false true))
                    (let [zero-tok (int-array 1)
-                         x-b (xla/device-buffer warmup-arena zero-tok [1 1] :i32)
+                         x-b (arena/device-buffer warmup-arena zero-tok [1 1] :i32)
                          step-inputs (into [x-b pos-b] (concat initial-kv device-weights))]
                      (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))))))
          t0 (System/nanoTime)]
@@ -512,19 +531,19 @@
                                     cur-logits nil]
                                (if (< p prompt-count)
                                  (let [[new-log new-kv]
-                                       (xla/with-device-arena [step-arena session-arena]
+                                       (arena/with-device-arena [step-arena session-arena]
                                          (let [tok (int (nth clamped-prompt-ids p))
                                                _ (aset x-arr 0 tok)
                                                _ (aset pos-arr 0 p)
-                                               x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
-                                               pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
+                                               x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
+                                               pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
                                                step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                               outs (xla/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                               outs (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
                                                outs-vec (if (vector? outs) outs [outs])
                                                nl (first outs-vec)
                                                nk (vec (subvec outs-vec 1))]
-                                           (xla/promote! step-arena session-arena nl)
-                                           (xla/promote! step-arena session-arena nk)
+                                           (arena/promote! step-arena session-arena nl)
+                                           (arena/promote! step-arena session-arena nk)
                                            [nl nk]))
                                        old-kv @kv-buffers-atom]
                                    (when cur-logits (arena/destroy! session-arena cur-logits))
@@ -538,19 +557,19 @@
                ;; Path B: 1-Shot Parallel Prefill
                (and (not uop?) (some? prefill-exec))
                (let [[prefill-logits prefill-kv]
-                     (xla/with-device-arena [step-arena session-arena]
+                     (arena/with-device-arena [step-arena session-arena]
                        (let [in-arr (int-array seq-len)
                              _ (dotimes [i prompt-count] (aset in-arr i (int (nth clamped-prompt-ids i))))
                              pos-p (int-array [(dec prompt-count)])
-                             in-b (xla/device-buffer step-arena in-arr [1 seq-len] :i32)
-                             pos-b (xla/device-buffer step-arena pos-p [1] :i32)
+                             in-b (arena/device-buffer step-arena in-arr [1 seq-len] :i32)
+                             pos-b (arena/device-buffer step-arena pos-p [1] :i32)
                              step-inputs (into [in-b pos-b] device-weights)
-                             outs (xla/track! step-arena (execute-step-executable ctx (or (:handle prefill-exec) prefill-exec) step-inputs num-outs))
+                             outs (arena/track! step-arena (execute-step-executable ctx (or (:handle prefill-exec) prefill-exec) step-inputs num-outs))
                              outs-vec (if (vector? outs) outs [outs])
                              pl (first outs-vec)
                              pkv (vec (subvec outs-vec 1))]
-                         (xla/promote! step-arena session-arena pl)
-                         (xla/promote! step-arena session-arena pkv)
+                         (arena/promote! step-arena session-arena pl)
+                         (arena/promote! step-arena session-arena pkv)
                          [pl pkv]))]
                  (reset! kv-buffers-atom prefill-kv)
                  [prefill-logits (System/nanoTime)])
@@ -578,20 +597,20 @@
                            (if (< c num-full-chunks)
                              (let [start-p (* c chunk-sz)
                                    [new-log new-kv]
-                                   (xla/with-device-arena [iter-arena session-arena]
+                                   (arena/with-device-arena [iter-arena session-arena]
                                      (let [chunk-toks (int-array chunk-sz)
                                            _ (dotimes [ci chunk-sz]
                                                (aset chunk-toks ci (int (nth clamped-prompt-ids (+ start-p ci)))))
                                            pos-c (int-array [start-p])
-                                           x-b (xla/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
-                                           pos-b (xla/device-buffer iter-arena pos-c [1] :i32)
+                                           x-b (arena/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
+                                           pos-b (arena/device-buffer iter-arena pos-c [1] :i32)
                                            step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                           outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-outs))
+                                           outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle chunk-exec) chunk-exec) step-inputs num-outs))
                                            outs-vec (if (vector? outs) outs [outs])
                                            nl (first outs-vec)
                                            nk (vec (subvec outs-vec 1))]
-                                       (xla/promote! iter-arena session-arena nl)
-                                       (xla/promote! iter-arena session-arena nk)
+                                       (arena/promote! iter-arena session-arena nl)
+                                       (arena/promote! iter-arena session-arena nk)
                                        [nl nk]))
                                    old-kv cur-kv]
                                (when cur-log (arena/destroy! session-arena cur-log))
@@ -608,20 +627,20 @@
                                            (kernels/compile-gemma4-chunked-prefill-executable session seq-len tail-len))
                              start-p chunk-end
                              [tail-log tail-kv]
-                             (xla/with-device-arena [iter-arena session-arena]
+                             (arena/with-device-arena [iter-arena session-arena]
                                (let [tail-toks (int-array tail-len)
                                      _ (dotimes [ti tail-len]
                                          (aset tail-toks ti (int (nth clamped-prompt-ids (+ start-p ti)))))
                                      pos-c (int-array [start-p])
-                                     x-b (xla/device-buffer iter-arena tail-toks [1 tail-len] :i32)
-                                     pos-b (xla/device-buffer iter-arena pos-c [1] :i32)
+                                     x-b (arena/device-buffer iter-arena tail-toks [1 tail-len] :i32)
+                                     pos-b (arena/device-buffer iter-arena pos-c [1] :i32)
                                      step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                     outs (xla/track! iter-arena (execute-step-executable ctx (or (:handle tail-exec) tail-exec) step-inputs num-outs))
+                                     outs (arena/track! iter-arena (execute-step-executable ctx (or (:handle tail-exec) tail-exec) step-inputs num-outs))
                                      outs-vec (if (vector? outs) outs [outs])
                                      nl (first outs-vec)
                                      nk (vec (subvec outs-vec 1))]
-                                 (xla/promote! iter-arena session-arena nl)
-                                 (xla/promote! iter-arena session-arena nk)
+                                 (arena/promote! iter-arena session-arena nl)
+                                 (arena/promote! iter-arena session-arena nk)
                                  [nl nk]))
                              old-kv @kv-buffers-atom]
                          (when post-chunk-logits (arena/destroy! session-arena post-chunk-logits))
@@ -631,19 +650,19 @@
 
                        (== tail-len 1)
                        (let [[new-log new-kv]
-                             (xla/with-device-arena [step-arena session-arena]
+                             (arena/with-device-arena [step-arena session-arena]
                                (let [tok (int (nth clamped-prompt-ids chunk-end))
                                      _ (aset x-arr 0 tok)
                                      _ (aset pos-arr 0 chunk-end)
-                                     x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
-                                     pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
+                                     x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
+                                     pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
                                      step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                     outs (xla/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                                     outs (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
                                      outs-vec (if (vector? outs) outs [outs])
                                      nl (first outs-vec)
                                      nk (vec (subvec outs-vec 1))]
-                                 (xla/promote! step-arena session-arena nl)
-                                 (xla/promote! step-arena session-arena nk)
+                                 (arena/promote! step-arena session-arena nl)
+                                 (arena/promote! step-arena session-arena nk)
                                  [nl nk]))
                              old-kv @kv-buffers-atom]
                          (when post-chunk-logits (arena/destroy! session-arena post-chunk-logits))
@@ -663,7 +682,7 @@
            (if (or (>= (- (count @cur-tokens) prompt-count) max-tokens)
                    (>= step (dec seq-len)))
              (when cur-logits (arena/destroy! session-arena cur-logits))
-             (let [logits-data (xla/to-host-slice cur-logits 0 vocab-size vocab-size weight-dt)
+             (let [logits-data (to-host-slice cur-logits 0 vocab-size vocab-size weight-dt)
                    _ (arena/destroy! session-arena cur-logits)
                    next-id (sample-next-token logits-data opts clamped-prompt-ids (subvec @cur-tokens prompt-count))]
                (swap! cur-tokens conj next-id)
@@ -673,18 +692,18 @@
                (if (or (contains? kernels/GEMMA4-STOP-TOKEN-IDS next-id) (= next-id (eos-id tokenizer)))
                  nil
                  (let [[new-log new-kv]
-                       (xla/with-device-arena [step-arena session-arena]
+                       (arena/with-device-arena [step-arena session-arena]
                          (let [_ (aset x-arr 0 (int next-id))
                                _ (aset pos-arr 0 step)
-                               x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
-                               pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
+                               x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
+                               pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
                                step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                               outs (xla/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
+                               outs (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) step-inputs num-outs))
                                outs-vec (if (vector? outs) outs [outs])
                                nl (first outs-vec)
                                nk (vec (subvec outs-vec 1))]
-                           (xla/promote! step-arena session-arena nl)
-                           (xla/promote! step-arena session-arena nk)
+                           (arena/promote! step-arena session-arena nl)
+                           (arena/promote! step-arena session-arena nk)
                            [nl nk]))
                        old-kv @kv-buffers-atom]
                    (arena/destroy! session-arena old-kv)
@@ -742,12 +761,16 @@
        (run-cached-kv-generation session exec device-weights prompt-ids (or max-seq-len (:max-seq-len session) 512))))))
 
 (defn init-inference-session
-  "Initializes PJRT runtime, loads safetensors weights, and prepares model configuration for Gemma 4 REPL/CLI sessions."
+  "Initializes UOp runtime, loads safetensors weights, and prepares model configuration for Gemma 4 REPL/CLI sessions."
   ([opts]
    (let [{:keys [backend]} opts
+         _ (when (contains? #{:rocm :pjrt :cuda12 :sycl :cpu} backend)
+             (throw (ex-info (str "Backend " backend " is no longer supported. OpenXLA/PJRT has been excised. Supported backends are :uop-rocm and :uop-cpu.")
+                             {:backend backend})))
+         target-backend (or backend :uop-cpu)
+         ctx (uop-rt/init-uop-context target-backend opts)
+         opts (assoc opts :backend (or (:backend ctx) target-backend))
          model-dir (or (:model-dir opts) (:model opts))
-         ctx (xla/init-backend! (or backend :cpu))
-         opts (assoc opts :backend (or backend (:backend ctx) :cpu))
          dirs (if model-dir (cons model-dir cfg/DEFAULT_MODEL_DIRS) cfg/DEFAULT_MODEL_DIRS)
          resolved-model-dir (cfg/find-model-dir dirs)
          arena (Arena/ofConfined)
@@ -757,7 +780,7 @@
          prefix-base (if (contains? header "model.language_model.embed_tokens.weight")
                        "model.language_model."
                        "model.")
-         session-arena (or (:session-arena opts) (xla/create-arena ctx))
+         session-arena (or (:session-arena opts) (arena/create-arena ctx))
          weight-store (rw/create-weight-store ctx weights-mmap
                                               {:aliases (gemma-logic/gemma4-alias-resolver prefix-base)
                                                :arena session-arena})
@@ -835,15 +858,15 @@
   [{:keys [ctx device-weights kv-state session-arena]}]
   (if session-arena
     (do
-      (xla/close-arena! session-arena)
+      (arena/close-arena! session-arena)
       (when kv-state (reset! kv-state nil)))
     (do
       (when (seq device-weights)
         (doseq [w device-weights]
-          (xla/destroy-buffer! ctx w)))
+          (uop-rt/destroy-buffer! ctx w)))
       (when (and kv-state @kv-state)
         (doseq [b (:kv-buffers @kv-state)]
-          (xla/destroy-buffer! ctx b))
+          (uop-rt/destroy-buffer! ctx b))
         (reset! kv-state nil)))))
 
 ;; ==============================================================================
@@ -964,8 +987,8 @@
           (println generated-str))
         (when-not reuse-weights?
           (if-let [sa (:session-arena session)]
-            (xla/close-arena! sa)
-            (doseq [w device-weights] (xla/destroy-buffer! (:ctx session) w))))
+            (arena/close-arena! sa)
+            (doseq [w device-weights] (uop-rt/destroy-buffer! (:ctx session) w))))
         (when-let [out-path (:out opts)]
           (spit out-path generated-str)
           (when-not quiet
@@ -1093,20 +1116,20 @@
                        _ (aset pos-arr 0 p)
                        _ (aset target-arr 0 target)
                        [next-kv target-lp]
-                       (xla/with-device-arena [step-arena session-arena]
-                         (let [x-b (xla/device-buffer step-arena x-arr [1 1] :i32)
-                               pos-b (xla/device-buffer step-arena pos-arr [1] :i32)
-                               target-b (xla/device-buffer step-arena target-arr [1 1] :i32)
+                       (arena/with-device-arena [step-arena session-arena]
+                         (let [x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
+                               pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
+                               target-b (arena/device-buffer step-arena target-arr [1 1] :i32)
                                step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                               outs (xla/track! step-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
+                               outs (arena/track! step-arena (execute-step-executable ctx (or (:handle step-exec) step-exec) step-inputs num-step-outs))
                                outs-vec (if (vector? outs) outs [outs])
                                logits-buf (first outs-vec)
                                nk (vec (subvec outs-vec 1))
-                               lp-out (xla/track! step-arena (execute-step-executable ctx (or (:handle target-exec) target-exec) [logits-buf target-b] 1))
+                               lp-out (arena/track! step-arena (execute-step-executable ctx (or (:handle target-exec) target-exec) [logits-buf target-b] 1))
                                lp-buf (if (vector? lp-out) (first lp-out) lp-out)
-                               floats (pjrt/buffer-to-host-buffer ctx lp-buf 1 :f32)
+                               floats (uop-rt/device->host-floats ctx lp-buf 1)
                                lp (aget floats 0)]
-                           (xla/promote! step-arena session-arena nk)
+                           (arena/promote! step-arena session-arena nk)
                            [nk lp]))]
                    (arena/destroy! session-arena cur-kv)
                    (recur (inc p) next-kv (conj! acc (double target-lp))))
@@ -1126,15 +1149,15 @@
          (dotimes [i (dec n)]
            (aset targets-arr i (int (nth tokens (inc i)))))
          (let [target-log-probs
-               (xla/with-device-arena [step-arena (or session-arena ctx)]
-                 (let [in-b (xla/device-buffer step-arena in-arr [1 seq-len] :i32)
-                       targets-b (xla/device-buffer step-arena targets-arr [1 seq-len] :i32)
+               (arena/with-device-arena [step-arena (or session-arena ctx)]
+                 (let [in-b (arena/device-buffer step-arena in-arr [1 seq-len] :i32)
+                       targets-b (arena/device-buffer step-arena targets-arr [1 seq-len] :i32)
                        device-weights (or (:device-weights session)
                                           (weights/allocate-device-weights session))
                        args (into [in-b targets-b] device-weights)
-                       out (xla/track! step-arena (xla/execute exec args))
+                       out (arena/track! step-arena (execute-step-executable ctx (or (:handle exec) exec) args 1))
                        out-buf (if (sequential? out) (first out) out)
-                       raw-floats (xla/to-host-slice out-buf 0 seq-len seq-len :f32)]
+                       raw-floats (to-host-slice out-buf 0 seq-len seq-len :f32)]
                    (mapv #(double (aget ^floats raw-floats %)) (range (dec n)))))]
            {:token-ids tokens
             :target-log-probs target-log-probs

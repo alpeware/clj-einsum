@@ -9,7 +9,6 @@
             [einsum.logic.expand :as expand]
             [einsum.logic.index :as idx]
             [einsum.logic.shape :as shape]
-            [einsum.runtime.weights :as weights]
             [einsum.uop.core :as uop]
             [einsum.uop.rewrite :as rewrite]))
 
@@ -787,7 +786,8 @@
   ([graph-name ast opts]
    (let [targets (or (:targets opts) (:target-heads opts) [:logits])
          invars (or (:invars opts)
-                    (weights/infer-invars ast (or (:inputs opts) []) (or (:weights opts) {})))]
+                    ((requiring-resolve 'einsum.runtime.weights/infer-invars)
+                     ast (or (:inputs opts) []) (or (:weights opts) {})))]
      (ast->uop-graph graph-name invars ast targets)))
   ([graph-name invars ast target-heads]
    (let [targets (if (set? target-heads) target-heads (set target-heads))

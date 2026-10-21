@@ -15,7 +15,7 @@
    :max-new-tokens 20
    :temperature 0.7
    :top-k 10
-   :backend :cpu
+   :backend :uop-cpu
    :precision :bf16
    :method :kv-cache
    :compare false

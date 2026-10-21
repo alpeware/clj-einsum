@@ -12,7 +12,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [einsum.core :as xla]
+            [einsum.uop.runtime :as uop-rt]
             [einsum.models.gemma4.kernels :as kernels]
             [einsum.models.gemma4.runtime :as rt]))
 
@@ -79,7 +79,7 @@
        :top-8 top-vec})))
 
 (defn- run-micro-model [cfg seed]
-  (let [ctx (xla/init-backend! :uop-cpu {:quiet? true})
+  (let [ctx (uop-rt/init-uop-context :uop-cpu {:quiet? true})
         session {:ctx ctx :config cfg :opts {:quiet true}}
         prompt-ids [2 10 20 30]
         prompt-len (count prompt-ids)
@@ -104,7 +104,7 @@
                                  (get weights var-kw)))
                              prefill-invars)
         [logits-buf-0 k-buf-1 v-buf-1] (exec-step ctx prefill-exec prefill-inputs 3)
-        logits-0 (xla/to-host-slice logits-buf-0 0 vocab-sz vocab-sz)
+        logits-0 (uop-rt/device->host-floats ctx logits-buf-0 vocab-sz)
         logits-0-info (extract-logits-info logits-0 8)
         t1 (rt/argmax-host logits-0)
 
@@ -118,7 +118,7 @@
                               (get weights var-kw)))
                           kv-invars)
         [logits-buf-1 k-buf-2 v-buf-2] (exec-step ctx kv-exec kv-inputs-1 3)
-        logits-1 (xla/to-host-slice logits-buf-1 0 vocab-sz vocab-sz)
+        logits-1 (uop-rt/device->host-floats ctx logits-buf-1 vocab-sz)
         logits-1-info (extract-logits-info logits-1 8)
         t2 (rt/argmax-host logits-1)
 
@@ -132,7 +132,7 @@
                               (get weights var-kw)))
                           kv-invars)
         [logits-buf-2 k-buf-3 v-buf-3] (exec-step ctx kv-exec kv-inputs-2 3)
-        logits-2 (xla/to-host-slice logits-buf-2 0 vocab-sz vocab-sz)
+        logits-2 (uop-rt/device->host-floats ctx logits-buf-2 vocab-sz)
         t3 (rt/argmax-host logits-2)
 
         ;; Decode Step 3
@@ -145,7 +145,7 @@
                               (get weights var-kw)))
                           kv-invars)
         [logits-buf-3 _ _] (exec-step ctx kv-exec kv-inputs-3 3)
-        logits-3 (xla/to-host-slice logits-buf-3 0 vocab-sz vocab-sz)
+        logits-3 (uop-rt/device->host-floats ctx logits-buf-3 vocab-sz)
         t4 (rt/argmax-host logits-3)]
 
     {:config cfg

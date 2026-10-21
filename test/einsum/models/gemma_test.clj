@@ -6,7 +6,6 @@
             [einsum.logic.expand :as expand]
             [einsum.logic.lower :as lower]
             [einsum.models.gemma :as gemma]
-            [einsum.models.gemma4.kernels :as kernels]
             [einsum.logic.memory.contrastive :as contrastive]
             [einsum.compiler.stablehlo :as shlo]
             [clojure.test :refer [deftest is testing]]
@@ -290,17 +289,17 @@
                        (seq expanded)
                        (every? ast/valid-node? expanded)))))
 
-(defspec prop-gemma4-kv-int4-w4a16-layer-ast-validity 20
+(defspec prop-gemma4-kv-int4-unpack-layer-ast-validity 20
   (prop/for-all [layer-idx (gen/choose 0 34)
                  max-seq-len (gen/elements [16 32 64])]
-                (let [config (assoc (gemma/gemma4-config :e2b) :max-seq-len max-seq-len :is-int4 true :use-w4a16-gemv true)
+                (let [config (assoc (gemma/gemma4-config :e2b) :max-seq-len max-seq-len :is-int4 true)
                       layer-ast (gemma/gemma4-kv-layer-ast layer-idx max-seq-len config)
                       expanded (expand/expand-ast {} layer-ast)]
                   (and (vector? layer-ast)
                        (seq expanded)
                        (every? ast/valid-node? expanded)))))
 
-(deftest test-gemma4-kv-cache-step-w4a16-lowering
+(deftest test-gemma4-kv-cache-step-int4-unpack-ast
   (let [num-layers 1
         max-seq-len 8
         vocab-size 1000
@@ -320,17 +319,13 @@
                 :head-dim 64
                 :max-seq-len max-seq-len
                 :is-int4 true
-                :group-size group-size
-                :use-w4a16-gemv true}
-        invars (kernels/build-gemma4-kv-invars config max-seq-len)
+                :group-size group-size}
         ast (gemma/gemma4-kv-model-ast config)
-        targets (kernels/build-gemma4-kv-outvars config)
-        graph (lower/ast->graph "gemma4_kv_step_w4a16" invars ast targets)]
-    (is (shlo/validate-graph graph))
-    (is (= targets (:outvars graph)))
-    (let [custom-calls (filter #(= (:op %) :stablehlo/custom_call) (:eqns graph))]
-      (is (= 7 (count custom-calls)))
-      (is (every? #(= (get-in % [:attrs :call_target_name]) "w4a16_gemv_rocm") custom-calls)))))
+        ast-ops (map first (filter #(and (vector? %) (keyword? (first %))) (tree-seq coll? seq ast)))
+        unpack-count (count (filter #(= % :int4-unpack) ast-ops))
+        w4a16-count (count (filter #(= % :w4a16-gemv) ast-ops))]
+    (is (> unpack-count 0))
+    (is (zero? w4a16-count))))
 
 (deftest test-gemma4-kv-cache-step-lowering
   (let [num-layers 1

@@ -183,7 +183,7 @@
                         arena
                         (arena/device-buffer arena arr shape dtype)
 
-                        (= (:backend ctx) :uop)
+                        (or (= (:backend ctx) :uop) (nil? cli))
                         (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)]
                           (host->dev ctx arr shape dtype))
 

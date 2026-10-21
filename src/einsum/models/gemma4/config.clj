@@ -69,23 +69,15 @@
   "Returns the maximum sequence length for 1-shot parallel prefill that safely fits in VRAM
    without exceeding device workspace headroom."
   [config]
-  (let [use-w4a16? (and (:is-int4 config)
-                        (if (some? (:use-w4a16-gemv config))
-                          (boolean (:use-w4a16-gemv config))
-                          (and (or (= (:backend config) :rocm) (= (:target config) :rocm))
-                               (not (uop-backend? (:backend config) (:target config))))))]
-    (cond
-      use-w4a16?
-      0
+  (cond
+    (or (:is-int4 config)
+        (:is-ternary config)
+        (re-find #"31[bB]" (or (:model-dir config) ""))
+        (>= (long (or (:num-layers config) 0)) 60))
+    2048
 
-      (or (:is-int4 config)
-          (:is-ternary config)
-          (re-find #"31[bB]" (or (:model-dir config) ""))
-          (>= (long (or (:num-layers config) 0)) 60))
-      2048
-
-      :else
-      8192)))
+    :else
+    8192))
 
 (defn build-model-config
   "Extracts all dimension and layer configurations for Gemma 4 from safetensors header and JSON config."
@@ -221,7 +213,6 @@
      :norm-enum norm-enum
      :backend (or (:backend opts) (:target opts))
      :target (or (:target opts) (:backend opts))
-     :use-w4a16-gemv (:use-w4a16-gemv opts)
      :kv-quant (:kv-quant opts)
      :turboquant-kv? (boolean (or (:turboquant-kv? opts)
                                   (:turboquant-kv opts)

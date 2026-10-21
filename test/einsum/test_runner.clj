@@ -64,7 +64,6 @@
             [einsum.quant.ternary-pjrt-test]
             [einsum.quant.ternary-test]
             [einsum.quant.turboquant-test]
-            [einsum.quant.w4a16-custom-call-test]
             [einsum.quantize-test]
             [einsum.runtime.benchmark.core-test]
             [einsum.runtime.benchmark.runner-test]
@@ -218,7 +217,6 @@
    'einsum.hardware-test
    'einsum.logic.interpret-diff-test
    'einsum.quant.ternary-pjrt-test
-   'einsum.quant.w4a16-custom-call-test
    'einsum.runtime.c2c-test
    'einsum.runtime.benchmark.workloads-test
    'einsum.runtime.benchmark.runner-test

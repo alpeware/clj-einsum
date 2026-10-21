@@ -23,7 +23,7 @@
    :max-new-tokens 10
    :temperature 0.70
    :top-k 10
-   :backend :cpu
+   :backend :uop-cpu
    :precision :bf16
    :verbose false})
 
@@ -37,7 +37,7 @@
    :temperature 0.70
    :top-k 40
    :repetition-penalty 1.0
-   :backend :cpu
+   :backend :uop-cpu
    :precision :bf16
    :thinking false
    :quiet false
@@ -186,7 +186,10 @@
              ;; Keyword flags (strip leading colons)
              (= arg "--backend")
              (let [b (keyword (str/replace val #"^:+" ""))]
-               (recur (subvec remaining 2) (assoc opts :backend (if (= b :interp) :interpreter b))))
+               (if (contains? #{:rocm :pjrt :cuda12 :sycl :cpu} b)
+                 (throw (ex-info (str "Backend " b " is no longer supported. OpenXLA/PJRT has been excised. Supported backends are :uop-rocm and :uop-cpu.")
+                                 {:backend b}))
+                 (recur (subvec remaining 2) (assoc opts :backend (if (= b :interp) :interpreter b)))))
 
              (= arg "--precision")
              (recur (subvec remaining 2) (assoc opts :precision (keyword (str/replace val #"^:+" ""))))

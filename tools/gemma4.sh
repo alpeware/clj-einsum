@@ -61,6 +61,19 @@ fi
 
 : < /dev/dri/renderD128 2>/dev/null || true
 
+# Validate --backend if provided on CLI
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  if [ "${args[i]}" = "--backend" ] && [ $((i+1)) -lt ${#args[@]} ]; then
+    b="${args[i+1]}"
+    b="${b#:}"
+    if [ "$b" != "uop-rocm" ] && [ "$b" != "uop-cpu" ] && [ "$b" != "uop" ]; then
+      echo "Error: Backend '$b' is no longer supported. OpenXLA/PJRT has been excised. Supported backends are uop-rocm and uop-cpu." >&2
+      exit 1
+    fi
+  fi
+done
+
 if [ "$MODE" = "agent" ]; then
   exec clojure -M:tools -m tools.gemma4-agent "$@"
 elif [ "$MODE" = "relational" ]; then

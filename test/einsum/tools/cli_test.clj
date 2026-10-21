@@ -43,7 +43,7 @@
                 "--max-new-tokens" "42"
                 "--temp" "0.85"
                 "--top-k" "50"
-                "--backend" ":rocm"
+                "--backend" ":uop-rocm"
                 "--precision" ":bf16"
                 "--verbose"
                 "--chat"
@@ -56,7 +56,7 @@
       (is (= 42 (:max-new-tokens parsed)))
       (is (== 0.85 (:temperature parsed)))
       (is (= 50 (:top-k parsed)))
-      (is (= :rocm (:backend parsed)))
+      (is (= :uop-rocm (:backend parsed)))
       (is (= :bf16 (:precision parsed)))
       (is (true? (:verbose parsed)))
       (is (true? (:chat parsed)))
@@ -66,7 +66,9 @@
     (let [p1 (cli/parse-cli-args ["--backend" "interpreter"])
           p2 (cli/parse-cli-args ["--backend" "interp"])]
       (is (= :interpreter (:backend p1)))
-      (is (= :interpreter (:backend p2)))))
+      (is (= :interpreter (:backend p2))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Backend :rocm is no longer supported"
+                          (cli/parse-cli-args ["--backend" ":rocm"]))))
 
   (testing "Supports custom handlers"
     (let [custom-handler (fn [opts remaining]

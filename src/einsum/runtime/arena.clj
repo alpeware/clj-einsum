@@ -33,6 +33,10 @@
   (when (and (some? buf) (not= MemorySegment/NULL buf))
     (try
       (cond
+        (when-let [uop-buf? (requiring-resolve 'einsum.uop.runtime/uop-buffer?)]
+          (uop-buf? buf))
+        (let [destroy-fn (requiring-resolve 'einsum.uop.runtime/destroy-buffer!)]
+          (destroy-fn ctx buf))
         (:destroy-fn ctx) ((:destroy-fn ctx) ctx buf)
         (:mock-destroy ctx) ((:mock-destroy ctx) ctx buf)
         :else (pjrt/destroy-buffer! ctx buf))
@@ -82,6 +86,8 @@
   [^DeviceArena arena]
   (when arena
     (.close arena)))
+
+(def close-arena! close!)
 
 (defn track!
   "Registers `buffer` (or collection of buffers) in `arena` (or `*active-arena*`).
@@ -151,7 +157,7 @@
          (when arena (track! arena buf))
          buf)
 
-       (= (:backend ctx) :uop)
+       (or (= (:backend ctx) :uop) (nil? (or (:client ctx) (:client arena))))
        (let [host->dev (requiring-resolve 'einsum.uop.runtime/host->device)
              buf (host->dev ctx host-data shape dtype)]
          (when arena (track! arena buf))
