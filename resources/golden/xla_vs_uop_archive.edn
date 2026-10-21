@@ -1,0 +1,89 @@
+{:metadata
+ {:hardware {:gpu "AMD Radeon RX 7900 XTX 24GB (RDNA 3 / gfx1100)"
+             :cpu "AMD Ryzen 9 9950X High-Performance Desktop CPU (32 Threads, AVX-512)"
+             :os "Gentoo Linux (Kernel 6.x, x86_64)"
+             :rocm-version "6.0.0 / 7.2.4"
+             :xla-version "OpenXLA PJRT C API (AMD jax_rocm7_plugin 0.10.0)"
+             :uop-version "pure-Clojure UOp backend with Wave32 WMMA Tensor Cores"}
+  :date "2026-10-20"
+  :commit "7599b4c"}
+ :live-benchmarks
+ {:gemma-4-e2b-it
+  [{:prompt-id :prompt-1
+    :m 14
+    :uop {:prefill-ms 32.73 :decode-ms-tok 16.92 :decode-tok-s 59.12 :total-ms 184.97}
+    :xla {:prefill-ms 109.32 :decode-ms-tok 22.19 :decode-tok-s 45.07 :total-ms 309.00}
+    :speedup {:prefill 3.34 :decode 1.31 :total 1.67}}
+   {:prompt-id :prompt-1b
+    :m 17
+    :uop {:prefill-ms 32.43 :decode-ms-tok 11.10 :decode-tok-s 90.06 :total-ms 365.55}
+    :xla {:prefill-ms 51.15 :decode-ms-tok 17.82 :decode-tok-s 56.10 :total-ms 585.88}
+    :speedup {:prefill 1.58 :decode 1.61 :total 1.60}}
+   {:prompt-id :prompt-2
+    :m 32
+    :uop {:prefill-ms 33.03 :decode-ms-tok 10.87 :decode-tok-s 92.03 :total-ms 359.02}
+    :xla {:prefill-ms 52.12 :decode-ms-tok 17.85 :decode-tok-s 56.02 :total-ms 587.62}
+    :speedup {:prefill 1.58 :decode 1.64 :total 1.64}}]
+  :gemma-4-e4b-it
+  [{:prompt-id :prompt-1
+    :m 14
+    :uop {:prefill-ms 43.14 :decode-ms-tok 24.17 :decode-tok-s 41.37 :total-ms 260.66}
+    :xla {:prefill-ms 190.01 :decode-ms-tok 38.20 :decode-tok-s 26.18 :total-ms 533.85}
+    :speedup {:prefill 4.40 :decode 1.58 :total 2.05}}
+   {:prompt-id :prompt-1b
+    :m 17
+    :uop {:prefill-ms 40.84 :decode-ms-tok 18.37 :decode-tok-s 54.45 :total-ms 591.79}
+    :xla {:prefill-ms 188.50 :decode-ms-tok 38.35 :decode-tok-s 26.08 :total-ms 1247.38}
+    :speedup {:prefill 4.62 :decode 2.09 :total 2.11}}
+   {:prompt-id :prompt-2
+    :m 32
+    :uop {:prefill-ms 42.01 :decode-ms-tok 18.43 :decode-tok-s 54.26 :total-ms 594.91}
+    :xla {:prefill-ms 190.86 :decode-ms-tok 38.25 :decode-tok-s 26.14 :total-ms 1264.90}
+    :speedup {:prefill 4.54 :decode 2.08 :total 2.13}}]
+  :gemma-4-31b-it-int4
+  {:prompts
+   [{:prompt-id :prompt-1
+     :m 14
+     :uop {:prefill-ms 128.65 :decode-ms-tok 45.44 :decode-tok-s 22.01 :total-ms 401.87}
+     :xla {:prefill-ms 145.18 :decode-ms-tok 51.66 :decode-tok-s 19.36 :total-ms 455.16}
+     :speedup {:prefill 1.13 :decode 1.14 :total 1.13}}
+    {:prompt-id :prompt-1b
+     :m 17
+     :uop {:prefill-ms 128.23 :decode-ms-tok 49.08 :decode-tok-s 20.38 :total-ms 3071.73}
+     :xla {:prefill-ms 150.84 :decode-ms-tok 48.95 :decode-tok-s 20.43 :total-ms 3087.95}
+     :speedup {:prefill 1.18 :decode 1.00 :total 1.01}}
+    {:prompt-id :prompt-2
+     :m 32
+     :uop {:prefill-ms 131.81 :decode-ms-tok 48.82 :decode-tok-s 20.48 :total-ms 3061.00}
+     :xla {:prefill-ms 190.74 :decode-ms-tok 49.04 :decode-tok-s 20.39 :total-ms 3132.88}
+     :speedup {:prefill 1.45 :decode 1.00 :total 1.02}}]
+   :m-sweep
+   [{:m 2 :cold-prefill-ms 88.26 :warm-prefill-ms 79.54 :cold-ms-tok 44.13 :warm-ms-tok 39.77}
+    {:m 8 :cold-prefill-ms 122.49 :warm-prefill-ms 111.50 :cold-ms-tok 15.31 :warm-ms-tok 13.94}
+    {:m 14 :cold-prefill-ms 129.03 :warm-prefill-ms 120.33 :cold-ms-tok 9.22 :warm-ms-tok 8.59 :xla-prefill-ms 145.18}
+    {:m 15 :cold-prefill-ms 132.51 :warm-prefill-ms 120.43 :cold-ms-tok 8.83 :warm-ms-tok 8.03}
+    {:m 16 :cold-prefill-ms 132.37 :warm-prefill-ms 120.31 :cold-ms-tok 8.27 :warm-ms-tok 7.52}
+    {:m 32 :cold-prefill-ms 128.60 :warm-prefill-ms 120.55 :cold-ms-tok 4.02 :warm-ms-tok 3.77 :xla-prefill-ms 190.74}]}}
+ :historical-scaling-archive
+ {:phase-6d-e2b-scaling
+  {:description "Phase 6D prompt token scaling benchmarks on Gemma 4 E2B BF16 (RX 7900 XTX gfx1100)"
+   :prefill-table
+   [{:tokens 17 :uop-prefill-ms 40.31 :xla-prefill-ms 72.77 :uop-ms-tok 2.37 :speedup 1.81}
+    {:tokens 40 :uop-prefill-ms 45.67 :xla-prefill-ms 78.23 :uop-ms-tok 1.14 :speedup 1.71}
+    {:tokens 72 :uop-prefill-ms 47.20 :xla-prefill-ms 79.52 :uop-ms-tok 0.66 :speedup 1.68}
+    {:tokens 136 :uop-prefill-ms 49.49 :xla-prefill-ms 82.06 :uop-ms-tok 0.36 :speedup 1.66}
+    {:tokens 264 :uop-prefill-ms 60.45 :xla-prefill-ms 83.24 :uop-ms-tok 0.23 :speedup 1.38}
+    {:tokens 392 :uop-prefill-ms 67.35 :xla-prefill-ms 82.93 :uop-ms-tok 0.17 :speedup 1.23}
+    {:tokens 456 :uop-prefill-ms 71.11 :xla-prefill-ms 82.06 :uop-ms-tok 0.156 :speedup 1.15}]
+   :decode-table
+   [{:tokens 99 :uop-decode-tok-s 90.03 :xla-decode-tok-s 53.50 :speedup 1.68}]}
+  :phase-7-e4b-and-31b
+  {:description "Phase 7 long-context and quantized scaling benchmarks on RX 7900 XTX (gfx1100)"
+   :e4b-456t {:tokens 456 :uop-prefill-ms 144.69 :xla-prefill-ms 125.09 :uop-decode-tok-s 50.81 :xla-decode-tok-s 28.43 :prefill-speedup 0.86 :decode-speedup 1.79}
+   :gemma4-31b-int4-scaling
+   [{:m 2 :warm-prefill-ms 79.54 :ms-tok 39.77}
+    {:m 8 :warm-prefill-ms 111.50 :ms-tok 13.94}
+    {:m 14 :warm-prefill-ms 120.33 :ms-tok 8.59}
+    {:m 15 :warm-prefill-ms 120.43 :ms-tok 8.03}
+    {:m 16 :warm-prefill-ms 120.31 :ms-tok 7.52}
+    {:m 32 :warm-prefill-ms 120.55 :ms-tok 3.77}]}}}
