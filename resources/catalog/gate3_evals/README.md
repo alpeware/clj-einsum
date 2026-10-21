@@ -2,7 +2,7 @@
 
 **Metric**: `Floor retention (≥95%) relative to uncompressed base model & absolute benchmark score`  
 **Target**: Zero catastrophic degradation on reasoning tasks across compression generations  
-**Primary Hardware Target**: AMD Radeon RX 7900 XTX (ROCm PJRT)  
+**Primary Hardware Target**: AMD Radeon RX 7900 XTX (ROCm UOp)  
 **Architecture Guide**: [docs/architecture/rsi_gates.md](../../docs/architecture/rsi_gates.md)
 
 ---

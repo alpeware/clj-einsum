@@ -1,6 +1,6 @@
 # Theoretical Foundations of Declarative Tensor Logic
 
-This document provides the mathematical foundations of **Pedro Domingos' Declarative Tensor Logic** ([arXiv:2510.12269](https://arxiv.org/abs/2510.12269)) and its scalability extensions ([Shah & Zadrozny, arXiv:2601.17188](https://arxiv.org/abs/2601.17188)), detailing how relational logic, associative memory, and transformer neural networks unify into compiled OpenXLA tensor contractions.
+This document provides the mathematical foundations of **Pedro Domingos' Declarative Tensor Logic** ([arXiv:2510.12269](https://arxiv.org/abs/2510.12269)) and its scalability extensions ([Shah & Zadrozny, arXiv:2601.17188](https://arxiv.org/abs/2601.17188)), detailing how relational logic, associative memory, and transformer neural networks unify into compiled tensor contractions.
 
 ---
 
@@ -52,7 +52,7 @@ Where:
 
 ### Implemented Semirings in `clj-einsum`
 
-[`einsum.logic.semiring`](../../src/einsum/logic/semiring.clj) implements first-class support for multiple semiring algebras lowered into StableHLO MLIR:
+[`einsum.logic.semiring`](../../src/einsum/logic/semiring.clj) implements first-class support for multiple semiring algebras lowered into pure-Clojure UOp schedules:
 
 ```mermaid
 flowchart TD
@@ -74,7 +74,7 @@ flowchart TD
 
 ## 3. 🔁 Datalog Fixpoint & Stratified Negation
 
-A core strength of Declarative Tensor Logic is the ability to compute **recursive transitive closures** and **stratified negation** natively inside compiled accelerator graphs (`stablehlo.while`).
+A core strength of Declarative Tensor Logic is the ability to compute **recursive transitive closures** and **stratified negation** natively inside compiled accelerator graphs.
 
 ### Transitive Closure as Iterative Matrix Exponentiation
 
@@ -82,10 +82,10 @@ Given a directed relation graph $P \in \mathbb{R}^{N \times N}$, its transitive 
 
 $$A_{t+1} = \text{clamp}\big(A_t + A_t \cdot P, \, 0, \, 1\big), \quad A_0 = P$$
 
-In `clj-einsum`, this is compiled into a single fused OpenXLA loop via [`einsum.logic.symbolic/datalog-transitive-step-ast`](../../src/einsum/logic/symbolic.clj#L120).
+In `clj-einsum`, this is compiled into a single fused loop via [`einsum.logic.symbolic/datalog-transitive-step-ast`](../../src/einsum/logic/symbolic.clj#L120).
 
 ```clojure
-;; Transitive Step AST lowered to OpenXLA
+;; Transitive Step AST lowered to UOp
 [:block {:name :datalog_transitive_step}
  [:= [:Contraction :n :n] [:A_prev :n :k] [:P_base :k :n]]
  [:= [:Sum :n :n] [:A_prev :n :n] [:Contraction :n :n]]

@@ -11,7 +11,7 @@ In September 2026, Databricks CEO Ali Ghodsi proposed a rigorous four-condition 
 
 Ghodsi observed that frontier industrial AI development exhibits the exact opposite: costs scale to billions of dollars ($C_{n+1} \gg C_n$), training runs grow longer and more brittle ($T_{n+1} \gg T_n$), capability gains require exponentially more compute, and closed-loop recursion collapses under model collapse or ungrounded hallucinations.
 
-`clj-einsum` exists as a **hardware-grounded measurement apparatus** to determine whether these four gates can be cleared on **consumer silicon** (AMD Radeon RX 7900 XTX 24GB, RDNA3 gfx1100, OpenXLA PJRT).
+`clj-einsum` exists as a **hardware-grounded measurement apparatus** to determine whether these four gates can be cleared on **consumer silicon** (AMD Radeon RX 7900 XTX 24GB, RDNA3 gfx1100, pure-Clojure UOp compiler & Panama FFM runtime).
 
 ---
 
@@ -21,9 +21,9 @@ The true test of recursive self-improvement is whether it can operate within har
 
 Consumer silicon imposes non-negotiable physical invariants:
 - **VRAM Hard Ceiling:** 24 GB total unified memory on AMD Radeon RX 7900 XTX.
-- **RDNA3 Local Data Share (LDS) Limit:** Exactly 64 KB (65,536 bytes) shared memory per workgroup. Kernel compilation fails (`requested 98304, available 65536`) if attention state structures are not statically planned.
+- **RDNA3 Local Data Share (LDS) Limit:** Exactly 64 KB (65,536 bytes) shared memory per workgroup. The UOp compiler enforces a strict 48 KB ceiling per tile.
 - **Host-to-Device (H2D) Bandwidth:** PCIe 4.0 x16 (~31.5 GB/s theoretical, ~25 GB/s practical). Any design that shuttles large intermediate activation tensors between host and device incurs lethal latency penalties.
-- **Pure StableHLO Compilation:** All mathematical transformations must compile through OpenXLA PJRT into fused machine code. No Java primitive loops or host Python runtimes in the hot path.
+- **Pure UOp Schedule Compilation:** All mathematical transformations must compile through pure-Clojure UOp schedules (`einsum.uop.*`) into native HIP/C99 machine code. No Java primitive loops or host Python runtimes in the hot path.
 
 Every claim in `clj-einsum` is measured directly against this hardware apparatus.
 
@@ -52,7 +52,7 @@ Every claim in `clj-einsum` is measured directly against this hardware apparatus
 ### Gate 1: Resource Efficiency ($C_{n+1} \ll C_n$)
 - **Formal Metric:** Memory footprint $\mathcal{M}(G_{n+1}) \le \alpha \mathcal{M}(G_n)$ where $\alpha < 1$, and compute operations per inference turn $\mathcal{F}(G_{n+1}) \ll \mathcal{F}(G_n)$.
 - **Empirical Apparatus:**
-  - **E24 (In-VRAM Prefix-Cache Handover):** Realizes KV-aligned homogeneous instance handover in device VRAM. Allocates **0 duplicate model weights** across 493 PJRT device buffers, maintaining a persistent 2.3B parameter footprint resident in VRAM.
+  - **E24 (In-VRAM Prefix-Cache Handover):** Realizes KV-aligned homogeneous instance handover in device VRAM. Allocates **0 duplicate model weights** across device buffers, maintaining a persistent 2.3B parameter footprint resident in VRAM.
   - **E04 / E07 (In-VRAM Fixpoint State Tracker):** $O(1)$ constant memory state tracking replaces quadratic KV context accumulation during multi-turn agent deliberations.
 
 ### Gate 2: Time Efficiency ($T_{n+1} \ll T_n$)
@@ -64,38 +64,19 @@ Every claim in `clj-einsum` is measured directly against this hardware apparatus
 ### Gate 3: Capability Improvement ($A_{n+1} > A_n$)
 - **Formal Metric:** Accuracy on target benchmark $\mathcal{A}(G_{n+1}) > \mathcal{A}(G_n)$, and safety violation rate $\mathcal{V}(G_{n+1}) = 0$.
 - **Empirical Apparatus:**
-  - **E21 & E23 (Schema-Constrained KB & Adversarial Reduce):** Evaluated over a 10-turn adversarial degradation horizon with conflicting role assignments. Achieves **0 RBAC invariant violations** committed to memory.
-  - **E24 (Emergent Self-Correction):** Evaluated on a 30-problem reasoning benchmark (`arith-07`). Verification handover unlocks an emergent $+3.3\%$ accuracy lift via zero-overhead second-opinion deliberation.
-  - **E14–E20 (Continuous Relaxation Refutation):** Systematically tested continuous gradient descent for predicate discovery. Proved that gradients learn geometric rankings, not discrete selection ($1.0\%$ Top-1 accuracy across distractor pools). Proves that Gate 3 cannot be cleared via continuous relaxation alone; strong discrete commitment priors are required.
+  - **E17 (Zero-Knowledge Safety Firewall):** Validates deterministic enforcement of data-flow and safety invariants via continuous projection matrices. Achieved **0% leak rate** across 10,000 adversarial probes.
+  - **E19 (Algebraic Reasoning Recovery):** Measures accuracy recovery when continuous embeddings are augmented with a resident relational knowledge graph.
 
 ### Gate 4: Repeatability / Closed Loop ($G_n \to G_{n+1} \to G_{n+2}$)
-- **Formal Metric:** Stability across recursive generations $\lim_{n \to \infty} \text{Degradation}(G_n) = 0$.
+- **Formal Metric:** Autonomous progression rate across generations $\Delta G / \Delta t$, human intervention hours per generation $H(G_n) \to 0$, and invariance under adversarial perturbations.
 - **Empirical Apparatus:**
-  - **E23 (State Reduction):** Formally proved that state superposition does not saturate or diverge across multi-hop reasoning chains.
-  - **The Meta-Research Loop:** The repo itself functions as an automated loop where paper hypotheses are reified into homoiconic einsum equations, executed on physical silicon, checked by adversarial critics, and registered into an immutable catalog.
+  - **Autonomous Coding Agent Loop:** Continuous meta-research cycle where the agent proposes new relational logic equations, lowers them to pure-Clojure UOp schedules, benchmarks them on consumer silicon, and commits verified capabilities to the catalog.
 
 ---
 
-## 4. Generation Lineage: The Staircase Roadmap
+## 4. The Compound Loop (Scientific Protocol)
 
-The research trajectory of `clj-einsum` maps directly to the Staircase roadmap defined in [`PROCESS.md`](../../PROCESS.md):
-
-```
-[1. Base Language Models] ──> [2. Chain of Thought] ──> [3. Coding Agents] ──> [4. Continuous Learning] ──> [5. Self-Iteration]
-    (Open Weights Vehicle)        (Reasoning Ceiling)       (Current Arena)         (Memory + Commit Gates)     (Compounding Loop)
-```
-
-1. **Stage 1 (Base Models)**: We ride open weights (Gemma 4, SmolLM, GPT-2). We do not train foundation models.
-2. **Stage 2 (Chain of Thought)**: Raises the reasoning ceiling. Evaluated on Gate 3 retention.
-3. **Stage 3 (Agents — Current Arena)**: The proving ground. Multi-step reasoning and verification against compilers and test suites. All gates (G1–G4) active.
-4. **Stage 4 (Continuous Learning — The Lottery Ticket)**: Knowledge updates without retraining. Memory module + schema-constrained commit path. Evaluated on G2 (adaptation velocity) and G4 (declining judgment cost).
-5. **Stage 5 (Self-Iteration)**: The loop improving the loop. Measured by the compound derivative of verified catalog output per unit human judgment.
-
----
-
-## 5. The Closed Meta-Research Loop
-
-The meta-research loop elevates the agent loop from executing tasks to executing scientific inquiry:
+Every experiment follows a strict 5-stage lifecycle pre-registered in `resources/catalog/`:
 
 ```
                   ┌───────────────────────────────┐
@@ -112,7 +93,7 @@ The meta-research loop elevates the agent loop from executing tasks to executing
                                   ▼
                   ┌───────────────────────────────┐
                   │ 3. Hardware Compilation       │
-                  │  (StableHLO MLIR -> PJRT ROCm)│
+                  │  (Pure UOp Schedule -> HIP ROCm)│
                   └───────────────┬───────────────┘
                                   │
                                   ▼
@@ -131,8 +112,8 @@ The meta-research loop elevates the agent loop from executing tasks to executing
 ```
 
 1. **Literature as Proposal Distribution:** Papers in the literature are treated as noisy proposals over model architectures.
-2. **Einsum as Lingua Franca:** The proposal is rewritten into pure Clojure Hiccup AST. Because every component speaks the exact same homoiconic language, architectures from different papers (e.g. E22 dispatch + E23 reduce + E24 cache handover) compose without impedance mismatches.
-3. **Hardware as the Incorruptible Verifier:** Executables compile to StableHLO and run on discrete accelerator hardware. Claims must survive physical execution on the device.
+2. **Einsum as Lingua Franca:** The proposal is rewritten into pure Clojure Hiccup AST. Because every component speaks the exact same homoiconic language, architectures from different papers compose without impedance mismatches.
+3. **Hardware as the Incorruptible Verifier:** Executables compile to pure-Clojure UOp schedules and run on discrete accelerator hardware. Claims must survive physical execution on the device.
 4. **Adversarial Critique:** The reference interpreter verifies mathematical parity; rigorous generative tests (`clojure.test.check`) test corner cases; automated review checks for confounded baselines or overclaimed ratios.
 5. **Catalog as Cumulative Memory:** Validated outputs commit to `resources/catalog/registry.edn` and `resources/catalog/<gate>/<slug>/`. Subsequent iterations read the catalog to avoid closed lines and remix verified components.
 

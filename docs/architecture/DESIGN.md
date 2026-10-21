@@ -2,293 +2,132 @@
 
 ## 1. Executive Overview & Philosophy
 
-**`clj-einsum`** is a high-performance, open-source Machine Learning compiler framework and runtime for Clojure targeting **Java 25**. It provides a pure functional DSL for defining neural network ops, compiling them to **StableHLO MLIR**, and executing them directly on accelerator hardware (CUDA GPUs, AMD ROCm, Google TPUs, and AVX/NEON CPUs) via OpenXLA's **PJRT C API** using modern **Java 25 Project Panama Foreign Function & Memory (FFM) API** (`java.lang.foreign`).
+**`clj-einsum`** is a high-performance deep learning compiler framework and hardware runtime implemented in pure Clojure targeting **Java 25+** and **consumer AMD ROCm (`gfx1100` / AMD Radeon RX 7900 XTX 24 GB)** via Project Panama Foreign Function & Memory (FFM) API (`java.lang.foreign`).
+
+The framework compiles Pedro Domingos' Declarative Tensor Logic directly into pure-Clojure Micro-Operation (UOp) schedules, rendering native Wave32 BF16 WMMA tensor core kernels dispatched to GPU hardware with zero C++ glue libraries, zero Python, and zero external ML compilers.
 
 ### Core Guiding Principles
 
-1. **Data over Code (Homoiconic AST):** The intermediate representation (IR) is a pure, flat Single Static Assignment (SSA) EDN graph inspired by JAX’s `jaxpr`. It can be inspected, serialized, validated, and mutated as standard Clojure data.
-2. **AI-Agent Native:** Because the AST is pure EDN governed by strict Malli schemas, AI coding agents can generate, validate, optimize, and synthesize model graphs deterministically without writing code strings or dealing with macro expansion pitfalls.
-3. **Sub-Millisecond REPL Feedback via Caching:** In-process, zero-copy native execution combined with SHA-256 IR compilation caching allows developers to modify model logic at the REPL and re-execute on persistent GPU memory buffers without restarting the JVM, reloading weights, or re-triggering heavy XLA codegen for unchanged subgraphs.
-4. **Clean Division of Labor:** Clojure owns high-level control loops, symbolic automatic differentiation, dynamic graph transformations, and weight management. OpenXLA handles memory layout, kernel fusion, auto-vectorization, register placement, and hardware-level codegen.
-5. **RSI Measurement Apparatus:** The toolchain is designed as the empirical measurement vehicle for Ali Ghodsi's 4 Recursive Self-Improvement (RSI) gates (Resource, Time, Capability, Repeatability) on consumer silicon (AMD Radeon RX 7900 XTX 24GB). See [rsi_gates.md](rsi_gates.md) and [catalog/README.md](../../catalog/README.md).
+1. **Data over Code (Homoiconic AST & Hash-Consed UOp IR):** Both the high-level Declarative Tensor Logic (Hiccup relational vectors `[:= head & body-terms]`) and the low-level UOp IR are immutable Clojure data structures. Model architectures, schedules, and tile configurations can be inspected, serialized, transformed, and reasoned about using standard Clojure persistent functions.
+2. **AI-Agent Native:** Because computation graphs are pure Clojure data, autonomous coding agents can synthesize, optimize, test, and commit model kernels deterministically without dealing with macro expansion pitfalls, Python virtual environments, or fragile C++ build systems.
+3. **Sub-Millisecond REPL Feedback via Caching & Persistent VRAM:** Zero-copy off-heap memory management combined with SHA-256 disk-cached compilation (`.uop-cache/`) allows developers and agents to modify model logic at the Clojure REPL and dispatch directly to persistent VRAM buffers without reloading weights or restarting the JVM.
+4. **Pure Functional Compiler Stack (Sans-IO Core):** The compiler pipeline (`lower` $\to$ `rewrite` $\to$ `schedule` $\to$ `rangeify` $\to$ `opt` $\to$ `render`) is strictly pure and side-effect free. Native device side effects (compilation via `libhiprtc.so`, buffer allocation and kernel dispatch via `libamdhip64.so`) are completely isolated to the runtime boundary shell (`einsum.uop.runtime`).
+5. **RSI Measurement Apparatus:** The entire toolchain serves as the empirical apparatus for Ali Ghodsi's 4 Recursive Self-Improvement (RSI) gates on consumer silicon (AMD Radeon RX 7900 XTX 24 GB). See [`rsi_gates.md`](rsi_gates.md) and [`../../resources/catalog/README.md`](../../resources/catalog/README.md).
 
 ---
 
-## 2. System Architecture
+## 2. The 3-Layer System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                   Clojure Application Layer                 │
-│  - Control Loops (e.g., Autoregressive Sampling, REPL)       │
-│  - Model Weight Management (.safetensors Panama mmap)       │
+│                 Clojure Application Layer                   │
+│  - Autoregressive Generation & Dynamic Samplers             │
+│  - Autonomous Coding Agent Loop & In-Tensor Relational Core │
+│  - Weight Store (.safetensors Panama mmap / hipHostRegister)│
 └──────────────────────────────┬──────────────────────────────┘
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │       Layer 3: Pedro Domingos' Declarative Tensor Logic     │
-│  - Hiccup-style Relational AST DSL (einsum.logic.ast)      │
-│  - Index & Shape Unification (einsum.logic.index/shape)    │
-│  - Neural Primitives & Layers (einsum.logic.nn)            │
-│  - AST Lowering directly to SSA Graph (einsum.logic.lower) │
+│  - Hiccup Relational AST DSL (einsum.logic.ast)             │
+│  - Relational Einsum Contractions & Index Unification      │
+│  - Neural Primitives: RMSNorm, RoPE, Gated MLP, Attention   │
+│  - In-Tensor Relational Memory & Knowledge Grounding        │
 └──────────────────────────────┬──────────────────────────────┘
-                               │ Emits Pure EDN SSA Graph
+                               │ Lowers to UOp DAG
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                 Layer 2: EDN IR & Transformations           │
-│  - Malli Graph Validation & Algebraic DCE/Constant Folding  │
-│  - Reverse-Mode Autodiff Engine (VJP & Cotangent Accum)    │
-│  - StableHLO MLIR Text Generator & Module Formatter         │
+│            Layer 2: Pure-Clojure UOp Compiler Stack         │
+│  - UOp DAG Construction & Hash-Consing (einsum.uop.lower)    │
+│  - Term-Rewriting & Algebraic Canonicalization (rewrite)    │
+│  - Realization Boundaries & Epilogue Fusion (schedule)      │
+│  - Coordinate Rangeification & Modulo Strides (rangeify)    │
+│  - RDNA3 BEAM & Tiling Optimizer (opt + beam_catalog.edn)   │
+│  - C99 & AMD HIP C++ Kernel Renderer (einsum.uop.render)    │
 └──────────────────────────────┬──────────────────────────────┘
-                               │ Emits StableHLO MLIR
+                               │ Emits Native C99 / HIP Source
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│          Layer 1.5: Compiler Caching & Executable Manager   │
-│  - SHA-256 IR Hash Lookup & In-Memory PjRtExecutable Cache  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
+│    Layer 1: Panama FFM Device Runtime & SIMD Reference      │
+│  - Java 25 Panama FFM (java.lang.foreign) Native Bindings   │
+│  - In-Process hiprtc Compile & SHA-256 .hsaco Disk Caching  │
+│  - Zero-Alloc slot-ptrs Launch Loop & Ping-Pong Buffers     │
+│  - Scoped Device Arenas (einsum.runtime.arena)              │
+│  - Pure-JVM SIMD Reference Interpreter (logic.interpret)    │
+└──────────────────────────────┴──────────────────────────────┘
+                               │ Direct Native Dispatch
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                 Layer 1: Native Runtime (PJRT)               │
-│  - Java 25 Project Panama (java.lang.foreign) FFM bindings  │
-│  - SymbolLookup for GetPjrtApi() dynamic plugin loading     │
-│  - Off-Heap Arenas, MemorySegment & Async PjRtBuffer safety │
-│  - OpenXLA Dynamic Backend (libpjrt_cuda.so / cpu / rocm)   │
-└──────────────────────────────┘
+│                      Target Hardware                        │
+│  - AMD Radeon RX 7900 XTX (24 GB VRAM, gfx1100, Wave32 WMMA)│
+│  - Host CPU (AVX-512 / AVX2 via GCC or Vector API SIMD)     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 3. Detailed Layer Specifications
 
-### Layer 1: Native Runtime & Memory (`einsum.compiler.pjrt`)
+### Layer 3: Declarative Tensor Logic (`einsum.logic.*`)
 
-Layer 1 handles foreign function invocation and off-heap memory management without C++ JNI boilerplate using Java 25's finalized `java.lang.foreign` API.
+Pedro Domingos' Declarative Tensor Logic represents neural network layers as relational logic assertions over multidimensional index spaces.
 
-#### PJRT C API Interface & Dynamic Binding
-* **Plugin Entrypoint:** Loads vendor dynamic shared objects (`libpjrt_cuda.so`, `libpjrt_cpu.so`, `libpjrt_rocm.so`) at runtime using `SymbolLookup.libraryLookup`.
-* **API Function Resolution:** Resolves the C entrypoint `const PJRT_Api* GetPjrtApi()`. Using Panama `StructLayout` definitions, `einsum.compiler.pjrt` maps the returned `PJRT_Api` struct table to invoke API function pointers (`PJRT_Client_Create`, `PJRT_Client_Compile`, `PJRT_Buffer_FromHostBuffer`, `PJRT_LoadedExecutable_Execute`).
-
-#### Off-Heap Memory Management (`Arena` & `MemorySegment`)
-* **Zero-Copy Weight Offloading:** `.safetensors` model parameters are mapped directly into off-heap `MemorySegment` memory via `FileChannel.map` using a `Shared` or `Confined` Java 25 `Arena`.
-* **Async Host-to-Device (H2D) Buffer Safety:** `PjRtBuffer` instances are populated from host memory using `PJRT_Buffer_FromHostBuffer`. To prevent premature deallocation during async DMA transfers, `Arena` lifetimes are synchronized with PJRT event completion handles or explicit safe closeable scopes.
-
-#### Key Components:
-* `PjRtClient`: Manages hardware device initialization, platform attributes, memory spaces, and compilation contexts.
-* `PjRtLoadedExecutable`: Wraps compiled XLA hardware binary executables.
-* `PjRtBuffer`: Opaque handle to device-allocated VRAM/SRAM memory buffers.
-
----
-
-### Layer 2: Intermediate Representation (`einsum.compiler.stablehlo`)
-
-Layer 2 defines the pure data specification for the computation graph. The graph represents flat Single Static Assignment (SSA) equations, avoiding nested AST trees that complicate variable reuse, constant folding, and backpropagation.
-
-#### Jaxpr-Inspired EDN SSA Format
-
-In `clj-einsum`, all inputs, intermediate tensors, constants, and outputs are represented as explicit SSA variables. Scalar constants are auto-lifted into explicit `:stablehlo/constant` equations:
-
-```clojure
-{:name "gelu_block"
- :invars  [[:x {:type [:tensor [1 128 768] :f32]}]]
- :outvars [:y]
- :eqns    [{:op :stablehlo/constant :value 0.5          :outvars [:c0]}
-           {:op :stablehlo/constant :value 1.0          :outvars [:c1]}
-           {:op :stablehlo/constant :value 0.7978845608 :outvars [:c2]}
-           {:op :stablehlo/constant :value 0.044715     :outvars [:c3]}
-           {:op :stablehlo/constant :value 3.0          :outvars [:c_three]}
-           {:op :stablehlo/power    :invars [:x :c_three] :outvars [:t0]}
-           {:op :stablehlo/multiply :invars [:t0 :c3]    :outvars [:t1]}
-           {:op :stablehlo/add      :invars [:x :t1]     :outvars [:t2]}
-           {:op :stablehlo/multiply :invars [:t2 :c2]    :outvars [:t3]}
-           {:op :stablehlo/tanh     :invars [:t3]        :outvars [:t4]}
-           {:op :stablehlo/add      :invars [:t4 :c1]    :outvars [:t5]}
-           {:op :stablehlo/multiply :invars [:x :t5]     :outvars [:t6]}
-           {:op :stablehlo/multiply :invars [:t6 :c0]    :outvars [:y]}]}
-```
-
-#### Malli Schema Validation (`einsum.compiler.stablehlo.schema`)
-
-```clojure
-(def ElementTypeSchema
-  [:enum :f16 :f32 :f64 :bf16 :i8 :i16 :i32 :i64 :pred])
-
-(def TensorTypeSchema
-  [:tuple [:= :tensor] [:vector :int] ElementTypeSchema])
-
-(def VarBindingSchema
-  [:tuple keyword? TensorTypeSchema])
-
-(def EquationSchema
-  [:map
-   [:op keyword?]
-   [:invars [:vector keyword?]]
-   [:outvars [:vector keyword?]]
-   [:value {:optional true} [or number? boolean? vector?]]
-   [:attrs {:optional true} map?]])
-
-(def GraphSchema
-  [:map
-   [:name string?]
-   [:invars [:vector VarBindingSchema]]
-   [:outvars [:vector keyword?]]
-   [:eqns [:vector EquationSchema]]])
-```
-
-#### StableHLO MLIR Text Printing
-`einsum.compiler.stablehlo` formats EDN SSA graphs into compliant MLIR textual module strings containing `func.func @main(...)` with dialect annotations (`stablehlo.dot_general`, `stablehlo.broadcast_in_dim`, `stablehlo.constant`, etc.), passed directly to `PJRT_Client_Compile`.
-
----
-
-### Layer 3: Pedro Domingos' Declarative Tensor Logic (`einsum.logic.*`)
-
-Layer 3 provides a homoiconic, declarative DSL implementing Pedro Domingos' Tensor Logic. Rather than tracing imperative operator expressions with hidden thread-local state, neural network architectures are defined as pure, relational Hiccup-style AST data vectors.
-
-#### Core Concepts & Hiccup AST (`einsum.logic.ast`)
-* **Relational Tensor Expressions:** Operations are expressed with explicit symbolic indices resembling Einstein notation:
+- **Homoiconic Hiccup ASTs**: Operations are written in standard Clojure vectors:
   ```clojure
-  ;; Matrix multiplication: C[i,j] = sum_k A[i,k] * B[k,j]
-  [:matmul [:c :i :j] [:a :i :k] [:b :k :j]]
-  ;; General relational definition
-  [:= [:y :b :p :d] [:x :b :p :din] [:w :din :d]]
+  ;; Relational Contraction with Gated GELU Activation
+  [:= [:y :b :p :d] {:act :gelu} [:x :b :p :din] [:w :din :d]]
+
+  ;; RMS Normalization with Learnable Scale
+  [:rms-norm [:out :b :p :d] [:x :b :p :d] [:gamma :d] {:eps 1e-6}]
   ```
-* **Neural Component Primitives (`einsum.logic.nn`):** Standard layers such as `[:rms-norm ...]`, `[:layer-norm ...]`, `[:gelu ...]`, `[:swiglu ...]`, `[:rope ...]`, `[:gqa-attention ...]`, and `[:dense-block ...]` are first-class declarative AST forms.
-* **Shape & Index Unification (`einsum.logic.shape` & `einsum.logic.index`):** Symbolic indices (`:b`, `:p`, `:d`, `:kvh`, etc.) are unified across equation heads and bodies, automatically deriving broadcast dimensions, transpose permutations, and contraction axes.
-
-#### Direct Lowering to StableHLO SSA (`einsum.logic.lower`)
-* `einsum.logic.lower/ast->graph` expands compound neural operations and lowers relational equations directly into flat, optimized StableHLO EDN SSA graphs with zero intermediate Java or Python runtime overhead.
-
-#### Pure Clojure Layer Example
-
-```clojure
-(ns example.transformer-layer
-  (:require [einsum.logic.lower :as lower]
-            [einsum.models.smollm :as smollm]))
-
-;; Generate a complete SmolLM transformer block AST
-(def layer-ast (smollm/smollm-layer-ast 0 128))
-
-;; Lower to StableHLO SSA graph
-(def graph (lower/ast->graph "smollm_layer_0" invars layer-ast #{:h_out}))
-```
+- **Index & Shape Unification (`einsum.logic.compile`)**: Matches input and output index symbols across terms to infer shapes, transpose requirements, reduction axes, and broadcasting semantics automatically.
+- **Neural Layer Primitives (`einsum.logic.nn`)**: Pre-packaged high-level modules for complete transformer blocks (Multi-Head Attention, Grouped Query Attention, SwiGLU / GeGLU MLPs, RMSNorm, Rotary Position Embeddings).
+- **Relational In-Tensor Memory (`einsum.logic.memory.*`)**: Encodes facts and associative memories directly into tensor spaces, enabling algebraic extract-threshold-re-embed cycles executing inside VRAM.
 
 ---
 
-### Layer 4: Higher-Order Transformations (`einsum.compiler.autodiff` & `einsum.runtime.opt`)
+### Layer 2: Pure-Clojure UOp Compiler (`einsum.uop.*`)
 
-Layer 4 transforms forward graphs into backward graphs and optimizes graphs prior to MLIR serialization.
+Layer 2 ingests the declarative logic AST and compiles it through a sequence of pure functional transformations:
 
-1. **Reverse-Mode Autodiff (VJPs):**
-   * Traverses the forward SSA `:eqns` vector in reverse order.
-   * Emits vector-Jacobian product (VJP) equations for backpropagation.
-   * **Cotangent Accumulation:** When an intermediate tensor `v` is consumed by multiple downstream operations, `einsum.compiler.autodiff` automatically inserts a `:stablehlo/add` node to sum accumulated gradients (`dv = dv1 + dv2`) before propagating gradients backward.
-   * **Shape Reduction:** Handles broadcast alignment during reverse propagation via automatic `reduce_sum` along broadcasted axes.
-   * Merges forward and backward equations, appending optimizer updates (e.g., AdamW state updates).
-
-2. **Frontend Graph Optimizations (`einsum.runtime.opt`):**
-   * **Dead Code Elimination (DCE):** Prunes unused SSA nodes not transitively reachable from `:outvars`.
-   * **Constant Folding:** Pre-computes purely scalar static subgraphs during tracing.
-   * **`vmap` Vectorization:** Automatically maps batch dimensions over unbatched single-sample functions.
-
----
-
-### Layer 1.5 & Execution Engine: SHA-256 Compilation Caching (`einsum.compiler.compile`)
-
-To guarantee sub-millisecond REPL feedback while working with heavy XLA compiler backends:
-
-1. **Graph Hashing:** When `trace-and-compile` is invoked, `einsum.compiler.compile` computes a SHA-256 hash of the normalized EDN graph (including input shapes and target hardware platform).
-2. **In-Memory Executable Cache:** The compiled `PjRtLoadedExecutable` native handle is stored in an in-memory `atom` map.
-3. **Execution Latency:**
-   * **First Call (Cold):** Tracing (< 1ms) + StableHLO Printing (< 1ms) + XLA Codegen (50ms - 200ms) = ~50-200ms total.
-   * **Subsequent Calls (Warm / REPL Re-eval):** SHA-256 Cache Hit -> Direct execution of `PjRtLoadedExecutable` on `PjRtBuffer` handles in **< 1ms**.
+1. **Lowering (`einsum.uop.lower`)**: Lowers relational logic ASTs into a canonical DAG of hash-consed micro-operations (`:uop/buffer`, `:uop/const`, `:uop/alu`, `:uop/reduce-axis`, `:uop/reshape`, `:uop/permute`, `:uop/unpack-int4`).
+2. **Algebraic Rewrite (`einsum.uop.rewrite`)**: Executes iterative pattern-matching simplifications. Canonicalizes identities, fuses contiguous coordinate views, and enforces structural rules such as Rule 8 (preserving squeeze reshapes prior to channel-splitting projections).
+3. **Schedule Partitioning (`einsum.uop.schedule`)**: Analyzes consumer dependencies to determine kernel boundaries:
+   - Evaluates `effective-consumer-count` through coordinate views to materialize multi-consumer activations (e.g., shared RMSNorm outputs) exactly once in VRAM.
+   - Materializes channel-splitting reshapes (`splits-channel-axis?`) for coalesced multi-head attention layouts.
+   - Fuses reconvergent epilogue subgraphs (`find-reconvergent-epilogue-subchain` for `:act :gelu`, `:silu`, and `:softcap`) directly into reduction kernel registers.
+   - Selects between online streaming softmax chunking ($M \le 16$) and direct 4D attention ($M > 16$).
+4. **Coordinate Rangeification (`einsum.uop.rangeify`)**: Translates symbolic multidimensional tensor indexing into explicit index arithmetic, stride calculations, and modulo ring-buffer addressing.
+5. **RDNA3 BEAM & Tiling Optimizer (`einsum.uop.opt` + `resources/uop/rdna3_beam_catalog.edn`)**:
+   - Matches kernel shapes against empirical RDNA3 tile templates.
+   - Configures cooperative Wave32 LDS reductions for decode ($M = 1$).
+   - Configures Wave32 BF16 WMMA tensor core GEMM tiles with bank-conflict-free stride-18 LDS layout (`s_W[4][16][18]` + `s_X[TM][16][18]`), strip-minimizing $M$-tiling ($TM \in \{1..8\}$), and 4-way $N$-tiling ($TN = 4$) for prefill ($M \ge 2$).
+   - Fuses in-register group-128 INT4 (`:uop/unpack-int4`) and 2-bit ternary (`:uop/unpack-ternary`) dequantization directly into tile loaders.
+6. **Kernel Renderer (`einsum.uop.render`)**: Emits optimized, unrolled AMD HIP C++ or C99 source code.
 
 ---
 
-## 4. Target Use Case Architectures
+### Layer 1: Native Panama FFM Runtime (`einsum.uop.runtime`)
 
-### A. Non-Autoregressive Generation (DiffusionGemma)
+Layer 1 bridges the pure Clojure compiler to physical silicon via Project Panama FFM (`java.lang.foreign`):
 
-* **Strategy:** Compile the heavy backbone denoising model into a static StableHLO executable.
-* **Control Loop:** Pure Clojure code orchestrates the 256-token canvas, entropy estimation, and self-conditioning loops, invoking the compiled `PjRtLoadedExecutable` per denoising step on persistent `PjRtBuffer` handles in GPU memory.
-
-### B. Fine-Tuning (FunctionGemma 270M / LoRA)
-
-* **Strategy:** Trace forward pass $\to$ generate VJP backward pass via `einsum.compiler.autodiff` $\to$ append AdamW updates.
-* **Execution:** Compile the full training step into a single XLA executable. XLA automatically manages activation checkpointing (rematerialization) to fit within GPU VRAM constraints.
-
-### C. Distillation & Pre-Training
-
-* **Strategy:** Execute two distinct PJRT executables concurrently:
-  1. Teacher Model (Forward Pass Only, FP16/FP8).
-  2. Student Model (Forward + Backward Pass).
-* Loss function combines cross-entropy and KL divergence over logits directly in device memory.
+- **Direct ROCm Driver Bindings**: Dynamically resolves and invokes native functions from `libhiprtc.so` (runtime compilation) and `libamdhip64.so` (memory management and kernel dispatch).
+- **SHA-256 Binary Caching**: Hashes emitted HIP C++ strings with SHA-256 and retrieves compiled `.hsaco` binaries from `.uop-cache/`, reducing repeat compilation times to under 1 ms.
+- **Zero-Allocation Launch Loop**: Reuses off-heap argument pointer arrays (`slot-ptrs`), eliminating JVM object allocations in the critical dispatch path.
+- **Pre-$t_0$ ROCm Warmup**: Executes a dry pass before starting benchmark timers to ensure GPU driver queues and ISA binaries are initialized.
+- **Large Checkpoint Ingestion (>4 GiB)**: Pins host memory buffers via `hipHostRegister` (`hipHostRegisterMapped | hipHostRegisterPortable`), enabling high-speed direct DMA streaming of 16.95 GB Gemma 4 31B weight sets over PCIe.
+- **Pure-JVM SIMD Reference Interpreter (`einsum.logic.interpret`)**: Evaluates logic ASTs on host CPU using Java's Vector API (`jdk.incubator.vector`), providing a standalone mathematical reference without GPU hardware requirements.
 
 ---
 
-## 5. Developer & AI Agent Workflows
+## 4. Hardware Support & Empirical Validation
 
-### Human REPL Workflow
+The primary accelerator target is the **AMD Radeon RX 7900 XTX (24 GB VRAM, `gfx1100`)**, paired with **AMD Ryzen 9 9950X**:
 
-1. Load model weights into off-heap GPU buffers via `pjrt/to-device`.
-2. Author neural layers or kernel logic as declarative Tensor Logic AST expressions (`[:rms-norm ...]`, `[:matmul ...]`).
-3. Lower and compile in the REPL (`(->> ast (lower/ast->graph ...) (core/compile-and-run client ...))`).
-4. Execute instantly (< 1ms warm execution latency) over existing device memory buffers without losing GPU state.
+| Model | Variant | Footprint | Prefill Speedup vs Archived XLA | Decode Throughput |
+|---|---|---|---|---|
+| **Gemma 4 E2B** | `BF16` (2.3B) | 4.6 GB | **1.58x – 3.34x** | **59.1 – 92.0 tok/s** |
+| **Gemma 4 E4B** | `BF16` (4.3B) | 8.6 GB | **4.40x – 4.62x** | **41.4 – 54.5 tok/s** |
+| **Gemma 4 31B** | `INT4` (31B) | **16.95 GB** | **1.13x – 1.45x** | **20.4 – 22.0 tok/s** |
 
-### AI Agent Protocol (RSI & Code Generation)
-
-1. **Generation:** AI agent emits declarative Tensor Logic AST vectors or EDN graph maps (`{:invars [...], :eqns [...]}`).
-2. **Validation:** Agent verifies AST shapes and graphs against Malli schemas locally in microseconds.
-3. **Execution & Feedback:** Agent lowers the AST to StableHLO SSA via `einsum.logic.lower/ast->graph` and compiles via `einsum.core/compile-and-run`.
-4. **Mutations:** Agent applies pure data transformations (`assoc-in`, `update`, `postwalk`) to explore novel network topologies or kernel optimizations deterministically.
-
----
-
-## 6. Repository Layout & Phased Roadmap
-
-```
-clj-einsum/
-├── README.md
-├── DESIGN.md
-├── deps.edn
-└── src/
-    └── einsum/
-        ├── core.clj           ;; High-level JIT execution API & REPL entrypoint
-        ├── compile.clj        ;; Graph hashing & executable caching
-        ├── pjrt.clj           ;; Panama Java 25 FFM bindings to libpjrt_cuda/cpu/rocm
-        ├── stablehlo.clj      ;; EDN SSA schema, validation, & MLIR printer
-        ├── logic/             ;; Pedro Domingos' Declarative Tensor Logic
-        │   ├── ast.clj        ;; Hiccup AST syntax & validation
-        │   ├── expand.clj     ;; Compound macro expansion
-        │   ├── shape.clj      ;; Symbolic shape inference & propagation
-        │   ├── index.clj      ;; Einstein notation index unification & permutations
-        │   ├── lower.clj      ;; AST -> StableHLO SSA compilation
-        │   ├── nn.clj         ;; Neural components (RMSNorm, RoPE, Attention, MLP)
-        │   ├── dce.clj        ;; Dead code elimination
-        │   ├── autodiff.clj   ;; Symbolic reverse-mode autodiff for AST
-        │   └── models/        ;; Pre-built pure AST architectures (GPT-2, SmolLM, Gemma)
-        ├── autodiff.clj       ;; SSA-level reverse-mode VJP auto-differentiation
-        ├── opt.clj            ;; SSA DCE & constant folding graph passes
-        ├── generation/        ;; Autoregressive & diffusion sampling loops
-        ├── tokenizer/         ;; Fast BPE and SentencePiece tokenizers
-        └── safetensors.clj    ;; Panama MemorySegment zero-copy off-heap weight loader
-```
-
-### Development Phases
-
-* **Phase 1: Foundation (PJRT & Memory with Java 25 Panama)**
-  * Implement Panama FFM bindings for `GetPjrtApi`, `PjRtClient`, `PjRtBuffer`, `PjRtLoadedExecutable`.
-  * Build mmap `.safetensors` parser into off-heap `MemorySegment`s using Java 25 `Arena`.
-
-* **Phase 2: StableHLO IR, Tensor Logic Engine & Caching**
-  * Implement strict Malli schemas for Jaxpr-style EDN graphs.
-  * Build `einsum.logic.*` Pedro Domingos declarative Tensor Logic AST engine.
-  * Write EDN-to-StableHLO MLIR text printer.
-  * Implement SHA-256 graph hash compilation cache.
-
-* **Phase 3: Autodiff & Optimizations**
-  * Build reverse-mode VJP generator with cotangent accumulation and broadcast reduction.
-  * Add DCE and constant-folding passes in `einsum.runtime.opt` and `einsum.logic.dce`.
-
-* **Phase 4: High-Level Models & Agent Tooling**
-  * Implement Gemma 2, Gemma 3, Gemma 4, SmolLM, and GPT-2 Tensor Logic models.
-  * Build discrete text diffusion canvas runtime.
-  * Package agent schema validation tooling for autonomous graph synthesis.
+All model variants achieve strict greedy token equivalence and numerical parity against the golden regression oracle (`resources/golden/gemma4_uop_oracle.edn`).

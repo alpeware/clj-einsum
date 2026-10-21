@@ -15,5 +15,5 @@ Gate 1 evaluates whether a model generation achieves **super-linear reduction in
 
 ## 2. Contained Experiment Pods
 
-- [`e24_prefix_cache_handover/`](e24_prefix_cache_handover/): In-VRAM homogeneous instance prefix-cache handover. Eliminates 74.46 ms of re-prefill latency (0.04 ms transition) while allocating **0 duplicate model weights** across 493 PJRT buffers.
+- [`e24_prefix_cache_handover/`](e24_prefix_cache_handover/): In-VRAM homogeneous instance prefix-cache handover. Eliminates 74.46 ms of re-prefill latency (0.04 ms transition) while allocating **0 duplicate model weights** across device buffers.
 - *Active Proposals*: `proposals/gate1_compression/cat_q_ternary/` (Ternary 1.58b compression for 30B–70B models).

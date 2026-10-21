@@ -24,7 +24,7 @@ flowchart LR
     end
 
     subgraph Native ["Tensor Logic (Unified Tensor Contraction)"]
-        TL["Unified StableHLO Graph<br/><i>(OpenXLA PJRT in VRAM)</i><br/>Linear Layers + Attention + Relational Cores + Semiring Fixpoints"]
+        TL["Unified Pure-Clojure UOp Schedule<br/><i>(Resident in VRAM)</i><br/>Linear Layers + Attention + Relational Cores + Semiring Fixpoints"]
     end
 ```
 
@@ -104,19 +104,19 @@ output, attention_weights = self.encoder(
 
 ---
 
-## 3. ⚙️ Compiler & DSL Approaches: `pedronahum/tl-pjrt`, MetalHLO & SwiftIR
+## 3. ⚙️ Compiler & DSL Approaches: Historical & Related Frameworks (MetalHLO, SwiftIR)
 
 Another stream of research explores compiling tensor logic and differentiable operations into native compiler IRs:
 
 ### Pedro Nahum's Compiler Infrastructure
 Pedro N. Rodriguez H. (`pedronahum`) has developed several projects bridging domain-specific languages and low-level ML compilers:
 - **`SwiftIR`**: A type-safe DSL for building MLIR programs directly from Swift, targeting compilation stacks without intermediate framework baggage.
-- **`MetalHLO`**: An engine providing C, Swift, and **PJRT APIs** to execute StableHLO programs natively on Apple Silicon (GPU and Neural Engine).
-- **`tl-pjrt`**: Exploratory domain-specific language emitting StableHLO bytecode and dispatching to hardware runtimes via the standard **OpenXLA PJRT C API**.
+- **`MetalHLO`**: An engine providing C, Swift, and runtime APIs to execute ML programs natively on Apple Silicon (GPU and Neural Engine).
+- **Pedro Nahum's Tensor Logic DSL**: Exploratory domain-specific language emitting bytecode and dispatching to hardware runtimes via standard plugin interfaces.
 
 ### Relation to `clj-einsum`
-`clj-einsum` shares the core architectural commitment to **PJRT C ABI compilation**, but realizes it in pure Clojure on the JVM using **Project Panama FFM (Foreign Function & Memory)**:
-- Compiles Pedro Domingos' Declarative Tensor Logic AST directly into **StableHLO MLIR text**.
+While exploratory projects like `MetalHLO` rely on external C++ MLIR toolchains, `clj-einsum` realizes an end-to-end compiler entirely in pure Clojure on the JVM using **Project Panama FFM (Foreign Function & Memory)**:
+- Compiles Pedro Domingos' Declarative Tensor Logic AST directly into **pure-Clojure UOp schedules and native HIP/C99 kernels**.
 - Compiles the entire pipeline (Gemma 4 transformer layers + KV cache + relational memory unbinding + deductive gating) into a **single static executable graph**.
 - Avoids Python runtimes, C++ glue layers, and JVM escape loops (Rule 4).
 
@@ -159,7 +159,7 @@ Fast weights introduce two timescales of synaptic plasticity:
 - **Fast Weights**: Dynamic weight matrices updated in real time via outer-product Hebbian association:
   $$A_{t+1} = \lambda A_t + \eta \left(x_t \otimes y_t\right)$$
 
-In `clj-einsum`, our **relational superposition core** $R_r = \sum e_h \otimes e_t$ is a direct implementation of relational fast weights inside OpenXLA VRAM:
+In `clj-einsum`, our **relational superposition core** $R_r = \sum e_h \otimes e_t$ is a direct implementation of relational fast weights inside device VRAM:
 - Adding a fact requires **zero backpropagation** and zero GPU-host round trips.
 - Memory unbinding is an in-graph matrix contraction: $v_{\text{retrieved}} = h_{\text{probe}} \cdot R_r$.
 
@@ -177,20 +177,20 @@ Retrieval-Augmented Generation (RAG) is the industry standard for augmenting LLM
 | **Attention Compute** | Quadratic blowup in transformer context ($O(N^2)$) | Unchanged static-shape forward pass ($O(L)$) |
 | **Factual Verification** | Probabilistic sampling over injected prompt text (hallucination still possible) | **Crisp Deductive Gating** at $T=0$ via Semiring thresholds (provable zero hallucination) |
 | **Online Learning** | Add chunk to vector DB; model weights remain unaltered | **Instantaneous Fast Weights**: outer product superposition ($R \leftarrow R + e_h \otimes e_t$) |
-| **Multi-Hop Reasoning** | Iterative prompt re-querying (agent tool loop, high latency) | Compiled Datalog fixpoint loop (`stablehlo.while`) in VRAM |
+| **Multi-Hop Reasoning** | Iterative prompt re-querying (agent tool loop, high latency) | Compiled Datalog fixpoint loop in VRAM |
 
 ---
 
 ## 6. 📊 Comprehensive Multi-Dimensional Comparison Matrix
 
-| Dimension | `clj-einsum` (This Repo) | `waylandzhang/tensorlogic` | `pedronahum/tl-pjrt` / MetalHLO | Modern Hopfield Networks | RAG Pipelines |
+| Dimension | `clj-einsum` (This Repo) | `waylandzhang/tensorlogic` | External Compilers (MetalHLO) | Modern Hopfield Networks | RAG Pipelines |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Implementation Language** | Pure Clojure (JVM) | Python | Swift / C++ | PyTorch / Python | Python / Go / Rust |
-| **Execution Engine** | OpenXLA PJRT via Project Panama FFM | PyTorch Autograd | PJRT / Metal | PyTorch / Custom CUDA | Vector DB + LLM API |
-| **Intermediate Representation** | **StableHLO MLIR** | PyTorch Computation Graph | MLIR / StableHLO | PyTorch Graph | Text strings |
+| **Execution Engine** | Pure-Clojure UOp via Project Panama FFM | PyTorch Autograd | Native Plugin / Metal | PyTorch / Custom CUDA | Vector DB + LLM API |
+| **Intermediate Representation** | **Pure-Clojure UOp IR** | PyTorch Computation Graph | MLIR / Native IR | PyTorch Graph | Text strings |
 | **In-Graph LLM Integration** | **Full forward pass** (Gemma 4 E2B fused with memory) | Standalone demo (No LLM weights loaded) | Standalone compiler ops | Standalone attention layer | Black-box prompt injection |
 | **Online Fast Weights** | **Yes** ($O(D^2)$ outer product superposition in VRAM) | Planned / Embedding training | No | No (Dynamic energy minimization) | No (Text append only) |
-| **Multi-Hop Deductive Fixpoints** | **Yes** (`stablehlo.while` Datalog closures) | Yes (`GatedMultiHopComposer` / Python) | No | No | No (Agent re-prompting) |
+| **Multi-Hop Deductive Fixpoints** | **Yes** (In-VRAM Datalog closures) | Yes (`GatedMultiHopComposer` / Python) | No | No | No (Agent re-prompting) |
 | **Deductive Gating Semirings** | **Boolean, Continuous, Tropical, Softmax** | Boolean, Continuous | Continuous | Softmax only | None (Probabilistic generation) |
 | **Consumer GPU Target** | **AMD ROCm (RX 7900 XTX), NVIDIA RTX, CPU** | Generic CUDA | Apple Silicon (Metal) | Generic CUDA | Host CPU + Cloud API |
 | **Zero Java/Python Escapes** | **Strictly Enforced (Rule 4)** | N/A (Python native) | N/A (Swift/C++ native) | N/A (Python native) | N/A (External services) |
@@ -202,6 +202,6 @@ Retrieval-Augmented Generation (RAG) is the industry standard for augmenting LLM
 1. **Validation of Relational Transformers**:
    `waylandzhang/tensorlogic` confirms that attention patterns and relational structures are intrinsically coupled. Constraining attention matrices via knowledge graphs is an effective inductive bias.
 2. **The Missing Bridge in Current Work**:
-   Existing implementations either build standalone small-scale reasoning toys (Zhang) or low-level compiler bindings without LLM integration (Nahum). `clj-einsum` is unique in compiling **full production open weights (Gemma 4)** and **relational tensor logic** into a single, fused, zero-overhead OpenXLA executable.
+   Existing implementations either build standalone small-scale reasoning toys (Zhang) or low-level compiler bindings without LLM integration (Nahum). `clj-einsum` is unique in compiling **full production open weights (Gemma 4)** and **relational tensor logic** into a single, fused, zero-overhead native UOp schedule.
 3. **Addressing the Empirical Bottleneck**:
    Our empirical findings (Task A–D) prove that static zero-shot projection fails due to prompt-template dominance. Connecting Zhang's relational attention insights with Domingos' superposition fast weights provides the exact blueprint for our next-generation consumer hardware experiments.

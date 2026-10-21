@@ -1,42 +1,37 @@
-# AGENT-LOOP.md — Tensor-Native Deliberation & The Meta-Research Cycle
+# The Tensor-Native Autonomous Coding Agent Loop
 
-## 1. Goal & Architectural Purpose
-
-This document specifies the **tensor-native deliberation loop** and **autonomous meta-research cycle** in `clj-einsum`.
-
-Rather than treating the agent loop as an unconstrained chat assistant or relying on toy finite-state machines, `clj-einsum` architectures the agent loop as a **rigorous measurement apparatus for Ali Ghodsi's 4 Recursive Self-Improvement (RSI) gates** on consumer silicon (AMD Radeon RX 7900 XTX 24GB / NVIDIA RTX 4090).
-
-The loop is defined by two fundamental engineering principles:
-1. **The Propose $\to$ Dispose Contract:** Continuous generative models only propose; discrete host-side verification gates dispose and commit.
-2. **Score the Snapshot, Not the Model:** Agent state and long-term memory reside in immutable, verified discrete snapshots verified by physical silicon execution, never in ungrounded token strings or continuous weight drift.
+> **Operational Status:** Production-Ready & Verified in Silicon (`einsum.logic.agent.*`, `einsum.logic.memory.*`).
+> **Core Invariant:** Relational memory lives directly inside device VRAM. Discrete synthesis and schema gates live host-side in pure Clojure.
 
 ---
 
-## 2. The Propose $\to$ Dispose Contract
+## 1. Executive Summary & Problem Formulation
 
-The empirical trajectory of Generation $G_2$ (E14–E20) definitively proved that continuous gradient descent and unconstrained autoregressive generation learn geometric ranking manifolds, **not discrete symbolic truth**. When an LLM directly mutates its own memory or state without an external verifier, errors compound exponentially, leading to state amnesia, hallucination laundering, and loop divergence.
+Standard autonomous coding agents (AutoGPT, SWE-agent, Devin-style architectures) suffer from three fatal scaling limits when executing continuous multi-turn development loops:
 
-To achieve stability across extended multi-turn horizons (Gate 4), the architecture strictly decouples proposal generation from state mutation:
+1. **Context Window Saturation ($O(N^2)$ Memory Explosion):** Every file inspection, test output, and intermediate thought is concatenated into the prompt. Context length explodes quadratically, driving latency to tens of seconds per step and exceeding VRAM limits.
+2. **Context Fragmentation & Hallucinatory Drift:** Because text context is unstructured, intermediate hypotheses conflict with ground truth. The model forgets constraints established 10 turns prior.
+3. **No Direct Grounding:** The model cannot directly "query" its own internal state or intermediate representations without paying full autoregressive decode costs on every query.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            THE PROPOSE ──► DISPOSE CONTRACT                 │
-├─────────────────────────────────────────┬───────────────────────────────────┤
-│ The Continuous Proposer (Device VRAM)   │ The Discrete Disposer (Host CPU)  │
-├─────────────────────────────────────────┼───────────────────────────────────┤
-│ - Gemma 4 / Vehicle LLM                 │ - Pure Clojure Validation Core    │
-│ - Resident weights, in-graph INT4       │ - Strict Schema & Type Checks     │
-│ - Ingests prompt & situation            │ - Generative Invariant Testing    │
-│ - Emits candidate AST / code / hypothesis│ - Physical Silicon Execution Parity│
-│ - Zero direct state mutation handles    │ - Commits verified snapshot ONLY  │
-└─────────────────────────────────────────┴───────────────────────────────────┘
-```
+`clj-einsum` resolves this by unifying Pedro Domingos' Declarative Tensor Logic with an in-tensor relational memory core executing inside device VRAM.
 
-### The Invariant Rule
-The generative model **never holds a raw write handle** to memory, system state, or the experiment catalog:
-$$\text{Snapshot}' = \text{VerifiedCommit}(\text{Snapshot}, \text{Proposals})$$
-- If a proposal satisfies all schema rules, semantic constraints, and differential execution tests, it commits to the immutable snapshot.
-- If a proposal fails any check, it is rejected back to the model as a structured observation with exact failure diagnostics, enabling self-correction without corrupting memory.
+---
+
+## 2. Theoretical Grounding: In-Tensor Relational Memory
+
+In `clj-einsum`, knowledge is not maintained as a text transcript. Instead, knowledge is encoded as a set of continuous relation matrices resident in device VRAM:
+
+$$M_r \in \mathbb{R}^{D \times D}$$
+
+Where each relation $r$ (e.g. `:calls`, `:imports`, `:fails-test`, `:implements`) is a superposition of outer products between head entity embeddings $e_h$ and tail entity embeddings $e_t$:
+
+$$M_r = \sum_{(h, t) \in \mathcal{E}_r} e_h \otimes e_t$$
+
+Querying whether entity $h$ has relation $r$ to entity $t$ is a single bilinear tensor contraction:
+
+$$\text{score}(h, r, t) = e_h^T M_r e_t$$
+
+Because $M_r$ is a fixed $D \times D$ matrix, **associative retrieval latency is $O(1)$ with respect to the number of stored facts**, executing in sub-millisecond tensor contractions without autoregressive generation.
 
 ---
 
@@ -46,8 +41,8 @@ Traditional agent frameworks evaluate "model weights" or "prompt templates," tre
 
 In `clj-einsum`:
 - **Memory is an Immutable Discrete Snapshot:** Memory consists of verified relational assertions, compiled graph executables, and registered metrics.
-- **Physical Verification:** A memory entry is not valid because an LLM generated it; it is valid because an executable was compiled to StableHLO MLIR, executed on device silicon, and matched its reference specification.
-- **Constant Memory Horizon:** In-VRAM state reduction (E04, E07, E23) maintains an $O(1)$ memory footprint across multi-turn reasoning chains, replacing unbounded quadratic context accumulation.
+- **Physical Verification:** A memory entry is not valid because an LLM generated it; it is valid because an executable was compiled to a pure-Clojure UOp schedule, executed on device silicon, and matched its reference specification.
+- **Constant Memory Horizon:** In-VRAM state reduction maintains an $O(1)$ memory footprint across multi-turn reasoning chains, replacing unbounded quadratic context accumulation.
 
 ---
 
@@ -57,8 +52,8 @@ Deliberation is partitioned into three latency and verification tiers, respectin
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ Tier 1: Reflex Contractions (OpenXLA StableHLO on Device GPU)               │
-│ - Sub-2ms PJRT execution                                                    │
+│ Tier 1: Reflex Contractions (Pure-Clojure UOp Schedule on Device GPU)       │
+│ - Sub-2ms Panama FFM native execution                                       │
 │ - Relational table joins, attention masking, state tracking                 │
 │ - 100% deterministic, mathematically sound                                  │
 └──────────────────────────────────────┬──────────────────────────────────────┘
@@ -67,7 +62,7 @@ Deliberation is partitioned into three latency and verification tiers, respectin
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ Tier 2: Resident Deliberation (Gemma 4 in Device VRAM)                      │
 │ - Zero weight reload overhead (persistent resident weights)                 │
-│ - Prefix-Cache Handover (E24: 0.04ms transition, 74.46ms prefill saved)     │
+│ - Ping-Pong KV cache buffer reuse (sub-millisecond step transitions)        │
 │ - In-graph token comparison & bounded while loop execution                  │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │ Candidate Proposal
@@ -81,12 +76,12 @@ Deliberation is partitioned into three latency and verification tiers, respectin
 ```
 
 ### Tier 1: Reflex Contractions (Device GPU)
-Deterministic tensor contractions compiled via StableHLO MLIR to PJRT executables. Executes state lookups, relational joins, and attention masks in $< 2\text{ ms}$ on consumer GPUs with zero host communication.
+Deterministic tensor contractions compiled via pure-Clojure UOp schedules to native HIP kernels. Executes state lookups, relational joins, and attention masks in $< 2\text{ ms}$ on consumer GPUs with zero host communication.
 
 ### Tier 2: Resident Deliberation (Device VRAM)
 When Tier 1 reflex scores fall below a decision margin ($\text{Top1} - \text{Top2} < \tau$), deliberation triggers. Instead of launching a cold inference job:
-- The resident 2.3B/4B LLM deliberates directly within the same device VRAM.
-- Homogeneous instance-to-instance prefix-cache handover (E24) eliminates 74.46 ms of re-prefill latency, replacing it with a 0.04 ms in-VRAM slice swap ($1861\times$ faster).
+- The resident LLM deliberates directly within the same device VRAM.
+- Static-shape ping-pong KV cache buffers eliminate re-allocation latency and avoid GC pressure.
 - In-graph lexical interrupts detect tool triggers and end-of-turn tokens natively without host regex parsing.
 
 ### Tier 3: Discrete Synthesis & Commit Gate (Host CPU)
@@ -108,7 +103,7 @@ The ultimate expression of the agent deliberation loop is the **closed meta-rese
                                   ▼
                   ┌───────────────────────────────┐
                   │      2. LOWER & COMPILE       │
-                  │ Lower AST to StableHLO SSA IR │
+                  │ Lower AST to Pure UOp DAG     │
                   │ Compile via Project Panama FFM│
                   └───────────────┬───────────────┘
                                   │
@@ -137,10 +132,10 @@ The coding agent ingests an external research proposal (e.g. arXiv paper or prio
 Because the AST is homoiconic pure EDN, it can be checked, analyzed, transformed, and validated by the compiler before any execution occurs.
 
 ### Step 2: Lower & Compile
-The AST lowers directly into a flat SSA EDN graph governed by Malli schemas (`einsum.compiler.stablehlo`). The compiler emits StableHLO MLIR text and compiles it directly into hardware executables via OpenXLA PJRT dynamic plugins using Java 25 Project Panama FFM (`java.lang.foreign`). SHA-256 caching ensures sub-millisecond compilation turnaround on warm graphs.
+The AST lowers directly into a canonical UOp DAG governed by immutable Clojure data structures (`einsum.uop.lower`). The compiler partitions schedules, rangeifies coordinates, optimizes Wave32 LDS/WMMA tiles, renders native HIP C++ code, and executes directly on accelerator hardware via Project Panama FFM (`java.lang.foreign` to `libamdhip64.so` / `libhiprtc.so`). SHA-256 binary caching in `.uop-cache/` ensures sub-millisecond compilation turnaround on warm graphs.
 
 ### Step 3: Verify Silico
-The compiled artifact executes on physical consumer silicon (AMD Radeon RX 7900 XTX 24GB or NVIDIA RTX 4090):
+The compiled artifact executes on physical consumer silicon (AMD Radeon RX 7900 XTX 24GB):
 - **Gate 1 Check:** Measure peak VRAM bytes allocated, parameter compression (`bytes/param`), and sustained generation throughput ($\text{tok/s}$).
 - **Gate 2 Check:** Measure wall-clock calibration and adaptation latency.
 - **Gate 3 Check:** Measure capability retention ($\ge 95\%$ floor retention against uncompressed baseline) and benchmark score.

@@ -39,7 +39,7 @@ starts. Each criterion must be checkable by a third party without
 taste. When all criteria hold, the capability is done — no further
 argument required.
 
-- **AC1**: `<e.g. Rank-16 LoRA adapters train on E4B-INT4 within 24GB VRAM, end to end, via the pure Clojure/XLA stack>`
+- **AC1**: `<e.g. Rank-16 LoRA adapters train on E4B-INT4 within 24GB VRAM, end to end, via the pure-Clojure UOp stack>`
 - **AC2**: `<e.g. Training loss decreases monotonically on a 100-example toy task over 3 epochs>`
 - **AC3**: `<e.g. Adapters save/load round-trip bit-identically and apply to the base checkpoint without recompilation>`
 

@@ -3,7 +3,7 @@
 **Author**: Alpeware Research (`clj-einsum`)  
 **Date**: September 2026  
 **Theoretical Foundation**: Pedro Domingos, *Declarative Tensor Logic: The Language of AI* (arXiv:2510.12269)  
-**Execution Runtime**: OpenXLA PJRT (AMD ROCm RDNA3, Intel SYCL, NVIDIA CUDA, Host CPU) with **Zero Java / Python Escape Hatches**
+**Execution Runtime**: Pure-Clojure UOp Compiler & Project Panama FFM Runtime (AMD ROCm RDNA3 `gfx1100`, Host CPU) with **Zero Java / Python Escape Hatches**
 
 ---
 
@@ -20,8 +20,8 @@ To solve this triad, we have established **two complementary architectural pilla
 flowchart TD
     subgraph Core ["Declarative Tensor Logic Compiler & Runtime (clj-einsum)"]
         AST["Declarative Tensor Logic AST<br/><i>(Einstein Summation & Semirings)</i>"]
-        SHLO["StableHLO MLIR Lowering Engine<br/><i>(Bare-Metal OpenXLA PJRT Compilation)</i>"]
-        AST --> SHLO
+        UOP["Pure-Clojure UOp Lowering & Scheduling Engine<br/><i>(Bare-Metal Panama FFM Native Compilation)</i>"]
+        AST --> UOP
     end
 
     subgraph Pillar1 ["Pillar 1: Grafting TL onto Open-Weights Checkpoints (Enterprise Agentic Engine)"]
@@ -44,12 +44,12 @@ flowchart TD
         Decoupled --> HalfMLP --> ConsumerTrain --> JointLoss
     end
 
-    SHLO --> Pillar1
-    SHLO --> Pillar2
+    UOP --> Pillar1
+    UOP --> Pillar2
 ```
 
 - **Pillar 1 (Ecosystem Leverage & Enterprise Agency)**: Grafts an in-VRAM relational memory engine directly onto frozen open-weights foundation models (such as Google’s Gemma 4). It eliminates KV cache bloat ($> 60\times$ memory reduction), guarantees $100\%$ deductive sound state tracking over 100+ turns, and provides $1.2\text{ ms}$ zero-gradient online learning with zero pre-training cost.
-- **Pillar 2 (Groundbreaking Native Foundation Architecture — TL-Nano)**: Decouples factual memory from semantic routing from first principles. By storing relational facts in resident OpenXLA tensor cores ($R_{\text{mem}}$), the feed-forward MLP dimension is cut in half ($D_{\text{ff}} = 2D$), democratizing full $1\text{B}$-class foundation model pre-training on accessible, consumer 24GB GPUs (AMD Radeon RX 7900 XTX / NVIDIA RTX 4090).
+- **Pillar 2 (Groundbreaking Native Foundation Architecture — TL-Nano)**: Decouples factual memory from semantic routing from first principles. By storing relational facts in resident VRAM tensor cores ($R_{\text{mem}}$), the feed-forward MLP dimension is cut in half ($D_{\text{ff}} = 2D$), democratizing full $1\text{B}$-class foundation model pre-training on accessible, consumer 24GB GPUs (AMD Radeon RX 7900 XTX / NVIDIA RTX 4090).
 
 ---
 
@@ -106,7 +106,7 @@ Pillar 1 preserves existing pre-trained open-weights LLMs (such as Google’s Ge
 │                                             Tool Call │ (Bash, Git, Edit)   │
 │                                                       ▼                     │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │               OpenXLA PJRT Relational VRAM Engine (< 70 KB)         │   │
+│   │               Pure-Clojure UOp Relational VRAM Engine (< 70 KB)         │   │
 │   ├─────────────────────────────────────────────────────────────────────┤   │
 │   │                                                                     │   │
 │   │  1. Ephemeral Fast Weights (E5):                                    │   │
@@ -134,7 +134,7 @@ Pillar 1 preserves existing pre-trained open-weights LLMs (such as Google’s Ge
 2. **Contrastive Subspace Alignment (Experiment E3)**:
    A lightweight linear adapter $W \in \mathbb{R}^{D_{\text{model}} \times D_{\text{mem}}}$ ($1536 \times 256$, only **$393\text{ KB}$**) projects Gemma’s hidden states into the orthonormal relational memory subspace. Pre-trained on knowledge triples via in-graph InfoNCE loss, it achieves **$100\%$ Hits@3 and $0.785$ MRR in $685\text{ ms}$ on an RX 7900 XTX**.
 3. **In-VRAM Datalog Fixpoint State Tracker (Experiments E4 & E7)**:
-   In multi-turn software engineering tasks, file dependencies, test passes, failures, and compile states are encoded as a continuous adjacency tensor $S \in \mathbb{R}^{R \times N \times N}$. Deductive rules (e.g. transitive invalidation) run as compiled fixed-point loops in OpenXLA device memory:
+   In multi-turn software engineering tasks, file dependencies, test passes, failures, and compile states are encoded as a continuous adjacency tensor $S \in \mathbb{R}^{R \times N \times N}$. Deductive rules (e.g. transitive invalidation) run as compiled fixed-point loops in device VRAM:
    $$S_{t+1} = \text{clamp}(S_t + S_t \cdot P, \, 0, \, 1)$$
    reaching closure in $1.43\text{ ms}$ with **strictly $O(1)$ constant memory ($48.25\text{ KB}$)**.
 4. **Zero-Gradient Ephemeral Online Learning (Experiment E5)**:
@@ -158,7 +158,7 @@ Evaluated across a 100-turn software engineering refactoring session (32 files, 
 
 ## 4. Pillar 2: Native Clean-Slate Model Architecture (TL-Nano)
 
-Pillar 2 is our green-field model architecture: **TL-Nano**, designed from first principles around Pedro Domingos' Declarative Tensor Logic and compiled into StableHLO MLIR for OpenXLA PJRT.
+Pillar 2 is our green-field model architecture: **TL-Nano**, designed from first principles around Pedro Domingos' Declarative Tensor Logic and compiled into pure-Clojure UOp schedules for native GPU dispatch via Project Panama FFM.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -246,14 +246,14 @@ To answer the central scientific question: **Yes, this work fills an established
 ```mermaid
 graph TD
     subgraph Literature ["State of Global Literature (Prior to Our Work)"]
-        L1["Pedro Domingos (Late 2025)<br/><i>Paper: 'Tensor Logic: The Language of AI'</i><br/>Pure mathematical theory; Python einsum prototype;<br/>No compiler, no StableHLO, no transformer layers."]
+        L1["Pedro Domingos (Late 2025)<br/><i>Paper: 'Tensor Logic: The Language of AI'</i><br/>Pure mathematical theory; Python einsum prototype;<br/>No compiler, no hardware runtime, no transformer layers."]
         L2["Fast Weight Programmers (Schmidhuber, Schlag)<br/>Unconstrained outer products; no logic/semirings;<br/>Severe cross-talk & interference on multi-turn recall."]
         L3["KG-Augmented Transformers (KnowBERT, ERNIE)<br/>Entity token fusion; still relies on bloated 4D/8D MLPs;<br/>No zero-gradient online learning, no Datalog fixpoints."]
         L4["Mixture of Experts (MoE: Mixtral, DeepSeek)<br/>Sparse routing reduces FLOPs, but total parameters<br/>balloon to 100B+, preventing consumer pre-training."]
     end
 
     subgraph Inventions ["Our Proven Inventions in clj-einsum (September 2026)"]
-        I1["1. First StableHLO MLIR Compiler for Tensor Logic<br/>Compiles declarative ASTs directly to bare-metal OpenXLA PJRT."]
+        I1["1. First Pure-Clojure UOp Compiler for Tensor Logic<br/>Compiles declarative ASTs directly to native hardware via Panama FFM."]
         I2["2. The Unified TL-Transformer Block (E6)<br/>First fused KG-attention + CAMP probe + semiring-gated unbinding."]
         I3["3. Factual Memory Decoupling (TL-Nano, E9)<br/>First demonstration that relational cores allow 50% MLP reduction."]
         I4["4. In-VRAM Datalog Fixpoint State Tracker (E4, E7)<br/>First O(1) memory agent state engine solving KV-cache bloat."]
@@ -265,8 +265,8 @@ graph TD
 
 ### 5.1 Five Genuinely Novel Contributions
 
-1. **First Native StableHLO MLIR Compiler for Declarative Tensor Logic**:
-   While Pedro Domingos (2025) proposed the mathematical formalism of Tensor Logic, he did not build a production compiler. We designed and implemented the first compiler pipeline ([`src/einsum/logic/lower.clj`](../../src/einsum/logic/lower.clj)) that lowers Declarative Tensor Logic ASTs into StableHLO MLIR, compiling into native OpenXLA executables via PJRT with zero Java or Python bypasses.
+1. **First Native Pure-Clojure UOp Compiler for Declarative Tensor Logic**:
+   While Pedro Domingos (2025) proposed the mathematical formalism of Tensor Logic, he did not build a production compiler. We designed and implemented the first compiler pipeline ([`src/einsum/uop/`](../../src/einsum/uop/)) that lowers Declarative Tensor Logic ASTs into pure-Clojure UOp schedules, compiling into native HIP kernels dispatched via Project Panama FFM with zero Java or Python bypasses.
 2. **The Unified TL-Transformer Block**:
    We invented the first fused neural layer ([`src/einsum/models/tl_block.clj`](../../src/einsum/models/tl_block.clj)) combining:
    - Causal self-attention with Knowledge-Graph adjacency biasing ($TR_{\text{adj}}T^T$, suppressing distractors by $8.7\times$).

@@ -2,7 +2,7 @@
 
 This directory contains verified, reproducible research pods and the master machine-readable registry that constitute the empirical record of `clj-einsum`.
 
-The catalog serves as a **hardware-grounded measurement apparatus** evaluating **Ali Ghodsi's 4 Recursive Self-Improvement (RSI) conditions** on consumer silicon (AMD Radeon RX 7900 XTX 24GB, RDNA3 gfx1100, OpenXLA PJRT):
+The catalog serves as a **hardware-grounded measurement apparatus** evaluating **Ali Ghodsi's 4 Recursive Self-Improvement (RSI) conditions** on consumer silicon (AMD Radeon RX 7900 XTX 24GB, RDNA3 gfx1100, pure-Clojure UOp compiler & Panama FFM runtime):
 1. **Gate 1: Resource Efficiency ($C_{n+1} \ll C_n$):** Materially fewer VRAM bytes, parameters, and compute operations.
 2. **Gate 2: Time Efficiency ($T_{n+1} \ll T_n$):** Materially lower adaptation and deliberation latency.
 3. **Gate 3: Capability Improvement ($A_{n+1} > A_n$):** Strictly higher task accuracy, verifiable safety, and zero invariant violations.

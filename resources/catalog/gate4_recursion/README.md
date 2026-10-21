@@ -2,7 +2,7 @@
 
 **Metric**: `Judgment-cost per verified catalog entry (wall-clock hours & human intervention ratio)`  
 **Target**: Declining human intervention hours and sub-6 hour end-to-end RFC verification cycles  
-**Primary Hardware Target**: AMD Radeon RX 7900 XTX (ROCm PJRT)  
+**Primary Hardware Target**: AMD Radeon RX 7900 XTX (ROCm UOp)  
 **Architecture Guide**: [docs/architecture/rsi_gates.md](../../docs/architecture/rsi_gates.md)
 
 ---

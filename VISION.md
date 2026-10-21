@@ -17,7 +17,7 @@ We maintain a strict boundary between mathematical guarantees and empirical hypo
 
 ### Compute & Throughput: Hypothesis
 - Unpacking ternary weights reduces memory bandwidth pressure during autoregressive decoding, but still executes floating-point GEMM on hardware tensor cores.
-- **The Measurement Obligation:** We never assume compute speedups by default. Token throughput ($\text{tok/s}$) and achieved GFLOPs/watt must be measured on silicon against optimized FP16 and INT4 (EXL3) baselines.
+- **The Measurement Obligation:** We never assume compute speedups by default. Token throughput ($\text{tok/s}$) and achieved GFLOPs/watt must be measured on silicon against optimized FP16 and INT4 baselines.
 
 ---
 
@@ -25,9 +25,9 @@ We maintain a strict boundary between mathematical guarantees and empirical hypo
 
 ### Covered — The Parts That Work:
 - **Tensor Contraction (einsum)**: The shared mathematical core of deep learning: attention, MLPs, convolutions, and relational joins. One construct, `[:= head & body-terms]`; a shared contracted index *is* the matmul, the join, the attention score.
-- **Function-Free Datalog Rules**: Compiled directly to contractions over embedded relations; lowered to StableHLO without runtime interpretation.
+- **Function-Free Datalog Rules**: Compiled directly to contractions over embedded relations; lowered to pure-Clojure UOp schedules without runtime interpretation.
 - **Elementwise Nonlinearities & Autodiff Closure**: Activations are attributes on equations (`{:act :gelu}`); the gradient of a tensor-logic program is itself a pure tensor-logic program.
-- **Statically-Shaped Dataflow**: Exact compilation via OpenXLA PJRT with differential verification.
+- **Statically-Shaped Dataflow**: Exact compilation via pure-Clojure UOp schedules and Project Panama FFM (`libamdhip64.so` / `libhiprtc.so`) with differential verification against the pure-JVM SIMD reference interpreter.
 
 ### Not Covered — Deliberately Out of Scope:
 - Full first-order logic with function symbols, modal logic, or unconstrained probabilistic programming.
@@ -38,7 +38,7 @@ We maintain a strict boundary between mathematical guarantees and empirical hypo
 
 ## 3. The 4 Research Pillars
 
-- **Pillar 0 — The Compiler (Built)**: Tensor Logic AST $\to$ StableHLO $\to$ PJRT with Panama FFM bindings, validated via differential testing.
+- **Pillar 0 — The Compiler (Built)**: Tensor Logic AST $\to$ Pure-Clojure UOp DAG $\to$ Native HIP/C99 via Panama FFM bindings, validated via differential testing.
 - **Pillar 1 — Trainable Limits (Established)**: Proving the boundaries of continuous structure learning; gradients optimize ranking manifolds, necessitating discrete commitment gates.
 - **Pillar 2 — The Agent Deliberation Loop (Built)**: Three-tier deliberation (reflex contractions, device deliberation, host synthesis) with schema-verified memory commits.
 - **Pillar 3 — The RSI Measurement Apparatus (Active)**: Automated closed loop measuring Ghodsi's 4 gates on consumer silicon across generation lineage.

@@ -4,7 +4,7 @@ Welcome to the **Declarative Tensor Logic & In-Tensor Relational Memory** knowle
 
 This documentation suite establishes the theoretical foundations, empirical results, architectural comparisons, and long-term research roadmap for unifying Large Language Models (LLMs) with symbolic Knowledge Bases (KBs) via **Pedro Domingos' Declarative Tensor Logic**.
 
-All tensor contractions, relational memory updates, and neural layers execute via **OpenXLA** and **StableHLO MLIR** on consumer hardware (AMD ROCm RDNA3, Intel SYCL, NVIDIA CUDA, and CPU) with **Zero Java Escape Hatches**.
+All tensor contractions, relational memory updates, and neural layers compile via Pedro Domingos' Declarative Tensor Logic (`einsum.logic.*`) into pure-Clojure UOp schedules (`einsum.uop.*`), executing directly on consumer hardware (AMD Radeon RX 7900 XTX 24 GB and host CPU) via Project Panama FFM with **Zero Java Escape Hatches**.
 
 ---
 
@@ -35,10 +35,10 @@ flowchart TD
    Autonomous software agents running for dozens or hundreds of turns accumulate massive context windows. Key-Value caches grow into tens of gigabytes, attention compute scales with $O(N^2)$, and subtle state transitions (e.g. task progress, tool state, environment facts) become diluted in the long prompt, causing execution failure.
 
 ### The Tensor Logic Solution
-By representing entities as dense vector embeddings ($e \in \mathbb{R}^D$) and relations as resident matrix cores ($R_r \in \mathbb{R}^{D \times D}$) directly inside OpenXLA device memory (VRAM), knowledge operations become **compiled tensor contractions**:
+By representing entities as dense vector embeddings ($e \in \mathbb{R}^D$) and relations as resident matrix cores ($R_r \in \mathbb{R}^{D \times D}$) directly inside GPU device memory (VRAM), knowledge operations become **compiled tensor contractions**:
 - **Deductive Gating**: Queries are projected into relational memory space; if retrieved confidence exceeds threshold $\tau$, the output distribution is crisp-gated to grounded entity tokens, provably eliminating hallucinations.
 - **Fast-Weight Online Learning**: New facts are stored instantaneously in GPU VRAM via outer-product superposition ($R_r \leftarrow R_r + e_h \otimes e_t$) in $O(D^2)$ forward compute with **zero backpropagation**.
-- **Constant-Space Agent State Tracking**: Agent environment state and multi-hop relations are tracked via compiled Datalog fixpoint iterations (`stablehlo.while`) in $O(1)$ context space.
+- **Constant-Space Agent State Tracking**: Agent environment state and multi-hop relations are tracked via compiled Datalog fixpoint iterations in $O(1)$ context space.
 
 ---
 
@@ -56,7 +56,7 @@ Detailed mathematical formulation of Pedro Domingos' Declarative Tensor Logic:
 ### 2. 🌐 [Related Work & Comparative Analysis](related_work.md)
 Detailed technical comparison with contemporary neuro-symbolic research and open-source implementations:
 - Deep-dive into `waylandzhang/tensorlogic` (`transformer_reasoning_demo.py`, `EmbeddingSpace`, attention heads as relation discovery, KG-masked attention).
-- Comparison with `pedronahum/tl-pjrt` (Python/JAX surface DSL vs bare-metal Clojure/PJRT systems compiler).
+- Comparison with alternative frameworks (Python/JAX surface DSL vs bare-metal pure-Clojure UOp systems compiler).
 - Connections to Fast Weights, Modern Hopfield Networks, and Memory-Augmented Neural Networks.
 - 6-dimensional architectural comparison matrix.
 
@@ -78,5 +78,4 @@ Comprehensive architectural breakdown, commercial enterprise positioning, and gl
 | **Symbolic Logic & Datalog Fixpoints** | [`einsum.logic.symbolic`](../../src/einsum/logic/symbolic.clj) | [`einsum.logic.symbolic-test`](../../test/einsum/logic/symbolic_test.clj) |
 | **Value-Carrying Semirings** | [`einsum.logic.semiring`](../../src/einsum/logic/semiring.clj) | [`einsum.logic.semiring-test`](../../test/einsum/logic/semiring_test.clj) |
 | **Autodiff Adjoints for Probes** | [`einsum.logic.autodiff`](../../src/einsum/logic/autodiff.clj) | [`einsum.logic.autodiff-test`](../../test/einsum/logic/autodiff_test.clj) |
-| **Gemma 4 Grounding AST Block** | [`einsum.models.gemma`](../../src/einsum/models/gemma.clj) | [`einsum.integration.rocm-e2e-test`](../../test/einsum/integration/rocm_e2e_test.clj) |
-
+| **Gemma 4 Grounding AST Block** | [`einsum.models.gemma`](../../src/einsum/models/gemma.clj) | [`einsum.models.gemma4_test`](../../test/einsum/models/gemma4_test.clj) |
