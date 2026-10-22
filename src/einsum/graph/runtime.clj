@@ -74,25 +74,38 @@
     (cond
       ;; 1. Boolean return
       (boolean? raw-res)
-      {(if raw-res first-out second-out) [fallback-payload]}
+      (let [target-port (if raw-res first-out second-out)]
+        (if target-port
+          {target-port [fallback-payload]}
+          {}))
 
       ;; 2. Tuple return [port payload']
       (and (vector? raw-res)
            (== (count raw-res) 2)
-           (keyword? (first raw-res))
-           (contains? outs (first raw-res)))
-      {(first raw-res) [(second raw-res)]}
+           (keyword? (first raw-res)))
+      (if (contains? outs (first raw-res))
+        {(first raw-res) [(second raw-res)]}
+        (throw (ex-info "Verify predicate returned undeclared output port"
+                        {:node verify-node :port (first raw-res) :valid-outs outs})))
 
       ;; 3. Map return with :port and :payload
       (and (map? raw-res) (contains? raw-res :port) (contains? raw-res :payload))
-      {(:port raw-res) [(:payload raw-res)]}
+      (if (contains? outs (:port raw-res))
+        {(:port raw-res) [(:payload raw-res)]}
+        (throw (ex-info "Verify predicate returned undeclared output port"
+                        {:node verify-node :port (:port raw-res) :valid-outs outs})))
 
       ;; 4. Direct map {out-port payloads}
       (map? raw-res)
-      (into {}
-            (map (fn [[k v]]
-                   [k (if (vector? v) v [v])]))
-            raw-res)
+      (do
+        (doseq [k (keys raw-res)]
+          (when-not (contains? outs k)
+            (throw (ex-info "Verify predicate returned undeclared output port"
+                            {:node verify-node :port k :valid-outs outs}))))
+        (into {}
+              (map (fn [[k v]]
+                     [k (if (vector? v) v [v])]))
+              raw-res))
 
       :else
       (throw (ex-info "Invalid return contract from verify predicate"
@@ -137,7 +150,10 @@
            :agent
            (let [sub-attrs (second child)
                  node-id (:id sub-attrs)
-                 sub-compiled (compile-graph child opts)]
+                 sub-opts (if-let [sub-caps (get-in opts [:subagent-capabilities node-id])]
+                            (assoc opts :capabilities sub-caps)
+                            opts)
+                 sub-compiled (compile-graph child sub-opts)]
              (swap! nodes-atom assoc node-id (assoc sub-attrs :type :agent :hiccup child))
              (swap! node-states-atom assoc node-id sub-compiled))
 
@@ -323,7 +339,14 @@
                 sub-inst-stepped (-> sub-inst-cleared
                                      (enqueue-input dst-port payload)
                                      (run-graph! {:mode (:mode graph-inst)}))
-                inst-updated (assoc-in graph-inst-popped [:node-states dst-node] sub-inst-stepped)]
+                tx-idx (dec (:event/tx env))
+                parent-log (get graph-inst-popped :event-log)
+                parent-log-updated (if (and (vector? parent-log) (<= 0 tx-idx) (< tx-idx (count parent-log)))
+                                     (assoc-in parent-log [tx-idx :event/meta :sub-event-log] (:event-log sub-inst-stepped))
+                                     parent-log)
+                inst-updated (-> graph-inst-popped
+                                 (assoc :event-log parent-log-updated)
+                                 (assoc-in [:node-states dst-node] sub-inst-stepped))]
             (reduce-kv
              (fn [inst out-p msgs]
                (let [src-t [dst-node out-p]
@@ -415,11 +438,15 @@
 
             (let [node (get-in inst [:nodes dst-node])]
               (= (:type node) :agent))
-            (let [sub-inst (get-in inst [:node-states dst-node])
-                  sub-inst-cleared (assoc sub-inst :outbox (zipmap (get-in sub-inst [:attrs :outs]) (repeat [])))
-                  sub-inst-stepped (-> sub-inst-cleared
-                                       (enqueue-input dst-port payload)
-                                       (run-graph! {:capabilities {}}))]
+            (let [node (get-in inst [:nodes dst-node])
+                  sub-event-log (get-in env [:event/meta :sub-event-log])
+                  sub-inst-stepped (if (seq sub-event-log)
+                                     (replay-graph (:hiccup node) sub-event-log)
+                                     (let [sub-inst (get-in inst [:node-states dst-node])
+                                           sub-inst-cleared (assoc sub-inst :outbox (zipmap (get-in sub-inst [:attrs :outs]) (repeat [])))]
+                                       (-> sub-inst-cleared
+                                           (enqueue-input dst-port payload)
+                                           (run-graph! {:capabilities {}}))))]
               (recur (rest envs)
                      (assoc-in inst [:node-states dst-node] sub-inst-stepped)))
 

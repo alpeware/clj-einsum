@@ -265,43 +265,56 @@
       (let [task-kv-state (atom nil)
             early-exit-opt? (get opts :early-exit false)
             nudge-sc-opt? (get opts :nudge-short-circuit false)
+            grading-ctx (bench-core/create-tightened-grading-ctx)
             submission-tool-hook
             (fn submission-tool-hook
               ([sci-ctx tool-code]
                (submission-tool-hook sci-ctx tool-code (inc (count @submissions))))
-              ([sci-ctx tool-code turn]
-               (let [eval-res (agent/eval-tool-code sci-ctx tool-code)
-                     candidate (bench-core/extract-candidate-code tool-code fn-name)
-                     is-sub? (and (seq candidate) (bench-core/submission-form? candidate fn-name))]
-                 (if is-sub?
-                   (let [pub-res (bench-core/grade-submission sci-ctx candidate (:public-tests task))
-                         early-exit? (boolean (and early-exit-opt? (:all-passed? pub-res)))
-                         feedback (bench-core/format-public-feedback pub-res)
-                         failures (when-not (:all-passed? pub-res)
-                                    (if (:error pub-res)
-                                      (:error pub-res)
-                                      (str/join "; "
-                                                (map (fn [{:keys [code expected actual error]}]
-                                                       (if error
-                                                         (format "%s -> %s" code error)
-                                                         (format "%s -> Expected %s, got %s" code expected actual)))
-                                                     (filter #(not (:passed? %)) (:results pub-res))))))
-                         nudge-msg (when-not (:all-passed? pub-res)
-                                     "Revise your implementation to pass all public tests.")]
-                     (swap! submissions conj {:code candidate :public-res pub-res :turn turn})
-                     (cond-> (assoc eval-res
-                                    :status (if (:all-passed? pub-res) :success (if (:error pub-res) :error :failed))
-                                    :tests_passed (:passed-count pub-res)
-                                    :tests_total (:total-count pub-res)
-                                    :output (if (:all-passed? pub-res)
-                                              (if (seq (:output eval-res))
-                                                (str (:output eval-res) "\n" feedback)
-                                                feedback)
-                                              feedback))
-                       (seq failures) (assoc :failures failures)
-                       (seq nudge-msg) (assoc :nudge nudge-msg)
-                       early-exit? (assoc :early-exit? true)))
-                   eval-res))))
+              ([sci-ctx tool-code _turn]
+               (agent/eval-tool-code sci-ctx tool-code)))
+
+            submission-verify-gate
+            (fn [obs]
+              (let [tool-code (or (:code obs) "")
+                    turn (or (:turn obs) (inc (count @submissions)))
+                    candidate (bench-core/extract-candidate-code tool-code fn-name)
+                    is-sub? (and (seq candidate) (bench-core/submission-form? candidate fn-name))]
+                (if is-sub?
+                  (let [pub-res (bench-core/grade-submission grading-ctx candidate (:public-tests task))
+                        early-exit? (boolean (and early-exit-opt? (:all-passed? pub-res)))
+                        feedback (bench-core/format-public-feedback pub-res)
+                        failures (when-not (:all-passed? pub-res)
+                                   (if (:error pub-res)
+                                     (:error pub-res)
+                                     (str/join "; "
+                                               (map (fn [{:keys [code expected actual error]}]
+                                                      (if error
+                                                        (format "%s -> %s" code error)
+                                                        (format "%s -> Expected %s, got %s" code expected actual)))
+                                                    (filter #(not (:passed? %)) (:results pub-res))))))
+                        nudge-msg (when-not (:all-passed? pub-res)
+                                    "Revise your implementation to pass all public tests.")
+                        _ (swap! submissions conj {:code candidate :public-res pub-res :turn turn})
+                        graded-obs (cond-> (assoc obs
+                                                  :status (if (:all-passed? pub-res) :success (if (:error pub-res) :error :failed))
+                                                  :tests_passed (:passed-count pub-res)
+                                                  :tests_total (:total-count pub-res)
+                                                  :output (if (:all-passed? pub-res)
+                                                            (if (seq (:output obs))
+                                                              (str (:output obs) "\n" feedback)
+                                                              feedback)
+                                                            feedback))
+                                     (seq failures) (assoc :failures failures)
+                                     (seq nudge-msg) (assoc :nudge nudge-msg)
+                                     early-exit? (assoc :early-exit? true))]
+                    (cond
+                      early-exit? [:early-exit graded-obs]
+                      (= (:status graded-obs) :success) [:verified graded-obs]
+                      :else [:rejected graded-obs]))
+                  (cond
+                    (:early-exit? obs) [:early-exit obs]
+                    (= (:status obs) :success) [:verified obs]
+                    :else [:rejected obs]))))
 
             candidate-check-fn (when nudge-sc-opt?
                                  (fn [text]
@@ -335,6 +348,7 @@
                                         :tool-eval-fn submission-tool-hook
                                         :candidate-check-fn candidate-check-fn
                                         :stop-predicate stop-pred
+                                        :verify-fn submission-verify-gate
                                         :max-new-tokens (long (or (:max-new-tokens opts) 1536))
                                         :quiet quiet)
                                 :kv-state task-kv-state)]

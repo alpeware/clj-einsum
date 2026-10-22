@@ -32,11 +32,12 @@
   (prop/for-all [val gen-edn-value]
                 (let [store (cas/create-cas-store)
                       ptr (cas/put! store val)
-                      resolved (cas/resolve-ptr store ptr)]
+                      resolved (cas/resolve-ptr store ptr)
+                      expected-bytes (if (string? val) (.getBytes ^String val "UTF-8") (.getBytes (pr-str val) "UTF-8"))]
                   (and (m/validate schema/CasPtrSchema ptr)
                        (cas/cas-ptr? ptr)
                        (= val resolved)
-                       (= (:cas/cid ptr) (str "sha256:" (cas/sha256-str (pr-str val))))))))
+                       (= (:cas/cid ptr) (str "sha256:" (cas/sha256-bytes expected-bytes)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; 2. Property Test: Mealy Hash-Chain Tamper-Evidence

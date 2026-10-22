@@ -105,40 +105,126 @@
     (when-not (m/validate AgentAttrsSchema attrs)
       (throw (ex-info "Agent attributes do not match AgentAttrsSchema"
                       {:attrs attrs :errors (m/explain AgentAttrsSchema attrs)})))
-    (let [agent-id (:id attrs)]
-      (doseq [child children]
-        (when-not (vector? child)
-          (throw (ex-info "Child node in agent graph must be a vector" {:agent agent-id :child child})))
-        (let [child-tag (first child)]
-          (case child-tag
-            :mealy
-            (let [child-attrs (second child)]
-              (when-not (m/validate MealyAttrsSchema child-attrs)
-                (throw (ex-info "Mealy node attributes do not match MealyAttrsSchema"
-                                {:child child :errors (m/explain MealyAttrsSchema child-attrs)}))))
+    (let [agent-id (:id attrs)
+          agent-ins (set (:ins attrs))
+          agent-outs (set (:outs attrs))]
+      ;; Pass 1: Validate child node shapes, detect duplicate node IDs, and collect node port declarations
+      (loop [remaining children
+             seen-ids #{}
+             declared-nodes {}
+             connections []]
+        (if (empty? remaining)
+          ;; Pass 2: Validate all connections against declared endpoints and ports
+          (doseq [conn connections]
+            (let [src (nth conn 1 nil)
+                  dst (nth conn 2 nil)
+                  [src-node src-port] src
+                  [dst-node dst-port] dst]
+              ;; Source endpoint & port validation
+              (cond
+                (= src-node :agent/in)
+                (when-not (contains? agent-ins src-port)
+                  (throw (ex-info "Invalid connection source endpoint or port"
+                                  {:agent agent-id :conn conn :src src :valid-ports agent-ins})))
 
-            :verify
-            (let [child-attrs (second child)]
-              (when-not (m/validate VerifyAttrsSchema child-attrs)
-                (throw (ex-info "Verify node attributes do not match VerifyAttrsSchema"
-                                {:child child :errors (m/explain VerifyAttrsSchema child-attrs)}))))
+                (and (keyword? src-node) (= (namespace src-node) "cap"))
+                nil ;; Capability ports are validated at bind time against device capabilities
 
-            :conn
-            (let [src (nth child 1 nil)
-                  dst (nth child 2 nil)]
-              (when-not (and (vector? src) (== (count src) 2) (keyword? (first src)) (keyword? (second src)))
-                (throw (ex-info "Connection source must be a 2-element keyword tuple [node port]"
-                                {:conn child :src src})))
-              (when-not (and (vector? dst) (== (count dst) 2) (keyword? (first dst)) (keyword? (second dst)))
-                (throw (ex-info "Connection destination must be a 2-element keyword tuple [node port]"
-                                {:conn child :dst dst}))))
+                (contains? declared-nodes src-node)
+                (let [valid-outs (get-in declared-nodes [src-node :outs])]
+                  (when-not (contains? valid-outs src-port)
+                    (throw (ex-info "Invalid connection source endpoint or port"
+                                    {:agent agent-id :conn conn :src src :node src-node :valid-ports valid-outs}))))
 
-            :agent
-            (validate-agent-graph! child)
+                :else
+                (throw (ex-info "Invalid connection source endpoint or port"
+                                {:agent agent-id :conn conn :src src})))
 
-            (throw (ex-info (str "Unsupported child tag in agent graph: " (pr-str child-tag))
-                            {:agent agent-id :child child}))))))
-    agent-hiccup))
+              ;; Destination endpoint & port validation
+              (cond
+                (= dst-node :agent/out)
+                (when-not (contains? agent-outs dst-port)
+                  (throw (ex-info "Invalid connection destination endpoint or port"
+                                  {:agent agent-id :conn conn :dst dst :valid-ports agent-outs})))
+
+                (and (keyword? dst-node) (= (namespace dst-node) "cap"))
+                nil ;; Capability ports are validated at bind time against device capabilities
+
+                (contains? declared-nodes dst-node)
+                (let [valid-ins (get-in declared-nodes [dst-node :ins])]
+                  (when-not (contains? valid-ins dst-port)
+                    (throw (ex-info "Invalid connection destination endpoint or port"
+                                    {:agent agent-id :conn conn :dst dst :node dst-node :valid-ports valid-ins}))))
+
+                :else
+                (throw (ex-info "Invalid connection destination endpoint or port"
+                                {:agent agent-id :conn conn :dst dst})))))
+
+          (let [child (first remaining)
+                _ (when-not (vector? child)
+                    (throw (ex-info "Child node in agent graph must be a vector" {:agent agent-id :child child})))
+                child-tag (first child)]
+            (case child-tag
+              :mealy
+              (let [child-attrs (second child)
+                    node-id (:id child-attrs)]
+                (when-not (m/validate MealyAttrsSchema child-attrs)
+                  (throw (ex-info "Mealy node attributes do not match MealyAttrsSchema"
+                                  {:child child :errors (m/explain MealyAttrsSchema child-attrs)})))
+                (when (contains? seen-ids node-id)
+                  (throw (ex-info "Duplicate node id in agent graph"
+                                  {:agent agent-id :duplicate-id node-id})))
+                (recur (rest remaining)
+                       (conj seen-ids node-id)
+                       (assoc declared-nodes node-id {:ins (set (:ins child-attrs))
+                                                      :outs (set (:outs child-attrs))})
+                       connections))
+
+              :verify
+              (let [child-attrs (second child)
+                    node-id (:id child-attrs)]
+                (when-not (m/validate VerifyAttrsSchema child-attrs)
+                  (throw (ex-info "Verify node attributes do not match VerifyAttrsSchema"
+                                  {:child child :errors (m/explain VerifyAttrsSchema child-attrs)})))
+                (when (contains? seen-ids node-id)
+                  (throw (ex-info "Duplicate node id in agent graph"
+                                  {:agent agent-id :duplicate-id node-id})))
+                (recur (rest remaining)
+                       (conj seen-ids node-id)
+                       (assoc declared-nodes node-id {:ins (set (:ins child-attrs))
+                                                      :outs (set (:outs child-attrs))})
+                       connections))
+
+              :conn
+              (let [src (nth child 1 nil)
+                    dst (nth child 2 nil)]
+                (when-not (and (vector? src) (== (count src) 2) (keyword? (first src)) (keyword? (second src)))
+                  (throw (ex-info "Connection source must be a 2-element keyword tuple [node port]"
+                                  {:conn child :src src})))
+                (when-not (and (vector? dst) (== (count dst) 2) (keyword? (first dst)) (keyword? (second dst)))
+                  (throw (ex-info "Connection destination must be a 2-element keyword tuple [node port]"
+                                  {:conn child :dst dst})))
+                (recur (rest remaining)
+                       seen-ids
+                       declared-nodes
+                       (conj connections child)))
+
+              :agent
+              (let [child-attrs (second child)
+                    node-id (:id child-attrs)]
+                (validate-agent-graph! child)
+                (when (contains? seen-ids node-id)
+                  (throw (ex-info "Duplicate node id in agent graph"
+                                  {:agent agent-id :duplicate-id node-id})))
+                (recur (rest remaining)
+                       (conj seen-ids node-id)
+                       (assoc declared-nodes node-id {:ins (set (:ins child-attrs))
+                                                      :outs (set (:outs child-attrs))})
+                       connections))
+
+              (throw (ex-info (str "Unsupported child tag in agent graph: " (pr-str child-tag))
+                              {:agent agent-id :child child}))))))
+      agent-hiccup)))
 
 (defn validate-device-graph!
   "Validates a [:device attrs & cap-children] Hiccup graph AST.

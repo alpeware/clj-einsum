@@ -7,15 +7,20 @@
 ;; 1. Cryptographic Digest Helpers
 ;; -----------------------------------------------------------------------------
 
+(defn sha256-bytes
+  "Computes a 64-character lowercase hexadecimal SHA-256 digest of byte array b."
+  [^bytes b]
+  (let [md (MessageDigest/getInstance "SHA-256")
+        digest (.digest md b)
+        sb (StringBuilder. 64)]
+    (doseq [x digest]
+      (.append sb (format "%02x" (bit-and x 0xff))))
+    (.toString sb)))
+
 (defn sha256-str
   "Computes a 64-character lowercase hexadecimal SHA-256 digest of string s (UTF-8)."
   [^String s]
-  (let [md (MessageDigest/getInstance "SHA-256")
-        bytes (.digest md (.getBytes s "UTF-8"))
-        sb (StringBuilder. 64)]
-    (doseq [b bytes]
-      (.append sb (format "%02x" (bit-and b 0xff))))
-    (.toString sb)))
+  (sha256-bytes (.getBytes s "UTF-8")))
 
 ;; -----------------------------------------------------------------------------
 ;; 2. CAS Pointer Predicate
@@ -45,7 +50,7 @@
 (defn put!
   "Stores value val in the CAS store, returning an immutable CasPtr map.
    Options can specify:
-     :cid   - custom CID (defaults to \"sha256:\" + SHA-256 of (pr-str val))
+     :cid   - custom CID (defaults to \"sha256:\" + SHA-256 of raw bytes)
      :kind  - keyword (defaults to :text/utf8 if string? or :edn/value)
      :uri   - string URI (defaults to \"mem://cas/\" + hex hash)
      :bytes - integer byte size
@@ -53,12 +58,25 @@
   ([store val]
    (put! store val {}))
   ([store val opts]
-   (let [val-str (if (string? val) val (pr-str val))
-         cid (or (:cid opts) (str "sha256:" (sha256-str (pr-str val))))
+   (let [raw-bytes (cond
+                     (string? val) (.getBytes ^String val "UTF-8")
+                     (bytes? val) ^bytes val
+                     (instance? (Class/forName "[F") val)
+                     (let [arr ^floats val
+                           bb (java.nio.ByteBuffer/allocate (* 4 (alength arr)))]
+                       (doseq [f arr] (.putFloat bb (float f)))
+                       (.array bb))
+                     (instance? (Class/forName "[I") val)
+                     (let [arr ^ints val
+                           bb (java.nio.ByteBuffer/allocate (* 4 (alength arr)))]
+                       (doseq [i arr] (.putInt bb (int i)))
+                       (.array bb))
+                     :else (.getBytes (pr-str val) "UTF-8"))
+         cid (or (:cid opts) (str "sha256:" (sha256-bytes raw-bytes)))
          hash-part (if (.startsWith cid "sha256:") (subs cid 7) cid)
          kind (or (:kind opts) (if (string? val) :text/utf8 :edn/value))
          uri (or (:uri opts) (str "mem://cas/" hash-part))
-         bytes-cnt (or (:bytes opts) (count (.getBytes val-str "UTF-8")))
+         bytes-cnt (or (:bytes opts) (alength raw-bytes))
          shape (:shape opts)
          ptr (cond-> {:cas/cid cid
                       :cas/kind kind

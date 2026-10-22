@@ -157,13 +157,13 @@
                   :pending-turn pending)
            {:eval-code [{:code tool-code :turn turn}]}])))
 
-    (:tool-obs :rejected-obs)
+    (:tool-obs :rejected-obs :early-exit-obs)
     (let [eval-res (if (map? payload) payload {:status :error :output (str payload)})
           pending (:pending-turn state)
           turn (:turn state)
-          err-turn? (or (= in-port :rejected-obs) (not= :success (:status eval-res)))
+          early-exit? (or (= in-port :early-exit-obs) (boolean (:early-exit? eval-res)))
+          err-turn? (and (not= in-port :early-exit-obs) (or (= in-port :rejected-obs) (not= :success (:status eval-res))))
           new-consec-errors (if err-turn? (inc (:consecutive-errors state)) 0)
-          early-exit? (boolean (:early-exit? eval-res))
           telem-entry {:turn turn
                        :model-ms (or (:model-ms pending) 0.0)
                        :tool-ms (double (or (:tool-ms eval-res) 0.0))
@@ -274,11 +274,13 @@
 
 (defn verify-tool-observation
   "Pure predicate/router for the verification gate [:verify {:id :verification-gate}].
-   Routes :status :success to [:verified obs] and errors/timeouts to [:rejected obs]."
+   Routes :early-exit? true to [:early-exit obs], :status :success to [:verified obs],
+   and errors/timeouts to [:rejected obs]."
   [obs]
-  (if (= (:status obs) :success)
-    [:verified obs]
-    [:rejected obs]))
+  (cond
+    (:early-exit? obs) [:early-exit obs]
+    (= (:status obs) :success) [:verified obs]
+    :else [:rejected obs]))
 
 ;; =============================================================================
 ;; 3. Declarative Coding Agent Hiccup Graph
@@ -295,12 +297,12 @@
                        :sandbox {:type :eval/sci}}}
     [:mealy {:id :turn-loop
              :init-state (init-turn-state opts)
-             :ins [:prompt :model-reply :tool-obs :rejected-obs]
+             :ins [:prompt :model-reply :tool-obs :rejected-obs :early-exit-obs]
              :outs [:llm-req :eval-code :final :telemetry]
              :step turn-coordinator-step}]
     [:verify {:id :verification-gate
               :ins [:in]
-              :outs [:verified :rejected]
+              :outs [:verified :rejected :early-exit]
               :pred (or (:verify-fn opts) verify-tool-observation)}]
     [:conn [:agent/in :prompt-in] [:turn-loop :prompt]]
     [:conn [:turn-loop :llm-req] [:cap/llm :generate]]
@@ -309,6 +311,7 @@
     [:conn [:cap/sandbox :result] [:verification-gate :in]]
     [:conn [:verification-gate :verified] [:turn-loop :tool-obs]]
     [:conn [:verification-gate :rejected] [:turn-loop :rejected-obs]]
+    [:conn [:verification-gate :early-exit] [:turn-loop :early-exit-obs]]
     [:conn [:turn-loop :final] [:agent/out :final-out]]
     [:conn [:turn-loop :telemetry] [:agent/out :telemetry-out]]]))
 
@@ -320,6 +323,7 @@
   [logits]
   (let [row (cond
               (and (map? logits) (contains? logits :logits)) (greedy-argmax (:logits logits))
+              (and (map? logits) (contains? logits :data) (some? (:data logits))) (:data logits)
               (and (vector? logits) (seq logits) (or (vector? (first logits)) (sequential? (first logits)))) (last logits)
               :else logits)]
     (cond
@@ -356,7 +360,8 @@
                             :max-new-tokens max-new-tokens
                             :eos-id eos-id
                             :generated []
-                            :prompt-tokens []}
+                            :prompt-tokens []
+                            :done? false}
                :ins [:prompt-tokens :next-token :eos-token]
                :outs [:step-in :final-seq]
                :step (fn [state in-port payload]
@@ -364,24 +369,28 @@
                          :prompt-tokens
                          (let [toks (if (vector? payload) payload (vec payload))]
                            (if (or (empty? toks) (<= (:max-new-tokens state) 0))
-                             [state {:final-seq [[]]}]
+                             [(assoc state :prompt-tokens toks :generated [] :done? true) {:final-seq [[]]}]
                              (let [pos (count toks)]
-                               [(assoc state :prompt-tokens toks :pos pos :generated [])
+                               [(assoc state :prompt-tokens toks :pos pos :generated [] :done? false)
                                 {:step-in [{:inputs [toks] :pos pos}]}])))
 
                          :eos-token
-                         [state {:final-seq [(:generated state)]}]
+                         (if (:done? state)
+                           [state {}]
+                           [(assoc state :done? true) {:final-seq [(:generated state)]}])
 
                          :next-token
-                         (let [token (if (number? payload) (long payload) (long (first payload)))
-                               next-gen (conj (:generated state) token)
-                               done? (>= (count next-gen) (:max-new-tokens state))]
-                           (if done?
-                             [(assoc state :generated next-gen)
-                              {:final-seq [next-gen]}]
-                             (let [next-pos (inc (:pos state))]
-                               [(assoc state :generated next-gen :pos next-pos)
-                                {:step-in [{:inputs [token] :pos next-pos}]}])))))}]
+                         (if (:done? state)
+                           [state {}]
+                           (let [token (if (number? payload) (long payload) (long (first payload)))
+                                 next-gen (conj (:generated state) token)
+                                 done? (>= (count next-gen) (:max-new-tokens state))]
+                             (if done?
+                               [(assoc state :generated next-gen :done? true)
+                                {:final-seq [next-gen]}]
+                               (let [next-pos (inc (:pos state))]
+                                 [(assoc state :generated next-gen :pos next-pos)
+                                  {:step-in [{:inputs [token] :pos next-pos}]}]))))))}]
       [:mealy {:id :logits-sampler
                :init-state {:temperature (or (:temperature opts) 0.0)}
                :ins [:logits]
@@ -399,7 +408,6 @@
       [:conn [:agent/in :tokens-in] [:seq-state :prompt-tokens]]
       [:conn [:seq-state :step-in] [:cap/gpu :forward]]
       [:conn [:cap/gpu :logits] [:logits-sampler :logits]]
-      [:conn [:cap/gpu :out] [:logits-sampler :logits]]
       [:conn [:logits-sampler :token] [:stop-gate :in]]
       [:conn [:stop-gate :continue] [:seq-state :next-token]]
       [:conn [:stop-gate :eos] [:seq-state :eos-token]]

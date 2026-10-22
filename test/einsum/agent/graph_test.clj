@@ -7,6 +7,7 @@
             [einsum.agent.core :as agent-core]
             [einsum.agent.graph :as graph]
             [einsum.graph.binder :as binder]
+            [einsum.graph.capability :as cap]
             [einsum.graph.runtime :as runtime]
             [einsum.logic.agent.state-tracker :as state-tracker]))
 
@@ -77,12 +78,60 @@
                       executed (-> bound
                                    (runtime/enqueue-input :tokens-in [10 20])
                                    runtime/run-graph!)
-                      tokens-out (first (get-in executed [:outbox :tokens-out]))]
-                  (and (vector? tokens-out)
-                       (<= (count tokens-out) max-new-tokens)
-                       (or (= (count tokens-out) max-new-tokens)
-                           (and (<= 0 (count tokens-out))
-                                (< eos-pos max-new-tokens)))))))
+                      tokens-out (first (get-in executed [:outbox :tokens-out]))
+                      expected-tokens
+                      (loop [step 1
+                             acc []]
+                        (if (> step max-new-tokens)
+                          acc
+                          (if (= step eos-pos)
+                            acc
+                            (let [cand (mod (inc step) vocab-size)
+                                  tok (if (= cand eos-id) (mod (+ cand 2) vocab-size) cand)]
+                              (recur (inc step) (conj acc tok))))))]
+                  (and (== 1 (count (get-in executed [:outbox :tokens-out])))
+                       (= expected-tokens tokens-out)))))
+
+(deftest test-autoregressive-decoder-on-real-compute-einsum-capability
+  (testing "Autoregressive decoder graph bound to real :compute/einsum capability (:forward port emitting {:logits [out] :out [out]}) emits [1 2 3 4] once"
+    (let [step-counter (atom 0)
+          ;; Create a real :compute/einsum capability instance whose :forward handler emits {:logits [out] :out [out]}
+          real-einsum-cap (cap/start-cap!
+                           (cap/build-capability
+                            {:id :gpu
+                             :type :compute/einsum
+                             :backend :interpreter
+                             :ast {:name "step_logits"
+                                   :invars [[:x [:tensor [1] :f32]]]
+                                   :outvars [:y]
+                                   :known-shapes {}
+                                   :eqns [{:op :ir/add :invars [:x :x] :outvars [:y]}]}}
+                            {}))
+          ;; Wrap invoke-fn to feed a step-dependent 10-element float array into the real :compute/einsum :forward port
+          wrapped-cap (update real-einsum-cap :invoke-fn
+                              (fn [orig-invoke]
+                                (fn [this in-port _payload cas-store]
+                                  (let [step (swap! step-counter inc)
+                                        in-arr (float-array 10)]
+                                    (aset in-arr (int step) (float 25.0))
+                                    (orig-invoke this in-port {:inputs [in-arr]
+                                                               :ast {:name "step_logits_10"
+                                                                     :invars [[:x [:tensor [10] :f32]]]
+                                                                     :outvars [:y]
+                                                                     :known-shapes {}
+                                                                     :eqns [{:op :ir/add :invars [:x :x] :outvars [:y]}]}}
+                                                 cas-store)))))
+          dev-ast [:device {:id :gpu-dev}
+                   [:cap {:id :gpu :type :compute/einsum}]]
+          decoder-ast (graph/autoregressive-decoder-graph {:max-new-tokens 4 :eos-id 99})
+          bound (binder/bind-agent decoder-ast dev-ast {:capabilities {:gpu wrapped-cap}})
+          executed (-> bound
+                       (runtime/enqueue-input :tokens-in [100 200])
+                       runtime/run-graph!)
+          outbox (:outbox executed)
+          tokens-out (:tokens-out outbox)]
+      (is (= 1 (count tokens-out)))
+      (is (= [1 2 3 4] (first tokens-out))))))
 
 ;; -----------------------------------------------------------------------------
 ;; 3. Unit Tests: Multi-Turn Tool Call, Verification Gate, and Final Answer
@@ -152,7 +201,10 @@
       (is (= :model (:role (first transcript))))
       (is (= :tool (:role (second transcript))))
       (is (true? (:early-exit? (meta transcript))))
-      (is (= :public-pass (:early-exit-reason (meta transcript)))))))
+      (is (= :public-pass (:early-exit-reason (meta transcript))))
+      (is (some #(and (= [:verification-gate :early-exit] (:event/source %))
+                      (= [:turn-loop :early-exit-obs] (:event/target %)))
+                (:event-log (meta transcript)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; 6. Unit Tests: Fractal Sub-Agent Embedding
@@ -183,7 +235,13 @@
                        runtime/run-graph!)
           out (first (get-in executed [:outbox :final-tokens]))]
       (is (vector? out))
-      (is (= 3 (count out))))))
+      (is (= 3 (count out)))
+      (testing "Deterministic replay-graph of outer agent embedding decoder sub-agent"
+        (let [replayed (runtime/replay-graph outer-agent (:event-log executed))]
+          (is (= (:outbox executed) (:outbox replayed)))
+          (is (= (get-in executed [:node-states :autoregressive-decoder :outbox])
+                 (get-in replayed [:node-states :autoregressive-decoder :outbox])))
+          (is (runtime/verify-event-log-chain (:event-log replayed))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; 7. Generative Property: In-VRAM State Tracker Capability Parity

@@ -497,7 +497,8 @@
          pos-arr (int-array 1)
          target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size config) 512)))
          chunk-exec (or (:chunked-prefill-executable session)
-                        (when (and (or uop? (nil? prefill-exec) (> seq-len (cfg/max-safe-prefill-seq-len config)))
+                        (when (and (zero? p-match)
+                                   (or uop? (nil? prefill-exec) (> seq-len (cfg/max-safe-prefill-seq-len config)))
                                    (pos? target-chunk-sz))
                           (kernels/compile-gemma4-chunked-prefill-executable session seq-len target-chunk-sz)))
          _ (when (and uop? (= (:uop-target ctx) :rocm))
@@ -952,19 +953,24 @@
                           (profile/with-profile metrics-atom "graph_compilation"
                             (kernels/compile-gemma4-kv-executable session max-seq-len)))))
           prompt-count (count prompt-ids)
+          prior-cache (when (:kv-state session) @(:kv-state session))
+          has-prefix-hit? (boolean (and prior-cache
+                                        (seq (:cached-tokens prior-cache))
+                                        (seq (:kv-buffers prior-cache))
+                                        (pos? (common-prefix-len (:cached-tokens prior-cache) prompt-ids))))
           target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size (:config session)) 512)))
           num-full-chunks (if (pos? target-chunk-sz) (quot prompt-count target-chunk-sz) 0)
           tail-len (- prompt-count (* num-full-chunks target-chunk-sz))
           chunked-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
                                  (if (:chunked-prefill-executable session)
                                    (:chunked-prefill-executable session)
-                                   (when (pos? target-chunk-sz)
+                                   (when (and (not has-prefix-hit?) (pos? target-chunk-sz))
                                      (profile/with-profile metrics-atom "graph_compilation"
                                        (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len target-chunk-sz)))))
           tail-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
                               (if (:tail-prefill-executable session)
                                 (:tail-prefill-executable session)
-                                (when (and (pos? num-full-chunks) (> tail-len 1))
+                                (when (and (not has-prefix-hit?) (pos? num-full-chunks) (> tail-len 1))
                                   (profile/with-profile metrics-atom "graph_compilation"
                                     (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len tail-len)))))
           active-session (assoc session
