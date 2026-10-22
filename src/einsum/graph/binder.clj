@@ -174,7 +174,7 @@
          root-reqs (or (:requires agent-attrs) {})
          root-bound (bind-reqs root-reqs device-inst opts (:id agent-attrs))
          subagent-caps (collect-subagent-caps agent-hiccup root-reqs root-bound device-inst opts)
-         bound-caps (reduce merge root-bound (vals subagent-caps))
+         bound-caps (merge (reduce merge {} (vals subagent-caps)) root-bound)
          graph-opts (assoc (or opts {})
                            :capabilities bound-caps
                            :subagent-capabilities subagent-caps

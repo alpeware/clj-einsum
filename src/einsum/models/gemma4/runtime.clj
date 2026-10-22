@@ -546,13 +546,17 @@
                                        [tile-p tile-sz tile-exec]
                                        (when (seq delta-execs)
                                          (or
-                                          ;; 1. Smallest tile >= rem-toks that fits within prompt-count (finishes delta in 1 pass via suffix alignment)
-                                          (when-let [[csz ex] (first (filter (fn [[csz ex]]
-                                                                               (and ex
-                                                                                    (>= (long csz) rem-toks)
-                                                                                    (<= (long csz) prompt-count)))
-                                                                             (reverse delta-execs)))]
-                                            [(- prompt-count (long csz)) (long csz) ex])
+                                          ;; 1. Smallest tile >= rem-toks (for rem-toks >= 4) that fits within prompt-count.
+                                          ;;    Finishes the delta in 1 pass via suffix alignment; overlapped cached prefix
+                                          ;;    tokens are recomputed under causal prefix-invariance, matching the M=1 path
+                                          ;;    up to BF16/WMMA kernel-shape rounding rather than bit-identity.
+                                          (when (>= rem-toks 4)
+                                            (when-let [[csz ex] (first (filter (fn [[csz ex]]
+                                                                                 (and ex
+                                                                                      (>= (long csz) rem-toks)
+                                                                                      (<= (long csz) prompt-count)))
+                                                                               (reverse delta-execs)))]
+                                              [(- prompt-count (long csz)) (long csz) ex]))
                                           ;; 2. Otherwise largest tile <= rem-toks starting at p
                                           (when-let [[csz ex] (first (filter (fn [[csz ex]]
                                                                                (and ex (<= (long csz) rem-toks)))
