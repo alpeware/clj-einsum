@@ -14,7 +14,7 @@
             [einsum.runtime.tokenizer.protocol :refer [bos-id decode encode eos-id]]
             [einsum.runtime.weights :as rw]
             [einsum.uop.runtime :as uop-rt])
-  (:import [java.lang.foreign Arena]))
+  (:import [java.lang.foreign Arena MemorySegment]))
 
 (defn argmax-host
   "Finds the index of the maximum float value in float array `arr`."
@@ -899,7 +899,20 @@
          step-exec (when vram-loop?
                      (kernels/compile-gemma4-kv-executable session max-seq-len))
          rocm? (= (:uop-target (:ctx session)) :rocm)
-         large-model? (> (long (or (:num-layers (:config session)) 35)) 40)
+         weight-bytes (let [wm (:weights-mmap session)]
+                        (cond
+                          (seq (:shards wm))
+                          (reduce + 0 (map (fn [{:keys [^MemorySegment segment]}]
+                                             (if segment (.byteSize segment) 0))
+                                           (:shards wm)))
+                          (:segment wm)
+                          (.byteSize ^MemorySegment (:segment wm))
+                          :else 0))
+         ;; Bound to a single [64] prefill tile when mapped weights exceed 10 GiB (e.g. E4B ~14.8 GB BF16,
+         ;; 31B ~17.3 GB INT4) or num-layers > 35, keeping total VRAM safely inside 24 GiB;
+         ;; smaller models like E2B (~4.2 GB, 35 layers) pre-compile [64 32 16].
+         large-model? (or (> (long weight-bytes) (* 10 1024 1024 1024))
+                          (> (long (or (:num-layers (:config session)) 35)) 35))
          delta-chunk-sizes (when (not vram-loop?)
                              (->> (or (:delta-chunk-sizes opts)
                                       (when rocm?
