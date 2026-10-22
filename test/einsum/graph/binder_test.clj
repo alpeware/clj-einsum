@@ -214,3 +214,29 @@
           item (first (:result res))]
       (is (= :error (:status item)))
       (is (str/includes? (:output item) "resolve symbol: slurp")))))
+
+(deftest test-single-root-binding-no-duplicate-start
+  (testing "Root capability requirements with overrides are started exactly once across nested sub-agents and stopped cleanly"
+    (let [dev-ast [:device {:id :counter-dev}
+                   [:cap {:id :sci-eval :type :eval/sci :sandbox :agent}]]
+          sub-agent
+          [:agent {:id :child-worker
+                   :ins [:sub-in]
+                   :outs [:sub-out]
+                   :requires {:eval {:type :eval/sci :timeout-ms 1234}}}
+           [:mealy {:id :sub-echo :ins [:sub-in] :outs [:sub-out] :init-state {} :step (fn [s _ p] [s {:sub-out [p]}])}]
+           [:conn [:agent/in :sub-in] [:sub-echo :sub-in]]
+           [:conn [:sub-echo :sub-out] [:agent/out :sub-out]]]
+          root-agent
+          [:agent {:id :root-orchestrator
+                   :ins [:root-in]
+                   :outs [:root-out]
+                   :requires {:eval {:type :eval/sci :timeout-ms 1234}}}
+           sub-agent
+           [:conn [:agent/in :root-in] [:child-worker :sub-in]]
+           [:conn [:child-worker :sub-out] [:agent/out :root-out]]]
+          bound (binder/bind-agent root-agent dev-ast)
+          device-inst (:device bound)
+          specialized-insts @(:specialized-instances device-inst)]
+      (is (= 1 (count specialized-insts)))
+      (is (nil? (binder/stop-device! device-inst))))))

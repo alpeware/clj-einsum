@@ -519,7 +519,17 @@
                    (let [zero-tok (int-array 1)
                          x-b (arena/device-buffer warmup-arena zero-tok [1 1] :i32)
                          step-inputs (into [x-b pos-b] (concat initial-kv device-weights))]
-                     (execute-step-executable ctx exec step-inputs num-outs))))))
+                     (execute-step-executable ctx exec step-inputs num-outs)))
+                 (when (zero? p-match)
+                   (doseq [[csz d-exec] (:delta-chunk-executables session)]
+                     (when (and d-exec
+                                (pos? (long csz))
+                                (:warmed-up? d-exec)
+                                (compare-and-set! (:warmed-up? d-exec) false true))
+                       (let [zero-chunk (int-array (long csz))
+                             x-b (arena/device-buffer warmup-arena zero-chunk [1 (long csz)] :i32)
+                             step-inputs (into [x-b pos-b] (concat initial-kv device-weights))]
+                         (execute-step-executable ctx d-exec step-inputs num-outs))))))))
          t0 (System/nanoTime)]
      (try
        ;; Phase 1: Prefill prompt tokens into KV cache
@@ -528,33 +538,73 @@
                ;; Path A: Cache hit from token 0 to p-match (delta prefill via step executable)
                (pos? p-match)
                (let [start-p (if (= p-match prompt-count) (max 0 (dec prompt-count)) p-match)
+                     delta-execs (:delta-chunk-executables session)
                      cur-log (loop [p start-p
                                     cur-logits nil]
                                (if (< p prompt-count)
-                                 (let [[new-log new-kv]
-                                       (arena/with-device-arena [step-arena session-arena]
-                                         (let [tok (int (nth clamped-prompt-ids p))
-                                               _ (aset x-arr 0 tok)
-                                               _ (aset pos-arr 0 p)
-                                               x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
-                                               pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
-                                               step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                               outs (arena/track! step-arena (execute-step-executable ctx exec step-inputs num-outs))
-                                               outs-vec (if (vector? outs) outs [outs])
-                                               nl (first outs-vec)
-                                               nk (vec (subvec outs-vec 1))]
-                                           (arena/promote! step-arena session-arena nl)
-                                           (arena/promote! step-arena session-arena nk)
-                                           [nl nk]))
-                                       old-kv @kv-buffers-atom]
-                                   (when cur-logits (arena/destroy! session-arena cur-logits))
-                                   (when (seq old-kv)
-                                     (arena/destroy! session-arena old-kv))
-                                   (reset! kv-buffers-atom new-kv)
-                                   (recur (inc p) new-log))
+                                 (let [rem-toks (- prompt-count p)
+                                       [tile-p tile-sz tile-exec]
+                                       (when (seq delta-execs)
+                                         (or
+                                          ;; 1. Smallest tile >= rem-toks that fits within prompt-count (finishes delta in 1 pass via suffix alignment)
+                                          (when-let [[csz ex] (first (filter (fn [[csz ex]]
+                                                                               (and ex
+                                                                                    (>= (long csz) rem-toks)
+                                                                                    (<= (long csz) prompt-count)))
+                                                                             (reverse delta-execs)))]
+                                            [(- prompt-count (long csz)) (long csz) ex])
+                                          ;; 2. Otherwise largest tile <= rem-toks starting at p
+                                          (when-let [[csz ex] (first (filter (fn [[csz ex]]
+                                                                               (and ex (<= (long csz) rem-toks)))
+                                                                             delta-execs))]
+                                            [p (long csz) ex])))]
+                                   (if (and tile-exec (> (long tile-sz) 1))
+                                     (let [csz (long tile-sz)
+                                           [new-log new-kv]
+                                           (arena/with-device-arena [step-arena session-arena]
+                                             (let [chunk-toks (int-array csz)
+                                                   _ (dotimes [ci csz]
+                                                       (aset chunk-toks ci (int (nth clamped-prompt-ids (+ tile-p ci)))))
+                                                   _ (aset pos-arr 0 (int tile-p))
+                                                   x-b (arena/device-buffer step-arena chunk-toks [1 csz] :i32)
+                                                   pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
+                                                   step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                                                   outs (arena/track! step-arena (execute-step-executable ctx tile-exec step-inputs num-outs))
+                                                   outs-vec (if (vector? outs) outs [outs])
+                                                   nl (first outs-vec)
+                                                   nk (vec (subvec outs-vec 1))]
+                                               (arena/promote! step-arena session-arena nl)
+                                               (arena/promote! step-arena session-arena nk)
+                                               [nl nk]))
+                                           old-kv @kv-buffers-atom]
+                                       (when cur-logits (arena/destroy! session-arena cur-logits))
+                                       (when (seq old-kv)
+                                         (arena/destroy! session-arena old-kv))
+                                       (reset! kv-buffers-atom new-kv)
+                                       (recur (+ tile-p csz) new-log))
+                                     (let [[new-log new-kv]
+                                           (arena/with-device-arena [step-arena session-arena]
+                                             (let [tok (int (nth clamped-prompt-ids p))
+                                                   _ (aset x-arr 0 tok)
+                                                   _ (aset pos-arr 0 p)
+                                                   x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
+                                                   pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
+                                                   step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                                                   outs (arena/track! step-arena (execute-step-executable ctx exec step-inputs num-outs))
+                                                   outs-vec (if (vector? outs) outs [outs])
+                                                   nl (first outs-vec)
+                                                   nk (vec (subvec outs-vec 1))]
+                                               (arena/promote! step-arena session-arena nl)
+                                               (arena/promote! step-arena session-arena nk)
+                                               [nl nk]))
+                                           old-kv @kv-buffers-atom]
+                                       (when cur-logits (arena/destroy! session-arena cur-logits))
+                                       (when (seq old-kv)
+                                         (arena/destroy! session-arena old-kv))
+                                       (reset! kv-buffers-atom new-kv)
+                                       (recur (inc p) new-log))))
                                  cur-logits))]
                  [cur-log (System/nanoTime)])
-
                ;; Path B: 1-Shot Parallel Prefill
                (and (not uop?) (some? prefill-exec))
                (let [[prefill-logits prefill-kv]
@@ -841,6 +891,17 @@
 
          step-exec (when vram-loop?
                      (kernels/compile-gemma4-kv-executable session max-seq-len))
+         rocm? (= (:uop-target (:ctx session)) :rocm)
+         delta-chunk-sizes (when (not vram-loop?)
+                             (->> (or (:delta-chunk-sizes opts) (when rocm? [64 32 16]))
+                                  (filter #(and (> (long %) 1) (< (long %) max-seq-len)))
+                                  (sort >)
+                                  vec))
+         delta-chunk-execs (when (seq delta-chunk-sizes)
+                             (into (sorted-map-by >)
+                                   (map (fn [csz]
+                                          [csz (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len csz)])
+                                        delta-chunk-sizes)))
          _ (when-not (:quiet opts) (println "Pinning Gemma 4 weights in UOp VRAM..."))
          device-weights (weights/allocate-device-weights session)]
      (assoc session
@@ -850,6 +911,7 @@
             :prefill-executable prefill-exec
             :chunked-prefill-executable chunked-prefill-exec
             :step-executable step-exec
+            :delta-chunk-executables delta-chunk-execs
             :kv-state (atom nil)
             :max-seq-len max-seq-len
             :vram-session? true
@@ -857,7 +919,11 @@
 
 (defn close-agent-session!
   "Releases VRAM resources for an agent session."
-  [{:keys [ctx device-weights kv-state session-arena]}]
+  [{:keys [ctx device-weights kv-state session-arena executable exec prefill-executable chunked-prefill-executable tail-prefill-executable step-executable delta-chunk-executables] :as _session}]
+  (let [execs (concat [executable exec prefill-executable chunked-prefill-executable tail-prefill-executable step-executable]
+                      (vals delta-chunk-executables))]
+    (doseq [ex (distinct (filter :uop-executable? execs))]
+      (uop-rt/destroy-uop-executable! ctx ex)))
   (if session-arena
     (do
       (arena/close-arena! session-arena)

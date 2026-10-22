@@ -90,19 +90,6 @@
 ;; 3. Agent-Device Binding
 ;; =============================================================================
 
-(defn- collect-all-requires
-  "Recursively collects all :requires specifications from root agent and any nested subagents."
-  [agent-hiccup]
-  (let [{:keys [attrs children]} (schema/parse-hiccup-node agent-hiccup)
-        root-reqs (or (:requires attrs) {})
-        sub-reqs (reduce (fn [acc child]
-                           (if (and (vector? child) (= (first child) :agent))
-                             (merge acc (collect-all-requires child))
-                             acc))
-                         {}
-                         children)]
-    (merge sub-reqs root-reqs)))
-
 (defn- bind-reqs
   [reqs device-inst opts agent-id]
   (reduce
@@ -149,7 +136,7 @@
    reqs))
 
 (defn- collect-subagent-caps
-  [agent-hiccup base-caps device-inst opts]
+  [agent-hiccup parent-reqs base-caps device-inst opts]
   (let [{:keys [children]} (schema/parse-hiccup-node agent-hiccup)]
     (reduce
      (fn [acc child]
@@ -157,9 +144,16 @@
          (let [{:keys [attrs]} (schema/parse-hiccup-node child)
                sub-id (:id attrs)
                sub-reqs (or (:requires attrs) {})
-               sub-bound (bind-reqs sub-reqs device-inst opts sub-id)
+               diff-sub-reqs (into {}
+                                   (remove (fn [[k spec]]
+                                             (let [norm-k (keyword (name k))]
+                                               (and (contains? base-caps norm-k)
+                                                    (= spec (get parent-reqs k)))))
+                                           sub-reqs))
+               sub-bound (bind-reqs diff-sub-reqs device-inst opts sub-id)
                effective-sub-caps (merge base-caps sub-bound)
-               nested-sub-caps (collect-subagent-caps child effective-sub-caps device-inst opts)]
+               effective-reqs (merge parent-reqs sub-reqs)
+               nested-sub-caps (collect-subagent-caps child effective-reqs effective-sub-caps device-inst opts)]
            (merge acc {sub-id effective-sub-caps} nested-sub-caps))
          acc))
      {}
@@ -177,12 +171,10 @@
                        (compile-device device-or-hiccup opts)
                        device-or-hiccup)
          agent-attrs (:attrs (schema/parse-hiccup-node agent-hiccup))
-         all-reqs (collect-all-requires agent-hiccup)
          root-reqs (or (:requires agent-attrs) {})
-         all-bound (bind-reqs all-reqs device-inst opts (:id agent-attrs))
          root-bound (bind-reqs root-reqs device-inst opts (:id agent-attrs))
-         bound-caps (merge all-bound root-bound)
-         subagent-caps (collect-subagent-caps agent-hiccup bound-caps device-inst opts)
+         subagent-caps (collect-subagent-caps agent-hiccup root-reqs root-bound device-inst opts)
+         bound-caps (reduce merge root-bound (vals subagent-caps))
          graph-opts (assoc (or opts {})
                            :capabilities bound-caps
                            :subagent-capabilities subagent-caps

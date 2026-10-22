@@ -616,7 +616,7 @@
         window (or (:sliding-window attrs) (:sliding_window attrs) (:window attrs))
         ring-buffer? (boolean (or (:ring-buffer attrs) (:ring-buffer? attrs)))
         chunk-size (long (or (:chunk-size attrs) 64))
-        chunked? (and (<= p 16) (> kvs chunk-size) (zero? (mod kvs chunk-size)))]
+        chunked? (and (<= p 4) (> kvs chunk-size) (zero? (mod kvs chunk-size)))]
     (if chunked?
       (let [nc (quot kvs chunk-size)
             ;; Format Q: [b, h, p, dh] -> [b, 1, h, p, 1, dh] -> [b, nc, h, p, chunk-size, dh]

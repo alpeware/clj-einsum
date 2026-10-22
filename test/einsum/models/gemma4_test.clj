@@ -145,30 +145,31 @@
                        (.getMessage e))))))
 
 (deftest test-lower-chunked-attention-prefill-bypass
-  (testing "lower-chunked-attention with p = 32, kvs = 128, chunk-size = 64 lowers directly via 4D attention path (4 kernels instead of 6)"
-    (let [b 1 p 32 h 2 dh 16 kvs 128 kvh 2
-          chunk-size 64
-          scale (/ 1.0 (Math/sqrt (double dh)))
-          invars [[:Q [:tensor [b p h dh] :f32]]
-                  [:K [:tensor [b kvs kvh dh] :f32]]
-                  [:V [:tensor [b kvs kvh dh] :f32]]
-                  [:pos [:tensor [1] :i32]]]
-          ast [:block {}
-               [:chunked-attention [:ctx :b :p :h :dh]
-                [:Q :b :p :h :dh]
-                [:K :b :kvs :kvh :dh]
-                [:V :b :kvs :kvh :dh]
-                {:pos :pos
-                 :chunk-size chunk-size
-                 :scale scale
-                 :sliding-window 64}]]
-          g (uop-lower/ast->uop-graph "attn_prefill" invars ast [:ctx])
-          s (schedule/schedule-graph g)
-          ;; Directly lowers via 4D attention path: 4 reduction kernels (QK, max, sum, SV)
-          ;; without 5D intermediate chunk tensors (6 total scheduled kernels vs 9 in chunked mode).
-          red-kernels (filter #(some (fn [n] (= (:op n) :uop/reduce-axis))
-                                     (uop/toposort (:sink (:rangeified %))))
-                              (:kernels s))]
-      (is (= 4 (count red-kernels)))
-      (is (= 6 (count (:kernels s))))
-      (is (every? #(== 4 (count (:out-shape (:rangeified %)))) (:kernels s))))))
+  (testing "lower-chunked-attention with p in [8 16 32], kvs = 128, chunk-size = 64 lowers directly via 4D attention path (4 kernels instead of 6)"
+    (doseq [p [8 16 32]]
+      (let [b 1 h 2 dh 16 kvs 128 kvh 2
+            chunk-size 64
+            scale (/ 1.0 (Math/sqrt (double dh)))
+            invars [[:Q [:tensor [b p h dh] :f32]]
+                    [:K [:tensor [b kvs kvh dh] :f32]]
+                    [:V [:tensor [b kvs kvh dh] :f32]]
+                    [:pos [:tensor [1] :i32]]]
+            ast [:block {}
+                 [:chunked-attention [:ctx :b :p :h :dh]
+                  [:Q :b :p :h :dh]
+                  [:K :b :kvs :kvh :dh]
+                  [:V :b :kvs :kvh :dh]
+                  {:pos :pos
+                   :chunk-size chunk-size
+                   :scale scale
+                   :sliding-window 64}]]
+            g (uop-lower/ast->uop-graph (str "attn_prefill_" p) invars ast [:ctx])
+            s (schedule/schedule-graph g)
+            ;; Directly lowers via 4D attention path: 4 reduction kernels (QK, max, sum, SV)
+            ;; without 5D intermediate chunk tensors (6 total scheduled kernels vs 9 in chunked mode).
+            red-kernels (filter #(some (fn [n] (= (:op n) :uop/reduce-axis))
+                                       (uop/toposort (:sink (:rangeified %))))
+                                (:kernels s))]
+        (is (= 4 (count red-kernels)))
+        (is (= 6 (count (:kernels s))))
+        (is (every? #(== 4 (count (:out-shape (:rangeified %)))) (:kernels s)))))))
