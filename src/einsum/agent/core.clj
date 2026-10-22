@@ -47,6 +47,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
    :system DEFAULT-SYSTEM-PROMPT
    :tool-declaration DEFAULT-TOOL-DECLARATION
    :tool-syntax :native
+   :decode :host
    :max-new-tokens 512
    :max-seq-len 1024
    :max-turns 5

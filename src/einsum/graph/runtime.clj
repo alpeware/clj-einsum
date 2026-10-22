@@ -262,7 +262,30 @@
                 _ (when-not cap-handler
                     (throw (ex-info (str "Missing capability handler for: " (pr-str cap-key))
                                     {:capability cap-key :target (:event/target env)})))
-                out-map (invoke-capability cap-handler dst-port payload (:cas-store graph-inst) (:mode graph-inst))]
+                out-map (invoke-capability cap-handler dst-port payload (:cas-store graph-inst) (:mode graph-inst))
+                first-reply (first (:reply out-map))
+                has-sub-log? (and (map? first-reply) (:sub-event-log first-reply))
+                sub-log (when has-sub-log? (:sub-event-log first-reply))
+                sub-hiccup (when has-sub-log? (:sub-hiccup first-reply))
+                tx-idx (dec (:event/tx env))
+                parent-log (get graph-inst-popped :event-log)
+                parent-log-updated (if (and has-sub-log? (vector? parent-log) (<= 0 tx-idx) (< tx-idx (count parent-log)))
+                                     (update-in parent-log [tx-idx :event/meta]
+                                                merge
+                                                (cond-> {:sub-event-log sub-log}
+                                                  sub-hiccup (assoc :sub-hiccup sub-hiccup)))
+                                     parent-log)
+                inst-with-log (if has-sub-log?
+                                (assoc graph-inst-popped :event-log parent-log-updated)
+                                graph-inst-popped)
+                clean-out-map (if has-sub-log?
+                                (update out-map :reply (fn [replies]
+                                                         (mapv (fn [r]
+                                                                 (if (map? r)
+                                                                   (dissoc r :sub-event-log :sub-hiccup)
+                                                                   r))
+                                                               replies)))
+                                out-map)]
             (reduce-kv
              (fn [inst out-p msgs]
                (let [src-t [dst-node out-p]
@@ -275,8 +298,8 @@
                             targets))
                   inst
                   msg-seq)))
-             graph-inst-popped
-             out-map))
+             inst-with-log
+             clean-out-map))
 
           ;; Case 3: Mealy Machine Node
           (let [node (get-in graph-inst [:nodes dst-node])]
@@ -410,7 +433,15 @@
                    (update-in inst [:outbox dst-port] conj payload))
 
             (= (namespace dst-node) "cap")
-            (recur (rest envs) inst)
+            (let [sub-event-log (get-in env [:event/meta :sub-event-log])
+                  sub-hiccup (get-in env [:event/meta :sub-hiccup])
+                  inst-with-sub (if (seq sub-event-log)
+                                  (let [effective-hiccup (or sub-hiccup
+                                                             ((requiring-resolve 'einsum.agent.graph/autoregressive-decoder-graph) {}))
+                                        sub-replayed (replay-graph effective-hiccup sub-event-log)]
+                                    (update inst :sub-replays (fnil conj []) sub-replayed))
+                                  inst)]
+              (recur (rest envs) inst-with-sub))
 
             (let [node (get-in inst [:nodes dst-node])]
               (= (:type node) :mealy))

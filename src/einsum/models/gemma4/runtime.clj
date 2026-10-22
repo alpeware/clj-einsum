@@ -444,16 +444,41 @@
          (println "------------------------------------------------------------------\n")))
      @cur-tokens)))
 
-(defn run-cached-kv-generation
-  "Executes autoregressive generation with in-VRAM KV-Cache using single-token step executable
-   and 1-shot parallel prefill."
+(defn step-cached-kv-session!
+  "Executes a single autoregressive step for `token-id` at `step-pos`, updating `@kv-buffers-atom` and returning new logits."
+  [session exec device-weights session-arena kv-buffers-atom x-arr pos-arr num-outs token-id step-pos]
+  (let [ctx (:ctx session)
+        [new-log new-kv]
+        (arena/with-device-arena [step-arena session-arena]
+          (let [_ (aset x-arr 0 (int token-id))
+                _ (aset pos-arr 0 (int step-pos))
+                x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
+                pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
+                step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                outs (arena/track! step-arena (execute-step-executable ctx exec step-inputs num-outs))
+                outs-vec (if (vector? outs) outs [outs])
+                nl (first outs-vec)
+                nk (vec (subvec outs-vec 1))]
+            (arena/promote! step-arena session-arena nl)
+            (arena/promote! step-arena session-arena nk)
+            [nl nk]))
+        old-kv @kv-buffers-atom]
+    (when (seq old-kv)
+      (arena/destroy! session-arena old-kv))
+    (reset! kv-buffers-atom new-kv)
+    new-log))
+
+(defn prefill-cached-kv-session!
+  "Executes Phase 1 parallel / chunked prefill into VRAM KV-Cache buffers.
+   Returns a map with `:last-logits`, `:kv-buffers-atom`, `:session-arena`, `:clamped-prompt-ids`,
+   `:prompt-count`, `:t-prefill-end`, `:p-match`, `:seq-len`, `:num-outs`, `:x-arr`, `:pos-arr`,
+   `:vocab-size`, and `:weight-dt`."
   ([session exec device-weights prompt-ids]
-   (run-cached-kv-generation session exec device-weights prompt-ids nil))
-  ([{:keys [ctx opts config tokenizer kv-state prefill-executable session-arena] :as session} exec device-weights prompt-ids max-seq-len]
+   (prefill-cached-kv-session! session exec device-weights prompt-ids nil))
+  ([{:keys [ctx opts config kv-state prefill-executable session-arena] :as session} exec device-weights prompt-ids max-seq-len]
    (let [session-arena (or session-arena (arena/create-arena ctx))
          uop? (= (:backend ctx) :uop)
-         {:keys [max-new-tokens quiet mode]} opts
-         is-agent? (= mode :agent)
+         {:keys [quiet]} opts
          seq-len (long (or max-seq-len (:max-seq-len config) 512))
          vocab-size (long (or (:vocab-size config) 262144))
          weight-dt (if (or (:is-int8 config) (:is-int4 config) (:is-ternary config)) :bf16 (get config :weight-dtype :bf16))
@@ -540,10 +565,6 @@
                        [tile-p tile-sz tile-exec]
                        (when (seq delta-execs)
                          (or
-                          ;; 1. Smallest tile >= rem-toks (for rem-toks >= 4) that fits within prompt-count.
-                          ;;    Finishes the delta/tail in 1 pass via suffix alignment; overlapped cached prefix
-                          ;;    tokens are recomputed under causal prefix-invariance, matching the M=1 path
-                          ;;    up to BF16/WMMA kernel-shape rounding rather than bit-identity.
                           (when (>= rem-toks 4)
                             (when-let [[csz ex] (first (filter (fn [[csz ex]]
                                                                  (and ex
@@ -551,7 +572,6 @@
                                                                       (<= (long csz) prompt-count)))
                                                                (reverse delta-execs)))]
                               [(- prompt-count (long csz)) (long csz) ex]))
-                          ;; 2. Otherwise largest tile <= rem-toks starting at p
                           (when-let [[csz ex] (first (filter (fn [[csz ex]]
                                                                (and ex (<= (long csz) rem-toks)))
                                                              delta-execs))]
@@ -603,139 +623,164 @@
                        (reset! kv-buffers-atom new-kv)
                        (recur (inc p) new-log))))
                  cur-logits))))
-         t0 (System/nanoTime)]
-     (try
-       ;; Phase 1: Prefill prompt tokens into KV cache
-       (let [[last-logits t-prefill-end]
-             (cond
-               ;; Path A: Cache hit from token 0 to p-match (delta prefill via step executable)
-               (pos? p-match)
-               (let [start-p (if (= p-match prompt-count) (max 0 (dec prompt-count)) p-match)
-                     cur-log (step-token-range! start-p nil)]
-                 [cur-log (System/nanoTime)])
-               ;; Path B: 1-Shot Parallel Prefill
-               (and (not uop?) (some? prefill-exec))
-               (let [[prefill-logits prefill-kv]
-                     (arena/with-device-arena [step-arena session-arena]
-                       (let [in-arr (int-array seq-len)
-                             _ (dotimes [i prompt-count] (aset in-arr i (int (nth clamped-prompt-ids i))))
-                             pos-p (int-array [(dec prompt-count)])
-                             in-b (arena/device-buffer step-arena in-arr [1 seq-len] :i32)
-                             pos-b (arena/device-buffer step-arena pos-p [1] :i32)
-                             step-inputs (into [in-b pos-b] device-weights)
-                             outs (arena/track! step-arena (execute-step-executable ctx prefill-exec step-inputs num-outs))
-                             outs-vec (if (vector? outs) outs [outs])
-                             pl (first outs-vec)
-                             pkv (vec (subvec outs-vec 1))]
-                         (arena/promote! step-arena session-arena pl)
-                         (arena/promote! step-arena session-arena pkv)
-                         [pl pkv]))]
-                 (reset! kv-buffers-atom prefill-kv)
-                 [prefill-logits (System/nanoTime)])
+         t0 (System/nanoTime)
+         [last-logits t-prefill-end]
+         (cond
+           (pos? p-match)
+           (let [start-p (if (= p-match prompt-count) (max 0 (dec prompt-count)) p-match)
+                 cur-log (step-token-range! start-p nil)]
+             [cur-log (System/nanoTime)])
 
-               ;; Path C: Chunked prefill (with parallel tail chunk or sequential fallback)
-               :else
-               (let [chunk-sz target-chunk-sz
-                     num-full-chunks (if (and chunk-exec (pos? chunk-sz)) (quot prompt-count chunk-sz) 0)
-                     chunk-end (* num-full-chunks chunk-sz)
-                     exact-chunks? (and (pos? num-full-chunks) (= chunk-end prompt-count))
-                     tail-len (- prompt-count chunk-end)]
-                 (when-not quiet
+           (and (not uop?) (some? prefill-exec))
+           (let [[prefill-logits prefill-kv]
+                 (arena/with-device-arena [step-arena session-arena]
+                   (let [in-arr (int-array seq-len)
+                         _ (dotimes [i prompt-count] (aset in-arr i (int (nth clamped-prompt-ids i))))
+                         pos-p (int-array [(dec prompt-count)])
+                         in-b (arena/device-buffer step-arena in-arr [1 seq-len] :i32)
+                         pos-b (arena/device-buffer step-arena pos-p [1] :i32)
+                         step-inputs (into [in-b pos-b] device-weights)
+                         outs (arena/track! step-arena (execute-step-executable ctx prefill-exec step-inputs num-outs))
+                         outs-vec (if (vector? outs) outs [outs])
+                         pl (first outs-vec)
+                         pkv (vec (subvec outs-vec 1))]
+                     (arena/promote! step-arena session-arena pl)
+                     (arena/promote! step-arena session-arena pkv)
+                     [pl pkv]))]
+             (reset! kv-buffers-atom prefill-kv)
+             [prefill-logits (System/nanoTime)])
+
+           :else
+           (let [chunk-sz target-chunk-sz
+                 num-full-chunks (if (and chunk-exec (pos? chunk-sz)) (quot prompt-count chunk-sz) 0)
+                 chunk-end (* num-full-chunks chunk-sz)
+                 exact-chunks? (and (pos? num-full-chunks) (= chunk-end prompt-count))
+                 tail-len (- prompt-count chunk-end)]
+             (when-not quiet
+               (if (pos? num-full-chunks)
+                 (if (> tail-len 1)
+                   (println (format "Chunked prefilling %d prompt tokens into KV-Cache (%d x %d chunks + 1 x %d tail chunk)..."
+                                    prompt-count num-full-chunks chunk-sz tail-len))
+                   (println (format "Chunked prefilling %d prompt tokens into KV-Cache (%d x %d chunks, %d tail tokens)..."
+                                    prompt-count num-full-chunks chunk-sz tail-len)))
+                 (println (format "Prefilling %d prompt tokens into KV-Cache..." prompt-count))))
+             (let [[post-chunk-logits post-chunk-kv]
                    (if (pos? num-full-chunks)
-                     (if (> tail-len 1)
-                       (println (format "Chunked prefilling %d prompt tokens into KV-Cache (%d x %d chunks + 1 x %d tail chunk)..."
-                                        prompt-count num-full-chunks chunk-sz tail-len))
-                       (println (format "Chunked prefilling %d prompt tokens into KV-Cache (%d x %d chunks, %d tail tokens)..."
-                                        prompt-count num-full-chunks chunk-sz tail-len)))
-                     (println (format "Prefilling %d prompt tokens into KV-Cache..." prompt-count))))
-                 (let [[post-chunk-logits post-chunk-kv]
-                       (if (pos? num-full-chunks)
-                         (loop [c 0
-                                cur-kv @kv-buffers-atom
-                                cur-log nil]
-                           (if (< c num-full-chunks)
-                             (let [start-p (* c chunk-sz)
-                                   [new-log new-kv]
-                                   (arena/with-device-arena [iter-arena session-arena]
-                                     (let [chunk-toks (int-array chunk-sz)
-                                           _ (dotimes [ci chunk-sz]
-                                               (aset chunk-toks ci (int (nth clamped-prompt-ids (+ start-p ci)))))
-                                           pos-c (int-array [start-p])
-                                           x-b (arena/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
-                                           pos-b (arena/device-buffer iter-arena pos-c [1] :i32)
-                                           step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
-                                           outs (arena/track! iter-arena (execute-step-executable ctx chunk-exec step-inputs num-outs))
-                                           outs-vec (if (vector? outs) outs [outs])
-                                           nl (first outs-vec)
-                                           nk (vec (subvec outs-vec 1))]
-                                       (arena/promote! iter-arena session-arena nl)
-                                       (arena/promote! iter-arena session-arena nk)
-                                       [nl nk]))
-                                   old-kv cur-kv]
-                               (when cur-log (arena/destroy! session-arena cur-log))
-                               (when (seq old-kv) (arena/destroy! session-arena old-kv))
-                               (recur (inc c) new-kv new-log))
-                             [cur-log cur-kv]))
-                         [nil @kv-buffers-atom])]
-                   (reset! kv-buffers-atom post-chunk-kv)
-                   (if exact-chunks?
-                     [post-chunk-logits (System/nanoTime)]
-                     (if (seq (:delta-chunk-executables session))
-                       [(step-token-range! chunk-end post-chunk-logits) (System/nanoTime)]
-                       (cond
-                         (> tail-len 1)
-                         (let [tail-exec (or (:tail-prefill-executable session)
-                                             (kernels/compile-gemma4-chunked-prefill-executable session seq-len tail-len))
-                               start-p chunk-end
-                               [tail-log tail-kv]
+                     (loop [c 0
+                            cur-kv @kv-buffers-atom
+                            cur-log nil]
+                       (if (< c num-full-chunks)
+                         (let [start-p (* c chunk-sz)
+                               [new-log new-kv]
                                (arena/with-device-arena [iter-arena session-arena]
-                                 (let [tail-toks (int-array tail-len)
-                                       _ (dotimes [ti tail-len]
-                                           (aset tail-toks ti (int (nth clamped-prompt-ids (+ start-p ti)))))
+                                 (let [chunk-toks (int-array chunk-sz)
+                                       _ (dotimes [ci chunk-sz]
+                                           (aset chunk-toks ci (int (nth clamped-prompt-ids (+ start-p ci)))))
                                        pos-c (int-array [start-p])
-                                       x-b (arena/device-buffer iter-arena tail-toks [1 tail-len] :i32)
+                                       x-b (arena/device-buffer iter-arena chunk-toks [1 chunk-sz] :i32)
                                        pos-b (arena/device-buffer iter-arena pos-c [1] :i32)
-                                       step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                       outs (arena/track! iter-arena (execute-step-executable ctx tail-exec step-inputs num-outs))
+                                       step-inputs (into [x-b pos-b] (concat cur-kv device-weights))
+                                       outs (arena/track! iter-arena (execute-step-executable ctx chunk-exec step-inputs num-outs))
                                        outs-vec (if (vector? outs) outs [outs])
                                        nl (first outs-vec)
                                        nk (vec (subvec outs-vec 1))]
                                    (arena/promote! iter-arena session-arena nl)
                                    (arena/promote! iter-arena session-arena nk)
                                    [nl nk]))
-                               old-kv @kv-buffers-atom]
-                           (when post-chunk-logits (arena/destroy! session-arena post-chunk-logits))
+                               old-kv cur-kv]
+                           (when cur-log (arena/destroy! session-arena cur-log))
                            (when (seq old-kv) (arena/destroy! session-arena old-kv))
-                           (reset! kv-buffers-atom tail-kv)
-                           [tail-log (System/nanoTime)])
+                           (recur (inc c) new-kv new-log))
+                         [cur-log cur-kv]))
+                     [nil @kv-buffers-atom])]
+               (reset! kv-buffers-atom post-chunk-kv)
+               (if exact-chunks?
+                 [post-chunk-logits (System/nanoTime)]
+                 (if (seq (:delta-chunk-executables session))
+                   [(step-token-range! chunk-end post-chunk-logits) (System/nanoTime)]
+                   (cond
+                     (> tail-len 1)
+                     (let [tail-exec (or (:tail-prefill-executable session)
+                                         (kernels/compile-gemma4-chunked-prefill-executable session seq-len tail-len))
+                           start-p chunk-end
+                           [tail-log tail-kv]
+                           (arena/with-device-arena [iter-arena session-arena]
+                             (let [tail-toks (int-array tail-len)
+                                   _ (dotimes [ti tail-len]
+                                       (aset tail-toks ti (int (nth clamped-prompt-ids (+ start-p ti)))))
+                                   pos-c (int-array [start-p])
+                                   x-b (arena/device-buffer iter-arena tail-toks [1 tail-len] :i32)
+                                   pos-b (arena/device-buffer iter-arena pos-c [1] :i32)
+                                   step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                                   outs (arena/track! iter-arena (execute-step-executable ctx tail-exec step-inputs num-outs))
+                                   outs-vec (if (vector? outs) outs [outs])
+                                   nl (first outs-vec)
+                                   nk (vec (subvec outs-vec 1))]
+                               (arena/promote! iter-arena session-arena nl)
+                               (arena/promote! iter-arena session-arena nk)
+                               [nl nk]))
+                           old-kv @kv-buffers-atom]
+                       (when post-chunk-logits (arena/destroy! session-arena post-chunk-logits))
+                       (when (seq old-kv) (arena/destroy! session-arena old-kv))
+                       (reset! kv-buffers-atom tail-kv)
+                       [tail-log (System/nanoTime)])
 
-                         (== tail-len 1)
-                         (let [[new-log new-kv]
-                               (arena/with-device-arena [step-arena session-arena]
-                                 (let [tok (int (nth clamped-prompt-ids chunk-end))
-                                       _ (aset x-arr 0 tok)
-                                       _ (aset pos-arr 0 chunk-end)
-                                       x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
-                                       pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
-                                       step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                                       outs (arena/track! step-arena (execute-step-executable ctx exec step-inputs num-outs))
-                                       outs-vec (if (vector? outs) outs [outs])
-                                       nl (first outs-vec)
-                                       nk (vec (subvec outs-vec 1))]
-                                   (arena/promote! step-arena session-arena nl)
-                                   (arena/promote! step-arena session-arena nk)
-                                   [nl nk]))
-                               old-kv @kv-buffers-atom]
-                           (when post-chunk-logits (arena/destroy! session-arena post-chunk-logits))
-                           (when (seq old-kv)
-                             (arena/destroy! session-arena old-kv))
-                           (reset! kv-buffers-atom new-kv)
-                           [new-log (System/nanoTime)])
+                     (== tail-len 1)
+                     (let [[new-log new-kv]
+                           (arena/with-device-arena [step-arena session-arena]
+                             (let [tok (int (nth clamped-prompt-ids chunk-end))
+                                   _ (aset x-arr 0 tok)
+                                   _ (aset pos-arr 0 chunk-end)
+                                   x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
+                                   pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
+                                   step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
+                                   outs (arena/track! step-arena (execute-step-executable ctx exec step-inputs num-outs))
+                                   outs-vec (if (vector? outs) outs [outs])
+                                   nl (first outs-vec)
+                                   nk (vec (subvec outs-vec 1))]
+                               (arena/promote! step-arena session-arena nl)
+                               (arena/promote! step-arena session-arena nk)
+                               [nl nk]))
+                           old-kv @kv-buffers-atom]
+                       (when post-chunk-logits (arena/destroy! session-arena post-chunk-logits))
+                       (when (seq old-kv)
+                         (arena/destroy! session-arena old-kv))
+                       (reset! kv-buffers-atom new-kv)
+                       [new-log (System/nanoTime)])
 
-                         :else
-                         [post-chunk-logits (System/nanoTime)]))))))
+                     :else
+                     [post-chunk-logits (System/nanoTime)]))))))]
+     {:last-logits last-logits
+      :kv-buffers-atom kv-buffers-atom
+      :session-arena session-arena
+      :clamped-prompt-ids clamped-prompt-ids
+      :prompt-count prompt-count
+      :t0 t0
+      :t-prefill-end t-prefill-end
+      :p-match p-match
+      :seq-len seq-len
+      :num-outs num-outs
+      :x-arr x-arr
+      :pos-arr pos-arr
+      :vocab-size vocab-size
+      :weight-dt weight-dt})))
 
-             cur-tokens (atom (vec clamped-prompt-ids))
+(defn run-cached-kv-generation
+  "Executes autoregressive generation with in-VRAM KV-Cache using single-token step executable
+   and 1-shot parallel prefill."
+  ([session exec device-weights prompt-ids]
+   (run-cached-kv-generation session exec device-weights prompt-ids nil))
+  ([{:keys [tokenizer opts kv-state] :as session} exec device-weights prompt-ids max-seq-len]
+   (let [{:keys [max-new-tokens quiet mode]} opts
+         is-agent? (= mode :agent)
+         is-persistent? (some? kv-state)
+         prefill-res (prefill-cached-kv-session! session exec device-weights prompt-ids max-seq-len)
+         t0 (:t0 prefill-res)
+         {:keys [last-logits kv-buffers-atom session-arena clamped-prompt-ids prompt-count
+                 t-prefill-end p-match seq-len num-outs x-arr pos-arr vocab-size weight-dt]}
+         prefill-res]
+     (try
+       (let [cur-tokens (atom (vec clamped-prompt-ids))
              max-tokens (long (or max-new-tokens 256))]
          ;; Phase 2: Autoregressive decode loop
          (loop [step prompt-count
@@ -746,30 +791,15 @@
              (let [logits-data (to-host-slice cur-logits 0 vocab-size vocab-size weight-dt)
                    _ (arena/destroy! session-arena cur-logits)
                    next-id (sample-next-token logits-data opts clamped-prompt-ids (subvec @cur-tokens prompt-count))]
-               (swap! cur-tokens conj next-id)
-               (when (and (not quiet) (not is-agent?))
-                 (print (decode tokenizer [next-id]))
-                 (flush))
                (if (or (contains? kernels/GEMMA4-STOP-TOKEN-IDS next-id) (= next-id (eos-id tokenizer)))
                  nil
-                 (let [[new-log new-kv]
-                       (arena/with-device-arena [step-arena session-arena]
-                         (let [_ (aset x-arr 0 (int next-id))
-                               _ (aset pos-arr 0 step)
-                               x-b (arena/device-buffer step-arena x-arr [1 1] :i32)
-                               pos-b (arena/device-buffer step-arena pos-arr [1] :i32)
-                               step-inputs (into [x-b pos-b] (concat @kv-buffers-atom device-weights))
-                               outs (arena/track! step-arena (execute-step-executable ctx exec step-inputs num-outs))
-                               outs-vec (if (vector? outs) outs [outs])
-                               nl (first outs-vec)
-                               nk (vec (subvec outs-vec 1))]
-                           (arena/promote! step-arena session-arena nl)
-                           (arena/promote! step-arena session-arena nk)
-                           [nl nk]))
-                       old-kv @kv-buffers-atom]
-                   (arena/destroy! session-arena old-kv)
-                   (reset! kv-buffers-atom new-kv)
-                   (recur (inc step) new-log))))))
+                 (do
+                   (swap! cur-tokens conj next-id)
+                   (when (and (not quiet) (not is-agent?))
+                     (print (decode tokenizer [next-id]))
+                     (flush))
+                   (let [new-log (step-cached-kv-session! session exec device-weights session-arena kv-buffers-atom x-arr pos-arr num-outs next-id step)]
+                     (recur (inc step) new-log)))))))
          (let [t1 (System/nanoTime)
                total-ms (/ (- t1 t0) 1e6)
                prefill-ms (/ (- t-prefill-end t0) 1e6)
@@ -973,36 +1003,209 @@
 ;; High-Level Text & Token Generation API
 ;; ==============================================================================
 
+(defn prepare-prompt-ids
+  "Tokenizes and formats prompt for Gemma 4 session, returning a map:
+   {:prompt-ids <vec>
+    :clamped-prompt-ids <vec>
+    :prompt-len <int>
+    :safe-prompt-len <int>
+    :max-seq-len <int>
+    :clean-prompt <str>}."
+  ([session prompt]
+   (prepare-prompt-ids session prompt nil))
+  ([session prompt call-opts]
+   (let [{:keys [tokenizer opts]} session
+         opts (merge (:opts session) opts call-opts)
+         {:keys [max-new-tokens model]} opts
+         max-new-tokens (long (or max-new-tokens 200))
+         clean-prompt (or prompt "The capital of France is")
+         model-str (or model (get-in session [:config :model-dir]) "")
+         is-it-model (str/includes? (str/lower-case model-str) "-it")
+         is-already-templated (or (str/includes? clean-prompt "<|turn>user") (str/includes? clean-prompt "<|turn>model"))
+         prompt-ids (cond
+                      (and is-it-model (not is-already-templated))
+                      (let [raw-ids (encode tokenizer clean-prompt)
+                            clean-ids (if (= (first raw-ids) (bos-id tokenizer)) (rest raw-ids) raw-ids)
+                            prefix (if (:thinking opts)
+                                     ;; <bos><|turn>system\n<|think|><turn|>\n<|turn>user\n
+                                     [(bos-id tokenizer) 105 9731 107 98 106 107 105 2364 107]
+                                     [(bos-id tokenizer) 105 2364 107])]
+                        (vec (concat prefix clean-ids [106 107 105 4368 107])))
+
+                      :else
+                      (let [raw-ids (encode tokenizer clean-prompt)]
+                        (if (= (first raw-ids) (bos-id tokenizer))
+                          (vec raw-ids)
+                          (vec (cons (bos-id tokenizer) raw-ids)))))
+         prompt-len (count prompt-ids)
+         seq-len (long (or (:max-seq-len session) (:max-seq-len opts) (min 2048 (+ prompt-len max-new-tokens))))
+         safe-prompt-len (min prompt-len (max 0 (- seq-len 2)))
+         clamped-prompt-ids (if (< safe-prompt-len prompt-len)
+                              (subvec (vec prompt-ids) (- prompt-len safe-prompt-len))
+                              (vec prompt-ids))]
+     {:prompt-ids prompt-ids
+      :clamped-prompt-ids (vec clamped-prompt-ids)
+      :prompt-len prompt-len
+      :safe-prompt-len safe-prompt-len
+      :max-seq-len seq-len
+      :clean-prompt clean-prompt})))
+
+(defn resolve-active-session
+  "Compiles and resolves step and prefill executables and device weights for the active session."
+  [session opts prompt-ids max-seq-len]
+  (let [metrics-atom (or (:metrics-atom session) (atom {}))
+        trace-spans-atom (or (:trace-spans-atom session) (atom []))
+        reuse-weights? (some? (:device-weights session))
+        reuse-exec? (some? (:executable session))
+        exec (binding [profile/*active-trace-spans* trace-spans-atom]
+               (if reuse-exec?
+                 (:executable session)
+                 (profile/with-profile metrics-atom "graph_compilation"
+                   (cond
+                     (or (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
+                     (kernels/compile-in-vram-loop-executable session max-seq-len)
+
+                     (= (:method opts) :tensor-logic-full)
+                     (kernels/compile-tensor-logic-executable session max-seq-len)
+
+                     :else
+                     (kernels/compile-gemma4-kv-executable session max-seq-len)))))
+        uop? (= (:backend (:ctx session)) :uop)
+        safe-prefill-len (cfg/max-safe-prefill-seq-len (:config session))
+        prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
+                       (if (:prefill-executable session)
+                         (:prefill-executable session)
+                         (when (and (not uop?) (not (:turboquant-kv? (:config session)))
+                                    (or (= (or (:method opts) :kv-cache) :kv-cache)
+                                        (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
+                                    (<= max-seq-len safe-prefill-len))
+                           (profile/with-profile metrics-atom "graph_compilation"
+                             (kernels/compile-gemma4-prefill-executable session max-seq-len)))))
+        step-exec (binding [profile/*active-trace-spans* trace-spans-atom]
+                    (if (:step-executable session)
+                      (:step-executable session)
+                      (when (or (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
+                        (profile/with-profile metrics-atom "graph_compilation"
+                          (kernels/compile-gemma4-kv-executable session max-seq-len)))))
+        prompt-count (count prompt-ids)
+        prior-cache (when (:kv-state session) @(:kv-state session))
+        has-prefix-hit? (boolean (and prior-cache
+                                      (seq (:cached-tokens prior-cache))
+                                      (seq (:kv-buffers prior-cache))
+                                      (pos? (common-prefix-len (:cached-tokens prior-cache) prompt-ids))))
+        target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size (:config session)) 512)))
+        num-full-chunks (if (pos? target-chunk-sz) (quot prompt-count target-chunk-sz) 0)
+        tail-len (- prompt-count (* num-full-chunks target-chunk-sz))
+        chunked-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
+                               (if (:chunked-prefill-executable session)
+                                 (:chunked-prefill-executable session)
+                                 (when (and (not has-prefix-hit?) (pos? target-chunk-sz))
+                                   (profile/with-profile metrics-atom "graph_compilation"
+                                     (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len target-chunk-sz)))))
+        tail-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
+                            (if (:tail-prefill-executable session)
+                              (:tail-prefill-executable session)
+                              (when (and (not has-prefix-hit?)
+                                         (empty? (:delta-chunk-executables session))
+                                         (pos? num-full-chunks)
+                                         (> tail-len 1))
+                                (profile/with-profile metrics-atom "graph_compilation"
+                                  (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len tail-len)))))
+        active-session (assoc session
+                              :prefill-executable prefill-exec
+                              :chunked-prefill-executable chunked-prefill-exec
+                              :tail-prefill-executable tail-prefill-exec
+                              :step-executable step-exec)
+        device-weights (binding [profile/*active-trace-spans* trace-spans-atom]
+                         (if reuse-weights?
+                           (:device-weights session)
+                           (profile/with-profile metrics-atom "weight_transfer"
+                             (weights/allocate-device-weights session))))]
+    {:active-session active-session
+     :exec exec
+     :device-weights device-weights
+     :reuse-weights? reuse-weights?
+     :metrics-atom metrics-atom
+     :trace-spans-atom trace-spans-atom}))
+
+(defn session-forward-fn
+  "Creates a forward evaluation function `(fn [session payload])` suitable for `:compute/einsum`
+   capabilities. Dispatches prefill on the first call and single-token steps on subsequent calls."
+  ([session]
+   (session-forward-fn session nil))
+  ([session call-opts]
+   (if-let [custom-fwd (:forward-fn session)]
+     (fn
+       ([payload] (custom-fwd session payload))
+       ([sess payload] (custom-fwd (or sess session) payload)))
+     (let [eff-opts (merge (:opts session) call-opts)
+           gen-state (atom nil)
+           t0-atom (atom 0)
+           t-prefill-end-atom (atom 0)
+           fwd-fn (fn fwd
+                    ([payload] (fwd session payload))
+                    ([sess payload]
+                     (let [inputs (cond
+                                    (and (map? payload) (contains? payload :inputs)) (:inputs payload)
+                                    (and (map? payload) (contains? payload :args)) (:args payload)
+                                    (vector? payload) payload
+                                    (sequential? payload) (vec payload)
+                                    :else [payload])
+                           first-in (first inputs)
+                           prefill? (or (nil? @gen-state) (sequential? first-in))]
+                       (if prefill?
+                         (let [prompt-tokens (if (sequential? first-in) (vec first-in) [first-in])
+                               active-sess (assoc (or sess session) :opts eff-opts)
+                               seq-len (long (or (:max-seq-len active-sess)
+                                                 (:max-seq-len eff-opts)
+                                                 (min 2048 (+ (count prompt-tokens) (long (or (:max-new-tokens eff-opts) 200))))))
+                               resolved (resolve-active-session active-sess eff-opts prompt-tokens seq-len)
+                               active-sess' (:active-session resolved)
+                               exec (:exec resolved)
+                               device-weights (:device-weights resolved)
+                               prefill-res (prefill-cached-kv-session! active-sess' exec device-weights prompt-tokens seq-len)
+                               {:keys [last-logits kv-buffers-atom session-arena num-outs x-arr pos-arr vocab-size weight-dt t0 t-prefill-end prompt-count]} prefill-res
+                               _ (reset! t0-atom t0)
+                               _ (reset! t-prefill-end-atom t-prefill-end)
+                               _ (reset! gen-state {:session active-sess'
+                                                    :exec exec
+                                                    :device-weights device-weights
+                                                    :session-arena session-arena
+                                                    :kv-buffers-atom kv-buffers-atom
+                                                    :num-outs num-outs
+                                                    :x-arr x-arr
+                                                    :pos-arr pos-arr
+                                                    :vocab-size vocab-size
+                                                    :weight-dt weight-dt
+                                                    :step prompt-count})
+                               logits-slice (to-host-slice last-logits 0 vocab-size vocab-size weight-dt)]
+                           (arena/destroy! session-arena last-logits)
+                           logits-slice)
+                         (let [{:keys [session exec device-weights session-arena kv-buffers-atom
+                                       num-outs x-arr pos-arr vocab-size weight-dt step]} @gen-state
+                               token-id (long (if (sequential? first-in) (first first-in) first-in))
+                               step-pos (if (and (map? payload) (:pos payload))
+                                          (dec (long (:pos payload)))
+                                          (long step))
+                               new-logits (step-cached-kv-session! session exec device-weights session-arena kv-buffers-atom x-arr pos-arr num-outs token-id step-pos)
+                               logits-slice (to-host-slice new-logits 0 vocab-size vocab-size weight-dt)]
+                           (arena/destroy! session-arena new-logits)
+                           (swap! gen-state assoc :step (inc step-pos))
+                           logits-slice)))))]
+       (with-meta fwd-fn {:gen-state-atom gen-state
+                          :t0-atom t0-atom
+                          :t-prefill-end-atom t-prefill-end-atom})))))
+
 (defn generate-text
   "Executes end-to-end Gemma 4 generation pipeline for a given prompt string."
   [session prompt]
   (let [{:keys [tokenizer opts]} session
         opts (merge (:opts session) opts)
-        {:keys [max-new-tokens temperature top-k quiet model]} opts
+        {:keys [max-new-tokens temperature top-k quiet]} opts
         max-new-tokens (long (or max-new-tokens 200))
         temperature (double (or temperature 0.0))
         top-k (long (or top-k 10))
-        clean-prompt (or prompt "The capital of France is")
-        model-str (or model (get-in session [:config :model-dir]) "")
-        is-it-model (str/includes? (str/lower-case model-str) "-it")
-        is-already-templated (or (str/includes? clean-prompt "<|turn>user") (str/includes? clean-prompt "<|turn>model"))
-        prompt-ids (cond
-                     (and is-it-model (not is-already-templated))
-                     (let [raw-ids (encode tokenizer clean-prompt)
-                           clean-ids (if (= (first raw-ids) (bos-id tokenizer)) (rest raw-ids) raw-ids)
-                           prefix (if (:thinking opts)
-                                    ;; <bos><|turn>system\n<|think|><turn|>\n<|turn>user\n
-                                    [(bos-id tokenizer) 105 9731 107 98 106 107 105 2364 107]
-                                    [(bos-id tokenizer) 105 2364 107])]
-                       (vec (concat prefix clean-ids [106 107 105 4368 107])))
-
-                     :else
-                     (let [raw-ids (encode tokenizer clean-prompt)]
-                       (if (= (first raw-ids) (bos-id tokenizer))
-                         (vec raw-ids)
-                         (vec (cons (bos-id tokenizer) raw-ids)))))
-        prompt-len (count prompt-ids)
-        max-seq-len (long (or (:max-seq-len session) (:max-seq-len opts) (min 2048 (+ prompt-len max-new-tokens))))]
+        {:keys [prompt-ids prompt-len max-seq-len clean-prompt]} (prepare-prompt-ids session prompt opts)]
     (when-not quiet
       (let [prompt-str (if (> (count clean-prompt) 200)
                          (str (subs clean-prompt 0 100) " ... [truncated " (count clean-prompt) " chars] ... " (subs clean-prompt (- (count clean-prompt) 100)))
@@ -1016,74 +1219,8 @@
                          (name (or (:method opts) :kv-cache))))
         (println (format "Encoded Token IDs (%d tokens): %s" prompt-len tok-str))))
 
-    (let [metrics-atom (or (:metrics-atom session) (atom {}))
-          trace-spans-atom (or (:trace-spans-atom session) (atom []))
-          reuse-weights? (some? (:device-weights session))
-          reuse-exec? (some? (:executable session))
-          exec (binding [profile/*active-trace-spans* trace-spans-atom]
-                 (if reuse-exec?
-                   (:executable session)
-                   (profile/with-profile metrics-atom "graph_compilation"
-                     (cond
-                       (or (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
-                       (kernels/compile-in-vram-loop-executable session max-seq-len)
-
-                       (= (:method opts) :tensor-logic-full)
-                       (kernels/compile-tensor-logic-executable session max-seq-len)
-
-                       :else
-                       (kernels/compile-gemma4-kv-executable session max-seq-len)))))
-          uop? (= (:backend (:ctx session)) :uop)
-          safe-prefill-len (cfg/max-safe-prefill-seq-len (:config session))
-          prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
-                         (if (:prefill-executable session)
-                           (:prefill-executable session)
-                           (when (and (not uop?) (not (:turboquant-kv? (:config session)))
-                                      (or (= (or (:method opts) :kv-cache) :kv-cache)
-                                          (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
-                                      (<= max-seq-len safe-prefill-len))
-                             (profile/with-profile metrics-atom "graph_compilation"
-                               (kernels/compile-gemma4-prefill-executable session max-seq-len)))))
-          step-exec (binding [profile/*active-trace-spans* trace-spans-atom]
-                      (if (:step-executable session)
-                        (:step-executable session)
-                        (when (or (:vram-loop? opts) (:vram-loop? session) (= (:method opts) :vram-loop))
-                          (profile/with-profile metrics-atom "graph_compilation"
-                            (kernels/compile-gemma4-kv-executable session max-seq-len)))))
-          prompt-count (count prompt-ids)
-          prior-cache (when (:kv-state session) @(:kv-state session))
-          has-prefix-hit? (boolean (and prior-cache
-                                        (seq (:cached-tokens prior-cache))
-                                        (seq (:kv-buffers prior-cache))
-                                        (pos? (common-prefix-len (:cached-tokens prior-cache) prompt-ids))))
-          target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size (:config session)) 512)))
-          num-full-chunks (if (pos? target-chunk-sz) (quot prompt-count target-chunk-sz) 0)
-          tail-len (- prompt-count (* num-full-chunks target-chunk-sz))
-          chunked-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
-                                 (if (:chunked-prefill-executable session)
-                                   (:chunked-prefill-executable session)
-                                   (when (and (not has-prefix-hit?) (pos? target-chunk-sz))
-                                     (profile/with-profile metrics-atom "graph_compilation"
-                                       (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len target-chunk-sz)))))
-          tail-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]
-                              (if (:tail-prefill-executable session)
-                                (:tail-prefill-executable session)
-                                (when (and (not has-prefix-hit?)
-                                           (empty? (:delta-chunk-executables session))
-                                           (pos? num-full-chunks)
-                                           (> tail-len 1))
-                                  (profile/with-profile metrics-atom "graph_compilation"
-                                    (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len tail-len)))))
-          active-session (assoc session
-                                :prefill-executable prefill-exec
-                                :chunked-prefill-executable chunked-prefill-exec
-                                :tail-prefill-executable tail-prefill-exec
-                                :step-executable step-exec)
-          device-weights (binding [profile/*active-trace-spans* trace-spans-atom]
-                           (if reuse-weights?
-                             (:device-weights session)
-                             (profile/with-profile metrics-atom "weight_transfer"
-                               (weights/allocate-device-weights session))))]
+    (let [{:keys [active-session exec device-weights reuse-weights? metrics-atom trace-spans-atom]}
+          (resolve-active-session session opts prompt-ids max-seq-len)]
       (when-not quiet
         (println "\nGenerating tokens autoregressively with pure Tensor Logic Gemma 4 Kernel..."))
       (let [final-context (binding [profile/*active-trace-spans* trace-spans-atom]
@@ -1122,43 +1259,199 @@
         final-context (generate-text session prompt)]
     (decode tokenizer final-context)))
 
+(defn generate-new-tokens-and-text-graph
+  "Executes autoregressive token decoding using the token-level fractal sub-agent graph
+   `autoregressive-decoder-graph`. Returns a map with generated text, token telemetry,
+   and recorded `:sub-event-log` and `:sub-hiccup` for deterministic replay."
+  ([session prompt]
+   (generate-new-tokens-and-text-graph session prompt nil))
+  ([session prompt call-opts]
+   (let [t0 (System/nanoTime)
+         {:keys [tokenizer opts]} session
+         eff-opts (merge (:opts session) opts call-opts)
+         {:keys [clamped-prompt-ids prompt-len max-seq-len]} (prepare-prompt-ids session prompt eff-opts)
+         raw-max-new (long (or (:max-new-tokens eff-opts) 200))
+         max-new-tokens (if (or (:max-seq-len session) (:max-seq-len eff-opts) (get-in session [:config :max-seq-len]))
+                          (min raw-max-new (max 1 (- (dec max-seq-len) (count clamped-prompt-ids))))
+                          raw-max-new)
+         eos-ids (cond
+                   (set? (:eos-ids eff-opts)) (:eos-ids eff-opts)
+                   (sequential? (:eos-ids eff-opts)) (set (:eos-ids eff-opts))
+                   :else (set (conj kernels/GEMMA4-STOP-TOKEN-IDS (eos-id tokenizer))))
+         rep-pen (double (or (:repetition-penalty eff-opts) 1.0))
+         sample-fn (or (:sample-fn eff-opts)
+                       (when (> rep-pen 1.0)
+                         (fn [logits seen-tokens]
+                           (sample-next-token logits eff-opts clamped-prompt-ids seen-tokens))))
+         decoder-opts {:max-new-tokens max-new-tokens
+                       :eos-ids eos-ids
+                       :eos-id (eos-id tokenizer)
+                       :temperature (double (or (:temperature eff-opts) 0.0))
+                       :sample-fn sample-fn}
+         decoder-hiccup ((requiring-resolve 'einsum.agent.graph/autoregressive-decoder-graph) decoder-opts)
+         fwd-fn (session-forward-fn session eff-opts)
+         device-hiccup [:device {:id :decoder-device}
+                        [:cap {:id :gpu
+                               :type :compute/einsum
+                               :backend (or (get-in session [:ctx :backend]) :uop-cpu)
+                               :session session
+                               :forward-fn fwd-fn}]]
+         bound-inst ((requiring-resolve 'einsum.graph.binder/bind-agent) decoder-hiccup device-hiccup)
+         input-inst ((requiring-resolve 'einsum.graph.runtime/enqueue-input) bound-inst :tokens-in clamped-prompt-ids)
+         stepped-inst ((requiring-resolve 'einsum.graph.runtime/run-graph!)
+                       input-inst
+                       {:max-steps (max 10000 (* 8 (+ max-new-tokens 16)))})
+         new-token-ids (or (first (get-in stepped-inst [:outbox :tokens-out])) [])
+         t1 (System/nanoTime)
+         t0-fwd (long (or (some-> fwd-fn meta :t0-atom deref) 0))
+         eff-t0 (if (pos? t0-fwd) t0-fwd t0)
+         t-prefill-end (long (or (some-> fwd-fn meta :t-prefill-end-atom deref) 0))
+         prefill-ms (if (pos? t-prefill-end) (/ (- t-prefill-end eff-t0) 1e6) 0.0)
+         decode-ms (if (pos? t-prefill-end) (/ (- t1 t-prefill-end) 1e6) (/ (- t1 eff-t0) 1e6))
+         total-ms (/ (- t1 eff-t0) 1e6)
+         new-tokens (count new-token-ids)
+         decode-tok-s (if (pos? decode-ms) (/ (* new-tokens 1000.0) decode-ms) 0.0)
+         decode-ms-tok (if (pos? new-tokens) (/ decode-ms (double new-tokens)) 0.0)
+         decoded-text (decode tokenizer new-token-ids)]
+     (when-let [ks (:kv-state session)]
+       (let [st (some-> fwd-fn meta :gen-state-atom deref)
+             all-toks (into (vec clamped-prompt-ids) new-token-ids)
+             stepped-cnt (long (or (:step st) (count all-toks)))]
+         (reset! ks {:cached-tokens (subvec all-toks 0 (min (count all-toks) stepped-cnt))
+                     :kv-buffers (some-> st :kv-buffers-atom deref)
+                     :prefill-ms prefill-ms
+                     :decode-ms decode-ms
+                     :decode-tok-s decode-tok-s
+                     :decode-ms-tok decode-ms-tok
+                     :gen-count new-tokens
+                     :total-ms total-ms})))
+     (when-not (:quiet eff-opts)
+       (println)
+       (println "\n------------------------------------------------------------------")
+       (println "  Telemetry Benchmark Metrics (Fractal Graph Decoder):")
+       (println (format "    • Prefill Latency             : %8.2f ms (%d tokens)" prefill-ms prompt-len))
+       (println (format "    • Decode Latency              : %8.2f ms (%d tokens)" decode-ms new-tokens))
+       (println (format "    • Decode Speed                : %8.2f tok/s (%6.2f ms/tok)" decode-tok-s decode-ms-tok))
+       (println (format "    • Total Generation Latency    : %8.2f ms" total-ms))
+       (println "------------------------------------------------------------------\n"))
+     {:text decoded-text
+      :prompt-tokens prompt-len
+      :new-tokens new-tokens
+      :new-token-ids (vec new-token-ids)
+      :prefill-ms prefill-ms
+      :decode-ms decode-ms
+      :decode-tok-s decode-tok-s
+      :decode-ms-tok decode-ms-tok
+      :total-ms total-ms
+      :sub-event-log (:event-log stepped-inst)
+      :sub-hiccup decoder-hiccup})))
+
+(defn- generate-host-forward-decode
+  [session prompt call-opts]
+  (let [eff-opts (merge (:opts session) call-opts)
+        {:keys [tokenizer]} session
+        {:keys [clamped-prompt-ids prompt-len max-seq-len]} (prepare-prompt-ids session prompt eff-opts)
+        raw-max-new (long (or (:max-new-tokens eff-opts) 200))
+        max-new-tokens (if (or (:max-seq-len session) (:max-seq-len eff-opts) (get-in session [:config :max-seq-len]))
+                         (min raw-max-new (max 1 (- (dec max-seq-len) (count clamped-prompt-ids))))
+                         raw-max-new)
+        eos-ids (cond
+                  (set? (:eos-ids eff-opts)) (:eos-ids eff-opts)
+                  (sequential? (:eos-ids eff-opts)) (set (:eos-ids eff-opts))
+                  :else (set (conj kernels/GEMMA4-STOP-TOKEN-IDS (eos-id tokenizer))))
+        fwd-fn (session-forward-fn session eff-opts)
+        rep-pen (double (or (:repetition-penalty eff-opts) 1.0))
+        sample-fn (or (:sample-fn eff-opts)
+                      (when (> rep-pen 1.0)
+                        (fn [logits seen-tokens]
+                          (sample-next-token logits eff-opts clamped-prompt-ids seen-tokens))))
+        greedy-fn (fn [logits]
+                    (if (fn? sample-fn)
+                      (sample-fn logits [])
+                      (let [row (cond
+                                  (and (map? logits) (contains? logits :logits)) (:logits logits)
+                                  (and (map? logits) (contains? logits :data) (some? (:data logits))) (:data logits)
+                                  :else logits)]
+                        (if (instance? (Class/forName "[F") row)
+                          (let [^floats arr row
+                                n (alength arr)]
+                            (loop [i 1 max-idx 0 max-val (aget arr 0)]
+                              (if (< i n)
+                                (let [v (aget arr i)]
+                                  (if (> v max-val)
+                                    (recur (inc i) i v)
+                                    (recur (inc i) max-idx max-val)))
+                                max-idx)))
+                          (let [indexed (map-indexed vector row)]
+                            (first (apply max-key second indexed)))))))
+        t0 (System/nanoTime)
+        first-logits (fwd-fn clamped-prompt-ids)
+        t-prefill-end (long (or (some-> fwd-fn meta :t-prefill-end-atom deref) (System/nanoTime)))
+        first-tok (long (greedy-fn first-logits))
+        gen-tokens (if (or (contains? eos-ids first-tok) (<= max-new-tokens 0))
+                     []
+                     (loop [toks [first-tok]]
+                       (if (or (>= (count toks) max-new-tokens)
+                               (contains? eos-ids (last toks)))
+                         (if (contains? eos-ids (last toks)) (pop toks) toks)
+                         (let [next-logits (fwd-fn {:inputs [(last toks)] :pos (+ (count clamped-prompt-ids) (count toks))})
+                               tok (long (if sample-fn (sample-fn next-logits toks) (greedy-fn next-logits)))]
+                           (if (contains? eos-ids tok)
+                             toks
+                             (recur (conj toks tok)))))))
+        t1 (System/nanoTime)
+        t0-fwd (long (or (some-> fwd-fn meta :t0-atom deref) 0))
+        eff-t0 (if (pos? t0-fwd) t0-fwd t0)
+        prefill-ms (if (pos? t-prefill-end) (/ (- t-prefill-end eff-t0) 1e6) 0.0)
+        decode-ms (if (pos? t-prefill-end) (/ (- t1 t-prefill-end) 1e6) (/ (- t1 eff-t0) 1e6))
+        total-ms (/ (- t1 eff-t0) 1e6)
+        new-tokens (count gen-tokens)
+        decode-tok-s (if (pos? decode-ms) (/ (* new-tokens 1000.0) decode-ms) 0.0)
+        decode-ms-tok (if (pos? new-tokens) (/ decode-ms (double new-tokens)) 0.0)
+        decoded-text (decode tokenizer gen-tokens)]
+    {:text decoded-text
+     :prompt-tokens prompt-len
+     :new-tokens new-tokens
+     :new-token-ids (vec gen-tokens)
+     :prefill-ms prefill-ms
+     :decode-ms decode-ms
+     :decode-tok-s decode-tok-s
+     :decode-ms-tok decode-ms-tok
+     :total-ms total-ms}))
+
 (defn generate-new-tokens-and-text
   "Generates text response using Gemma 4 model session and returns a map:
    {:text <decoded-new-text>
     :prompt-tokens <int>
     :new-tokens <int>
     :new-token-ids <vec>}."
-  [session prompt]
-  (let [{:keys [tokenizer opts]} session
-        opts (merge (:opts session) opts)
-        model-str (or (:model opts) (get-in session [:config :model-dir]) "")
-        is-it-model (str/includes? (str/lower-case model-str) "-it")
-        is-already-templated (or (str/includes? (or prompt "") "<|turn>user") (str/includes? (or prompt "") "<|turn>model"))
-        raw-ids (encode tokenizer prompt)
-        prompt-ids (cond
-                     (and is-it-model (not is-already-templated))
-                     (let [clean-ids (if (= (first raw-ids) (bos-id tokenizer)) (rest raw-ids) raw-ids)
-                           prefix (if (:thinking opts)
-                                    [(bos-id tokenizer) 105 9731 107 98 106 107 105 2364 107]
-                                    [(bos-id tokenizer) 105 2364 107])]
-                       (vec (concat prefix clean-ids [106 107 105 4368 107])))
-                     :else
-                     (if (= (first raw-ids) (bos-id tokenizer))
-                       (vec raw-ids)
-                       (vec (cons (bos-id tokenizer) raw-ids))))
-        prompt-len (count prompt-ids)
-        seq-len (long (or (:max-seq-len session) (get-in session [:config :max-seq-len]) 2048))
-        safe-prompt-len (min prompt-len (max 0 (- seq-len 2)))
-        final-context (vec (generate-text session prompt))
-        total-len (count final-context)
-        slice-start (min total-len safe-prompt-len)
-        new-ids (subvec final-context slice-start)]
-    (merge {:text (decode tokenizer new-ids)
-            :prompt-tokens prompt-len
-            :new-tokens (count new-ids)
-            :new-token-ids (vec new-ids)}
-           (when-let [ks (and (:kv-state session) @(:kv-state session))]
-             (select-keys ks [:prefill-ms :decode-ms :decode-tok-s :decode-ms-tok :total-ms])))))
+  ([session prompt]
+   (generate-new-tokens-and-text session prompt nil))
+  ([session prompt call-opts]
+   (let [eff-opts (merge (:opts session) call-opts)
+         decode-mode (or (:decode eff-opts) :host)
+         temp (double (or (:temperature eff-opts) 0.0))]
+     (cond
+       (and (= decode-mode :graph) (or (<= temp 0.0) (:sample-fn eff-opts)))
+       (generate-new-tokens-and-text-graph session prompt call-opts)
+
+       (:forward-fn session)
+       (generate-host-forward-decode session prompt call-opts)
+
+       :else
+       (let [{:keys [tokenizer opts]} session
+             opts (merge (:opts session) opts call-opts)
+             {:keys [prompt-len safe-prompt-len]} (prepare-prompt-ids session prompt opts)
+             final-context (vec (generate-text (assoc session :opts opts) prompt))
+             total-len (count final-context)
+             slice-start (min total-len safe-prompt-len)
+             new-ids (subvec final-context slice-start)]
+         (merge {:text (decode tokenizer new-ids)
+                 :prompt-tokens prompt-len
+                 :new-tokens (count new-ids)
+                 :new-token-ids (vec new-ids)}
+                (when-let [ks (and (:kv-state session) @(:kv-state session))]
+                  (select-keys ks [:prefill-ms :decode-ms :decode-tok-s :decode-ms-tok :total-ms]))))))))
 
 (defn generate-new-text-string
   "Generates text response using Gemma 4 model session and returns ONLY newly generated text string without prompt prefix."

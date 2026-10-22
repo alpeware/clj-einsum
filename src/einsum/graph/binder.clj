@@ -52,8 +52,8 @@
 ;; =============================================================================
 
 (def override-keys
-  #{:type :optional? :ast :in :out :generate-fn :eval-fn :tool-eval-fn
-    :session :timeout-ms :quiet? :quiet :printed :n :deps :tests :tracker-session})
+  #{:type :optional? :ast :in :out :backend :session :generate-fn :forward-fn :decode :eval-fn :tool-eval-fn
+    :sandbox :timeout-ms :quiet? :quiet :printed :n :deps :tests :tracker-session})
 
 (defn match-capability?
   "Returns true if `cap-attrs` satisfies `req-spec`.
@@ -110,7 +110,7 @@
              matching-cap
              (let [has-overrides? (and (map? req-spec)
                                        (some #(contains? req-spec %)
-                                             [:ast :in :out :generate-fn :eval-fn :tool-eval-fn :session :sandbox :timeout-ms :backend]))
+                                             [:backend :session :generate-fn :forward-fn :decode :sandbox :timeout-ms :eval-fn :quiet? :n :deps :tests :ast :in :out :tool-eval-fn :tracker-session]))
                    cap-inst (if has-overrides?
                               (let [specialized-attrs (merge (:attrs matching-cap) (dissoc req-spec :optional?))
                                     device-ctx {:cas-store (:cas-store device-inst) :device-id (:id device-inst)}

@@ -4,12 +4,15 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
+            [clojure.string :as str]
             [einsum.agent.core :as agent-core]
             [einsum.agent.graph :as graph]
             [einsum.graph.binder :as binder]
             [einsum.graph.capability :as cap]
             [einsum.graph.runtime :as runtime]
-            [einsum.logic.agent.state-tracker :as state-tracker]))
+            [einsum.logic.agent.state-tracker :as state-tracker]
+            [einsum.models.gemma4.runtime :as gemma4-rt]
+            [einsum.runtime.tokenizer.protocol :as tok-proto]))
 
 ;; -----------------------------------------------------------------------------
 ;; 1. Property Test: Coding Agent Turn Bounds and Event-Log Hash Chain
@@ -318,3 +321,147 @@
       (is (contains? (:affected-files tracker-out) 2))
       (is (contains? (:affected-tests tracker-out) 5))
       (is (contains? (:affected-tests tracker-out) 6)))))
+
+(deftest test-autoregressive-decoder-eos-ids-set-stopping
+  (testing "Autoregressive decoder graph stops when encountering any token in :eos-ids set"
+    (let [step-counter (atom 0)
+          stop-set #{1 106 50}
+          ;; Simulate emitting tokens: 42, 43, 106 (stop), 44
+          tokens-seq [42 43 106 44 45]
+          mock-gpu (fn [_in-port _payload _cas-store]
+                     (let [idx (swap! step-counter inc)
+                           tok (nth tokens-seq (dec idx) 99)
+                           logits (float-array 200)]
+                       (aset logits (int tok) (float 100.0))
+                       {:logits [logits] :out [logits]}))
+          opts {:max-new-tokens 10
+                :eos-ids stop-set}
+          decoder-ast (graph/autoregressive-decoder-graph opts)
+          device-ast [:device {:id :mock-gpu-dev}
+                      [:cap {:id :gpu :type :compute/einsum}]]
+          bound (binder/bind-agent decoder-ast device-ast {:capabilities {:gpu mock-gpu}})
+          executed (-> bound
+                       (runtime/enqueue-input :tokens-in [10 20])
+                       runtime/run-graph!)
+          tokens-out (first (get-in executed [:outbox :tokens-out]))]
+      (is (= [42 43] tokens-out))
+      (is (= 3 @step-counter)))))
+
+(deftest test-fake-session-decode-graph-and-deterministic-replay
+  (testing "Fake session decode with :decode :graph produces sub-event-log and supports full deterministic replay"
+    (let [step-counter (atom 0)
+          tokens-seq [100 101 1]
+          fake-tokenizer (reify
+                           tok-proto/Tokenizer
+                           (encode [_ _text] [10 20])
+                           (decode [_ token-ids] (str/join " " token-ids))
+                           (decode [_ token-ids _skip] (str/join " " token-ids))
+                           (bos-id [_] 1)
+                           (eos-id [_] 1))
+          fake-fwd (fn [_session _payload]
+                     (let [idx (swap! step-counter inc)
+                           tok (nth tokens-seq (dec idx) 1)
+                           logits (float-array 200)]
+                       (aset logits (int tok) (float 100.0))
+                       logits))
+          fake-session {:tokenizer fake-tokenizer
+                        :opts {:max-new-tokens 5}
+                        :forward-fn fake-fwd}]
+      ;; 1. Parity between :decode :host and :decode :graph on fake-session
+      (reset! step-counter 0)
+      (let [res-host (gemma4-rt/generate-new-tokens-and-text fake-session "Hello world" {:decode :host})
+            _ (reset! step-counter 0)
+            res-graph (gemma4-rt/generate-new-tokens-and-text fake-session "Hello world" {:decode :graph})
+            sub-log (:sub-event-log res-graph)
+            sub-hiccup (:sub-hiccup res-graph)]
+        (is (= (:new-token-ids res-host) (:new-token-ids res-graph)))
+        (is (= (:text res-host) (:text res-graph)))
+        (is (= "100 101" (:text res-graph)))
+        (is (= 2 (:new-tokens res-graph)))
+        (is (= [100 101] (:new-token-ids res-graph)))
+        (is (vector? sub-log))
+        (is (pos? (count sub-log)))
+        (is (runtime/verify-event-log-chain sub-log))
+
+        ;; 2. Replay the sub-event log deterministically with zero capabilities
+        (let [replayed (runtime/replay-graph sub-hiccup sub-log)]
+          (is (= [100 101] (first (get-in replayed [:outbox :tokens-out]))))
+          (is (= sub-log (:event-log replayed)))))
+
+      ;; 3. Execute inside coding-agent-graph with :decode :graph
+      (reset! step-counter 0)
+      (let [agent-opts {:max-turns 1
+                        :decode :graph
+                        :nudge-on-blind-solution? false
+                        :session fake-session}
+            agent-ast (graph/coding-agent-graph agent-opts)
+            dev-ast (graph/default-agent-device agent-opts)
+            bound (binder/bind-agent agent-ast dev-ast agent-opts)
+            executed (-> bound
+                         (runtime/enqueue-input :prompt-in "Hello world")
+                         runtime/run-graph!)
+            parent-log (:event-log executed)
+            final-out (first (get-in executed [:outbox :final-out]))
+            ;; Verify that the capability step envelope recorded the sub-event-log
+            cap-env (first (filter #(= (first (:event/target %)) :cap/llm) parent-log))
+            sub-log-in-parent (get-in cap-env [:event/meta :sub-event-log])]
+        (is (some? final-out))
+        (is (string? (:final-answer final-out)))
+        (is (= "100 101" (:final-answer final-out)))
+        (is (seq sub-log-in-parent))
+        (is (runtime/verify-event-log-chain parent-log))
+
+        ;; 4. Replay the full parent graph deterministically
+        (let [replayed-parent (runtime/replay-graph agent-ast parent-log)]
+          (is (= (:node-states executed) (:node-states replayed-parent)))
+          (is (= (:outbox executed) (:outbox replayed-parent)))
+          (is (seq (:sub-replays replayed-parent)))))
+
+      ;; 5. Two-turn tool-calling agent scenario with :decode :graph and deterministic sub-replay
+      (let [turn1-resp "<|tool_call>call:eval_clojure{code:\"(* 17 23)\"}<tool_call|>"
+            turn2-resp "The result is 391."
+            tok-map {201 turn1-resp
+                     202 turn2-resp}
+            turn2-tokenizer (reify
+                              tok-proto/Tokenizer
+                              (encode [_ _text] [10 20])
+                              (decode [_ token-ids]
+                                (str/join "" (map #(get tok-map % (str %)) token-ids)))
+                              (decode [_ token-ids _skip]
+                                (str/join "" (map #(get tok-map % (str %)) token-ids)))
+                              (bos-id [_] 2)
+                              (eos-id [_] 1))
+            t2-step-counter (atom 0)
+            ;; Turn 1: 201 (tool call), 1 (eos); Turn 2: 202 (final answer), 1 (eos)
+            t2-tokens [201 1 202 1]
+            t2-fwd (fn [_session _payload]
+                     (let [idx (swap! t2-step-counter inc)
+                           tok (nth t2-tokens (dec idx) 1)
+                           logits (float-array 300)]
+                       (aset logits (int tok) (float 100.0))
+                       logits))
+            t2-session {:tokenizer turn2-tokenizer
+                        :opts {:max-new-tokens 5}
+                        :forward-fn t2-fwd}
+            agent-opts {:max-turns 4
+                        :decode :graph
+                        :nudge-on-blind-solution? false
+                        :session t2-session}
+            agent-ast (graph/coding-agent-graph agent-opts)
+            dev-ast (graph/default-agent-device agent-opts)
+            bound (binder/bind-agent agent-ast dev-ast agent-opts)
+            executed (-> bound
+                         (runtime/enqueue-input :prompt-in "Please compute (* 17 23)")
+                         runtime/run-graph!)
+            parent-log (:event-log executed)
+            final-out (first (get-in executed [:outbox :final-out]))]
+        (is (some? final-out))
+        (is (= "The result is 391." (:final-answer final-out)))
+        (is (runtime/verify-event-log-chain parent-log))
+
+        ;; 6. Replay the full parent graph deterministically with zero capabilities
+        (let [replayed-parent (runtime/replay-graph agent-ast parent-log)]
+          (is (= (:node-states executed) (:node-states replayed-parent)))
+          (is (= (:outbox executed) (:outbox replayed-parent)))
+          (is (= 2 (count (:sub-replays replayed-parent))))
+          (is (every? runtime/verify-event-log-chain (map :event-log (:sub-replays replayed-parent)))))))))

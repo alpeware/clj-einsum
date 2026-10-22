@@ -245,46 +245,59 @@
                                           (:session cap-attrs)
                                           (get @(:state this) :session))
                               opts (when (map? payload) (:opts payload))
+                              effective-opts (merge (when session (:opts session))
+                                                    (select-keys cap-attrs [:decode :max-new-tokens :temperature :top-k :repetition-penalty])
+                                                    (select-keys @(:state this) [:decode :max-new-tokens :temperature :top-k :repetition-penalty])
+                                                    opts)
                               gen-fn (or (:generate-fn cap-attrs)
                                          (get @(:state this) :generate-fn))
                               t0 (System/nanoTime)
                               gen-res (if gen-fn
-                                        (call-generate-fn gen-fn session prompt opts)
-                                        (gemma4-rt/generate-new-tokens-and-text session prompt))
+                                        (call-generate-fn gen-fn session prompt effective-opts)
+                                        (gemma4-rt/generate-new-tokens-and-text session prompt effective-opts))
                               model-ms (/ (- (System/nanoTime) t0) 1e6)
                               reply-val (if (map? gen-res)
-                                          (assoc gen-res :model-ms model-ms)
+                                          (assoc gen-res :model-ms (double (or (:total-ms gen-res) model-ms)))
                                           {:text gen-res :model-ms model-ms})]
                           {:reply [reply-val]})
 
                         :forward
-                        (let [ast (or (when (map? payload) (:ast payload))
-                                      (:ast cap-attrs)
-                                      (get @(:state this) :ast))
-                              _ (when-not ast
-                                  (throw (ex-info "Missing AST for :forward compute/einsum invocation"
-                                                  {:payload payload :cap-attrs cap-attrs})))
-                              raw-inputs (cond
-                                           (and (map? payload) (contains? payload :inputs)) (:inputs payload)
-                                           (and (map? payload) (contains? payload :args)) (:args payload)
-                                           (vector? payload) payload
-                                           (sequential? payload) (vec payload)
-                                           :else [payload])
-                              resolved-inputs (mapv (fn [x]
-                                                      (if (and effective-store (cas/cas-ptr? x))
-                                                        (cas/resolve-ptr effective-store x)
-                                                        x))
-                                                    raw-inputs)
-                              b (or (:backend cap-attrs) (get @(:state this) :backend) :uop-cpu)
-                              cache (or (get @(:state this) :kernel-cache) (atom {}))
-                              cache-key [ast b]
-                              kernel (or (get @cache cache-key)
-                                         (let [ctx (core/init-backend! b)
-                                               k (core/compile-kernel ctx "forward_kernel" ast)]
-                                           (swap! cache assoc cache-key k)
-                                           k))
-                              out (apply core/execute kernel resolved-inputs)]
-                          {:logits [out] :out [out]})
+                        (let [fwd-fn (or (when (map? payload) (:forward-fn payload))
+                                         (:forward-fn cap-attrs)
+                                         (get @(:state this) :forward-fn))
+                              session (or (when (map? payload) (:session payload))
+                                          (:session cap-attrs)
+                                          (get @(:state this) :session))]
+                          (if fwd-fn
+                            (let [out (fwd-fn session payload)]
+                              {:logits [out] :out [out]})
+                            (let [ast (or (when (map? payload) (:ast payload))
+                                          (:ast cap-attrs)
+                                          (get @(:state this) :ast))
+                                  _ (when-not ast
+                                      (throw (ex-info "Missing AST for :forward compute/einsum invocation"
+                                                      {:payload payload :cap-attrs cap-attrs})))
+                                  raw-inputs (cond
+                                               (and (map? payload) (contains? payload :inputs)) (:inputs payload)
+                                               (and (map? payload) (contains? payload :args)) (:args payload)
+                                               (vector? payload) payload
+                                               (sequential? payload) (vec payload)
+                                               :else [payload])
+                                  resolved-inputs (mapv (fn [x]
+                                                          (if (and effective-store (cas/cas-ptr? x))
+                                                            (cas/resolve-ptr effective-store x)
+                                                            x))
+                                                        raw-inputs)
+                                  b (or (:backend cap-attrs) (get @(:state this) :backend) :uop-cpu)
+                                  cache (or (get @(:state this) :kernel-cache) (atom {}))
+                                  cache-key [ast b]
+                                  kernel (or (get @cache cache-key)
+                                             (let [ctx (core/init-backend! b)
+                                                   k (core/compile-kernel ctx "forward_kernel" ast)]
+                                               (swap! cache assoc cache-key k)
+                                               k))
+                                  out (apply core/execute kernel resolved-inputs)]
+                              {:logits [out] :out [out]})))
 
                         ;; Default: if :ast is present, default to forward; else generate
                         (if (or (:ast cap-attrs) (and (map? payload) (:ast payload)))

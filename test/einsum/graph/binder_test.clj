@@ -8,6 +8,7 @@
             [einsum.graph.binder :as binder]
             [einsum.graph.capability :as cap]
             [einsum.graph.cas :as cas]
+            [einsum.graph.runtime :as runtime]
             [clojure.string :as str]))
 
 ;; -----------------------------------------------------------------------------
@@ -265,3 +266,39 @@
       (is (= 2000 (get-in bound [:node-states :child-worker :capabilities :eval :attrs :timeout-ms])))
       (is (= 2 (count @(:specialized-instances (:device bound)))))
       (is (nil? (binder/stop-device! (:device bound)))))))
+
+(deftest test-compute-einsum-forward-fn-override
+  (testing ":compute/einsum capability dispatches to :forward-fn override in :forward port"
+    (let [fwd-called (atom nil)
+          fake-fwd (fn [session payload]
+                     (reset! fwd-called {:session session :payload payload})
+                     [1.0 2.0 3.0])
+          dev-ast [:device {:id :fwd-dev}
+                   [:cap {:id :einsum-llm
+                          :type :compute/einsum
+                          :backend :uop-cpu
+                          :forward-fn fake-fwd}]]
+          agent-ast [:agent {:id :test-agent
+                             :ins [:in]
+                             :outs [:out]
+                             :requires {:llm {:type :compute/einsum}}}
+                     [:mealy {:id :worker
+                              :ins [:in :logits-in]
+                              :outs [:fwd-req :final]
+                              :init-state {:step 0}
+                              :step (fn [st in-port pld]
+                                      (case in-port
+                                        :in [st {:fwd-req [{:inputs [pld] :pos 1}]}]
+                                        :logits-in [st {:final [pld]}]))}]
+                     [:conn [:agent/in :in] [:worker :in]]
+                     [:conn [:worker :fwd-req] [:cap/llm :forward]]
+                     [:conn [:cap/llm :logits] [:worker :logits-in]]
+                     [:conn [:worker :final] [:agent/out :out]]]
+          bound (binder/bind-agent agent-ast dev-ast)
+          stepped (-> bound
+                      (runtime/enqueue-input :in [42 43])
+                      runtime/run-graph!)
+          out (first (get-in stepped [:outbox :out]))]
+      (is (= [1.0 2.0 3.0] out))
+      (is (some? @fwd-called))
+      (is (= {:inputs [[42 43]] :pos 1} (:payload @fwd-called))))))

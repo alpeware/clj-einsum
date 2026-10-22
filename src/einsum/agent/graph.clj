@@ -98,7 +98,10 @@
       (cond
         ;; Case 1: Final Answer (No tool call and no nudge needed)
         (and (nil? tool-code) (not nudge?))
-        (let [telem-entry {:turn turn :model-ms model-ms :tool-ms 0.0 :status :final-answer :thinking thinking :code nil}
+        (let [telem-entry (cond-> {:turn turn :model-ms model-ms :tool-ms 0.0 :total-turn-ms model-ms :status :final-answer :thinking thinking :code nil}
+                            (map? payload)
+                            (merge (select-keys payload [:prompt-tokens :new-tokens :new-token-ids :prefill-ms :decode-ms :decode-tok-s :decode-ms-tok :total-ms])
+                                   (when-let [tok-s (:decode-tok-s payload)] {:tok-per-sec tok-s})))
               final-ans (str/trim (if (seq clean-reply) clean-reply raw-reply))
               final-map {:final-answer final-ans
                          :history history-with-reply
@@ -118,7 +121,10 @@
                           :xml "Please test your Clojure implementation by outputting code in <clojure>...</clojure>."
                           :fenced "Please test your Clojure implementation by outputting code in ```clojure ... ```."
                           "Please test your Clojure implementation by calling the eval_clojure tool.")
-              telem-entry {:turn turn :model-ms model-ms :tool-ms 0.0 :status :nudged :thinking thinking :code nil}
+              telem-entry (cond-> {:turn turn :model-ms model-ms :tool-ms 0.0 :total-turn-ms model-ms :status :nudged :thinking thinking :code nil}
+                            (map? payload)
+                            (merge (select-keys payload [:prompt-tokens :new-tokens :new-token-ids :prefill-ms :decode-ms :decode-tok-s :decode-ms-tok :total-ms])
+                                   (when-let [tok-s (:decode-tok-s payload)] {:tok-per-sec tok-s})))
               nudge-history-item {:role :user :content nudge-msg}
               nudge-transcript-item {:turn turn :role :user :content nudge-msg}
               history-with-nudge (conj history-with-reply nudge-history-item)
@@ -145,13 +151,16 @@
 
         ;; Case 4: Execute Tool Call
         :else
-        (let [pending {:model-ms model-ms
-                       :thinking thinking
-                       :tool-code tool-code
-                       :tool-name tool-name
-                       :raw-reply raw-reply
-                       :clean-reply clean-reply
-                       :transcript-entry transcript-entry}]
+        (let [pending (cond-> {:model-ms model-ms
+                               :thinking thinking
+                               :tool-code tool-code
+                               :tool-name tool-name
+                               :raw-reply raw-reply
+                               :clean-reply clean-reply
+                               :transcript-entry transcript-entry}
+                        (map? payload)
+                        (merge (select-keys payload [:prompt-tokens :new-tokens :new-token-ids :prefill-ms :decode-ms :decode-tok-s :decode-ms-tok :total-ms])
+                               (when-let [tok-s (:decode-tok-s payload)] {:tok-per-sec tok-s})))]
           [(assoc state
                   :history history-with-reply
                   :pending-turn pending)
@@ -164,12 +173,15 @@
           early-exit? (or (= in-port :early-exit-obs) (boolean (:early-exit? eval-res)))
           err-turn? (and (not= in-port :early-exit-obs) (or (= in-port :rejected-obs) (not= :success (:status eval-res))))
           new-consec-errors (if err-turn? (inc (:consecutive-errors state)) 0)
-          telem-entry {:turn turn
-                       :model-ms (or (:model-ms pending) 0.0)
-                       :tool-ms (double (or (:tool-ms eval-res) 0.0))
-                       :status (:status eval-res)
-                       :thinking (:thinking pending)
-                       :code (:tool-code pending)}
+          telem-entry (cond-> {:turn turn
+                               :model-ms (or (:model-ms pending) 0.0)
+                               :tool-ms (double (or (:tool-ms eval-res) 0.0))
+                               :total-turn-ms (+ (double (or (:model-ms pending) 0.0)) (double (or (:tool-ms eval-res) 0.0)))
+                               :status (:status eval-res)
+                               :thinking (:thinking pending)
+                               :code (:tool-code pending)}
+                        pending
+                        (merge (select-keys pending [:prompt-tokens :new-tokens :new-token-ids :prefill-ms :decode-ms :decode-tok-s :decode-ms-tok :total-ms :tok-per-sec])))
           new-telemetry (conj (:turn-telemetry state) telem-entry)
           tool-name (or (:tool-name pending) "eval_clojure")
           syntax (:tool-syntax state :fenced)
@@ -350,6 +362,11 @@
   ([] (autoregressive-decoder-graph {}))
   ([opts]
    (let [eos-id (:eos-id opts)
+         stop-ids (cond
+                    (set? (:eos-ids opts)) (cond-> (:eos-ids opts) (some? (:eos-id opts)) (conj (:eos-id opts)))
+                    (sequential? (:eos-ids opts)) (cond-> (set (:eos-ids opts)) (some? (:eos-id opts)) (conj (:eos-id opts)))
+                    (some? (:eos-id opts)) #{(:eos-id opts)}
+                    :else #{})
          max-new-tokens (long (or (:max-new-tokens opts) 16))]
      [:agent {:id :autoregressive-decoder
               :ins [:tokens-in]
@@ -359,6 +376,7 @@
                :init-state {:pos 0
                             :max-new-tokens max-new-tokens
                             :eos-id eos-id
+                            :eos-ids stop-ids
                             :generated []
                             :prompt-tokens []
                             :done? false}
@@ -392,17 +410,24 @@
                                  [(assoc state :generated next-gen :pos next-pos)
                                   {:step-in [{:inputs [token] :pos next-pos}]}]))))))}]
       [:mealy {:id :logits-sampler
-               :init-state {:temperature (or (:temperature opts) 0.0)}
+               :init-state {:temperature (or (:temperature opts) 0.0)
+                            :seen-tokens []}
                :ins [:logits]
                :outs [:token]
                :step (fn [state _in-port payload]
-                       (let [token (greedy-argmax payload)]
-                         [state {:token [token]}]))}]
+                       (let [sample-fn (:sample-fn opts)
+                             token (long (if sample-fn
+                                           (try
+                                             (sample-fn payload (:seen-tokens state))
+                                             (catch clojure.lang.ArityException _
+                                               (sample-fn payload)))
+                                           (greedy-argmax payload)))]
+                         [(update state :seen-tokens conj token) {:token [token]}]))}]
       [:verify {:id :stop-gate
                 :ins [:in]
                 :outs [:continue :eos]
                 :pred (fn [token]
-                        (if (and (some? eos-id) (= token eos-id))
+                        (if (contains? stop-ids token)
                           [:eos token]
                           [:continue token]))}]
       [:conn [:agent/in :tokens-in] [:seq-state :prompt-tokens]]
@@ -445,7 +470,9 @@
                            :type :compute/einsum
                            :backend (or (:backend opts) :uop-cpu)
                            :session (:session opts)
-                           :generate-fn (:generate-fn opts)}]
+                           :generate-fn (:generate-fn opts)
+                           :forward-fn (:forward-fn opts)
+                           :decode (:decode opts)}]
                     [:cap {:id :sci-sandbox
                            :type :eval/sci
                            :sandbox (or (:sandbox opts) :agent)
@@ -495,7 +522,8 @@
 (defn execute-agent-session
   "Executes a session via coding-agent-graph and returns a backward-compatible transcript vector with metadata."
   [session-or-fn initial-prompt custom-sci-ctx-or-opts custom-tool-eval-fn]
-  (let [opts (cond
+  (let [loop-start-t (System/nanoTime)
+        opts (cond
                (map? custom-sci-ctx-or-opts)
                (if (map? session-or-fn)
                  (merge (or (:opts session-or-fn) session-or-fn) custom-sci-ctx-or-opts)
@@ -508,6 +536,9 @@
         session (if (map? session-or-fn) session-or-fn {})
         scripted-atom (when-let [scripted (:scripted-responses opts)]
                         (atom (vec scripted)))
+        custom-gen? (or (fn? session-or-fn)
+                        (some? (:generate-fn opts))
+                        (some? scripted-atom))
         gen-fn (cond
                  (fn? session-or-fn)
                  (fn [_sess prompt] (session-or-fn prompt))
@@ -524,10 +555,7 @@
                        resp
                        {:text (or resp "") :prompt-tokens 10 :new-tokens 10})))
 
-                 :else
-                 (when-let [res-fn (try (requiring-resolve 'einsum.models.gemma4.runtime/generate-new-tokens-and-text)
-                                        (catch Throwable _ nil))]
-                   res-fn))
+                 :else nil)
         tool-eval (or custom-tool-eval-fn (:tool-eval-fn opts) agent-core/eval-tool-code)
         sci-ctx (or (when-not (map? custom-sci-ctx-or-opts) custom-sci-ctx-or-opts)
                     (:sci-ctx opts)
@@ -554,10 +582,16 @@
                                      (tool-eval c-str turn-num)
                                      (catch clojure.lang.ArityException _
                                        (tool-eval c-str))))))))))
-        merged-opts (assoc opts
-                           :generate-fn (fn [prompt] (gen-fn session prompt))
-                           :eval-fn eval-wrapper
-                           :tool-eval-fn eval-wrapper)
+        merged-opts (cond-> (assoc opts
+                                   :eval-fn eval-wrapper
+                                   :tool-eval-fn eval-wrapper)
+                      custom-gen?
+                      (assoc :generate-fn (fn [prompt] (gen-fn session prompt)))
+
+                      (not custom-gen?)
+                      (assoc :generate-fn nil
+                             :session (assoc session :opts (merge (:opts session) opts))
+                             :decode (or (:decode opts) (:decode (:opts session)) :host)))
         graph-ast (coding-agent-graph merged-opts)
         dev-ast (default-agent-device merged-opts)
         bound-graph (binder/bind-agent graph-ast dev-ast merged-opts)
@@ -568,6 +602,9 @@
         telem (get-in executed [:outbox :telemetry-out])
         transcript (vec (or (:transcript final-val) []))
         early-exit? (boolean (:early-exit? final-val))]
+    (when (or (not (:quiet merged-opts)) (:profile-out merged-opts))
+      (let [telem-entries (or (:turn-telemetry final-val) telem [])]
+        (agent-core/print-and-save-telemetry! (atom telem-entries) loop-start-t (boolean (:quiet merged-opts)) (:profile-out merged-opts))))
     (with-meta transcript
       {:turn-telemetry (or (:turn-telemetry final-val) telem [])
        :history (or (:history final-val) [])

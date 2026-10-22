@@ -53,7 +53,9 @@
       (string? (:sandbox opts))
       (update :sandbox #(keyword (str/replace % #"^:+" "")))
       (string? (:tool-syntax opts))
-      (update :tool-syntax #(keyword (str/replace % #"^:+" ""))))))
+      (update :tool-syntax #(keyword (str/replace % #"^:+" "")))
+      (string? (:decode opts))
+      (update :decode #(keyword (str/replace % #"^:+" ""))))))
 
 (defn -main
   "CLI Entrypoint for Gemma 4 Agent."
