@@ -18,7 +18,7 @@
 
 (def DEFAULT-BENCH-OPTS
   {:model ".models/gemma-4-E2B-it-int4"
-   :backend :rocm
+   :backend :uop-rocm
    :mode :all ;; :single-shot, :agentic, or :all
    :tool-syntax :native
    :tasks "all"

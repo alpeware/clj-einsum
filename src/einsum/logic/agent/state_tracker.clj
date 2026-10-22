@@ -74,8 +74,12 @@
         _ (doseq [[t x] tests]
             (aset-float t-cov (+ (* (long t) n-long) (long x)) 1.0))
 
-        ;; Initial transitive closure A_0 = P_dep
+        ;; Initial transitive closure A_0
         a-curr (aclone p-dep)
+        _ (doseq [y (range n-long)
+                  x (compute-affected-entities-host deps #{y} n-long)
+                  :when (not= x y)]
+            (aset-float a-curr (+ (* (long x) n-long) (long y)) 1.0))
 
         invars [[:A_prev [:tensor [n-long n-long] :f32]]
                 [:P_dep [:tensor [n-long n-long] :f32]]

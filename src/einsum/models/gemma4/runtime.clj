@@ -812,16 +812,18 @@
                                   (:turboquant-kv opts)
                                   (= (:kv-quant opts) :turboquant)
                                   (= (:kv-quant opts) :turbo-kv)))
+         session (init-inference-session opts)
+         uop? (= (:backend (:ctx session)) :uop)
+         turboquant? (or turboquant? (:turboquant-kv? (:config session)))
          method (or (:method opts)
-                    (if (or turboquant? (and (number? (:temperature opts)) (> (:temperature opts) 0.0)))
+                    (if (or uop? turboquant? (and (number? (:temperature opts)) (> (:temperature opts) 0.0)))
                       :kv-cache
                       :vram-loop))
          vram-loop? (if (contains? opts :vram-loop?)
-                      (:vram-loop? opts)
-                      (and (not turboquant?) (= method :vram-loop)))
+                      (and (not uop?) (:vram-loop? opts))
+                      (and (not uop?) (not turboquant?) (= method :vram-loop)))
          opts (assoc opts :mode :agent :max-seq-len max-seq-len :method method :vram-loop? vram-loop?)
-         session (init-inference-session opts)
-         turboquant? (or turboquant? (:turboquant-kv? (:config session)))
+         session (assoc session :opts opts)
          _ (when-not (:quiet opts)
              (println (format "Pre-compiling Gemma 4 %s graph (max-seq-len=%d%s)..."
                               (if vram-loop? "In-VRAM While Loop" "KV-Cache")
@@ -830,11 +832,10 @@
          exec (if vram-loop?
                 (kernels/compile-in-vram-loop-executable session max-seq-len)
                 (kernels/compile-gemma4-kv-executable session max-seq-len))
-         uop? (= (:backend (:ctx session)) :uop)
          safe-prefill-len (cfg/max-safe-prefill-seq-len (:config session))
          prefill-exec (when (and (not uop?) (not turboquant?) (<= max-seq-len safe-prefill-len))
                         (kernels/compile-gemma4-prefill-executable session max-seq-len))
-         chunked-prefill-exec (when (or (>= max-seq-len 256) uop?)
+         chunked-prefill-exec (when (and (not uop?) (>= max-seq-len 256))
                                 (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len (min max-seq-len 128)))
 
          step-exec (when vram-loop?

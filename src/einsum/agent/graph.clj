@@ -17,6 +17,9 @@
    :max-consecutive-errors (long (or (:max-consecutive-errors opts) 3))
    :consecutive-errors 0
    :system-prompt (or (:system opts) (:system-prompt opts))
+   :tool-declaration (if (contains? opts :tool-declaration)
+                       (:tool-declaration opts)
+                       agent-core/DEFAULT-TOOL-DECLARATION)
    :tool-syntax (keyword (or (:tool-syntax opts) :native))
    :enable-thinking? (boolean (or (:enable-thinking? opts) (:thinking opts)))
    :nudge-on-blind-solution? (if (contains? opts :nudge-on-blind-solution?)
@@ -50,7 +53,7 @@
                             history
                             8
                             (:enable-thinking? state)
-                            nil
+                            (:tool-declaration state)
                             (:tool-syntax state))]
       [(assoc state :history history :turn 1)
        {:llm-req [formatted-prompt]}])
@@ -127,7 +130,7 @@
                            compacted-history
                            8
                            (:enable-thinking? state)
-                           nil
+                           (:tool-declaration state)
                            syntax)]
           [(assoc state
                   :history compacted-history
@@ -253,7 +256,7 @@
                            compacted-history
                            8
                            (:enable-thinking? state)
-                           nil
+                           (:tool-declaration state)
                            syntax)]
           [(assoc state
                   :history compacted-history
@@ -403,6 +406,24 @@
       [:conn [:seq-state :final-seq] [:agent/out :tokens-out]]])))
 
 ;; =============================================================================
+;; 4.1 In-VRAM State Tracker Graph Helper
+;; =============================================================================
+
+(defn state-tracker-agent-graph
+  "Returns a declarative agent graph AST for in-VRAM Datalog state tracking.
+   Connects incoming modified entity sets to the :compute/state-tracker capability
+   and routes invalidated entity sets to the agent output."
+  ([] (state-tracker-agent-graph {}))
+  ([opts]
+   [:agent {:id (or (:id opts) :state-tracker-agent)
+            :ins [:modified-in]
+            :outs [:invalidated-out]
+            :requires {:tracker (merge {:type :compute/state-tracker}
+                                       (when (:tracker opts) (:tracker opts)))}}
+    [:conn [:agent/in :modified-in] [:cap/tracker :step]]
+    [:conn [:cap/tracker :invalidated] [:agent/out :invalidated-out]]]))
+
+;; =============================================================================
 ;; 5. Default Workstation Device & Execution Helpers
 ;; =============================================================================
 
@@ -410,22 +431,30 @@
   "Returns a Hiccup vector defining a standard workstation device for agent execution."
   ([] (default-agent-device {}))
   ([opts]
-   [:device {:id (or (:device-id opts) :local-workstation)}
-    [:cap {:id :storage-cas
-           :type :storage/cas}]
-    [:cap {:id :einsum-llm
-           :type :compute/einsum
-           :backend (or (:backend opts) :uop-cpu)
-           :session (:session opts)
-           :generate-fn (:generate-fn opts)}]
-    [:cap {:id :sci-sandbox
-           :type :eval/sci
-           :sandbox (or (:sandbox opts) :agent)
-           :timeout-ms (or (:timeout-ms opts) 5000)
-           :eval-fn (or (:eval-fn opts) (:tool-eval-fn opts))}]
-    [:cap {:id :terminal-out
-           :type :io/terminal
-           :quiet? (if (contains? opts :quiet?) (:quiet? opts) true)}]]))
+   (let [base-caps [[:cap {:id :storage-cas
+                           :type :storage/cas}]
+                    [:cap {:id :einsum-llm
+                           :type :compute/einsum
+                           :backend (or (:backend opts) :uop-cpu)
+                           :session (:session opts)
+                           :generate-fn (:generate-fn opts)}]
+                    [:cap {:id :sci-sandbox
+                           :type :eval/sci
+                           :sandbox (or (:sandbox opts) :agent)
+                           :timeout-ms (or (:timeout-ms opts) 5000)
+                           :eval-fn (or (:eval-fn opts) (:tool-eval-fn opts))}]
+                    [:cap {:id :terminal-out
+                           :type :io/terminal
+                           :quiet? (if (contains? opts :quiet?) (:quiet? opts) true)}]]
+         tracker-cap (when (or (:enable-state-tracker? opts) (:tracker-deps opts))
+                       [:cap {:id :state-tracker
+                              :type :compute/state-tracker
+                              :n (or (:tracker-n opts) 16)
+                              :deps (:tracker-deps opts)
+                              :tests (:tracker-tests opts)
+                              :backend (or (:tracker-backend opts) :interpreter)}])]
+     (into [:device {:id (or (:device-id opts) :local-workstation)}]
+           (if tracker-cap (conj base-caps tracker-cap) base-caps)))))
 
 (defn run-coding-agent-graph
   "Binds and executes the declarative coding agent graph on a device.
@@ -505,16 +534,18 @@
                                                     [(second args) 1])
                                                 1 [(first args) 1]
                                                 ["" 1])]
-                         (try
-                           (tool-eval sci-ctx c-str turn-num)
-                           (catch clojure.lang.ArityException _
-                             (try
-                               (tool-eval sci-ctx c-str)
-                               (catch clojure.lang.ArityException _
-                                 (try
-                                   (tool-eval c-str turn-num)
-                                   (catch clojure.lang.ArityException _
-                                     (tool-eval c-str)))))))))
+                         (if (= tool-eval agent-core/eval-tool-code)
+                           (tool-eval sci-ctx c-str (or (:timeout-ms opts) 5000))
+                           (try
+                             (tool-eval sci-ctx c-str turn-num)
+                             (catch clojure.lang.ArityException _
+                               (try
+                                 (tool-eval sci-ctx c-str)
+                                 (catch clojure.lang.ArityException _
+                                   (try
+                                     (tool-eval c-str turn-num)
+                                     (catch clojure.lang.ArityException _
+                                       (tool-eval c-str))))))))))
         merged-opts (assoc opts
                            :generate-fn (fn [prompt] (gen-fn session prompt))
                            :eval-fn eval-wrapper

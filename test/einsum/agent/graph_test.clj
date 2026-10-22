@@ -7,7 +7,8 @@
             [einsum.agent.core :as agent-core]
             [einsum.agent.graph :as graph]
             [einsum.graph.binder :as binder]
-            [einsum.graph.runtime :as runtime]))
+            [einsum.graph.runtime :as runtime]
+            [einsum.logic.agent.state-tracker :as state-tracker]))
 
 ;; -----------------------------------------------------------------------------
 ;; 1. Property Test: Coding Agent Turn Bounds and Event-Log Hash Chain
@@ -183,3 +184,79 @@
           out (first (get-in executed [:outbox :final-tokens]))]
       (is (vector? out))
       (is (= 3 (count out))))))
+
+;; -----------------------------------------------------------------------------
+;; 7. Generative Property: In-VRAM State Tracker Capability Parity
+;; -----------------------------------------------------------------------------
+
+(defspec prop-state-tracker-capability-host-parity 30
+  (prop/for-all [dep-count (gen/choose 1 6)
+                 mod-count (gen/choose 1 4)]
+                (let [n 8
+                      cand-pairs (for [x (range n) y (range n) :when (not= x y)] [x y])
+                      deps (set (take dep-count (shuffle cand-pairs)))
+                      cand-tests (for [t (range n) x (range n) :when (not= t x)] [t x])
+                      tests (set (take dep-count (shuffle cand-tests)))
+                      mod-cand (shuffle (range n))
+                      modified (set (take mod-count mod-cand))
+                      expected-affected (state-tracker/compute-affected-entities-host deps modified n)
+                      agent-ast (graph/state-tracker-agent-graph)
+                      dev-ast [:device {:id :tracker-dev}
+                               [:cap {:id :state-tracker
+                                      :type :compute/state-tracker
+                                      :n n
+                                      :deps deps
+                                      :tests tests
+                                      :backend :interpreter}]]
+                      bound (binder/bind-agent agent-ast dev-ast {})
+                      executed (-> bound
+                                   (runtime/enqueue-input :modified-in modified)
+                                   runtime/run-graph!)
+                      out (first (get-in executed [:outbox :invalidated-out]))]
+                  (and (map? out)
+                       (= expected-affected (:affected-files out))))))
+
+;; -----------------------------------------------------------------------------
+;; 8. Unit Tests: Coding Agent and State Tracker Composition
+;; -----------------------------------------------------------------------------
+
+(deftest test-coding-agent-with-state-tracker-composition
+  (testing "Composed workflow executing coding-agent-graph and state-tracker-agent-graph"
+    (let [coding-ast (graph/coding-agent-graph {:max-turns 2})
+          tracker-ast (graph/state-tracker-agent-graph)
+          composite-agent
+          [:agent {:id :workflow-orchestrator
+                   :ins [:user-prompt :changed-files]
+                   :outs [:code-result :invalidated-tests]
+                   :requires {:llm {:type :compute/einsum}
+                              :sandbox {:type :eval/sci}
+                              :tracker {:type :compute/state-tracker}}}
+           coding-ast
+           tracker-ast
+           [:conn [:agent/in :user-prompt] [:coding-agent :prompt-in]]
+           [:conn [:coding-agent :final-out] [:agent/out :code-result]]
+           [:conn [:agent/in :changed-files] [:state-tracker-agent :modified-in]]
+           [:conn [:state-tracker-agent :invalidated-out] [:agent/out :invalidated-tests]]]
+          mock-gen (fn [_prompt] "Final answer: done")
+          mock-eval (fn [_code _turn] {:status :success :output "done"})
+          dev-ast [:device {:id :full-dev}
+                   [:cap {:id :llm :type :compute/einsum :generate-fn mock-gen}]
+                   [:cap {:id :sandbox :type :eval/sci :eval-fn mock-eval}]
+                   [:cap {:id :tracker :type :compute/state-tracker
+                          :n 8 :deps #{[0 1] [1 2]} :tests #{[5 0] [6 1]}
+                          :backend :interpreter}]]
+          bound (binder/bind-agent composite-agent dev-ast {})
+          executed (-> bound
+                       (runtime/enqueue-input :user-prompt "Implement feature")
+                       (runtime/enqueue-input :changed-files #{2})
+                       runtime/run-graph!)
+          code-out (first (get-in executed [:outbox :code-result]))
+          tracker-out (first (get-in executed [:outbox :invalidated-tests]))]
+      (is (map? code-out))
+      (is (= "Final answer: done" (:final-answer code-out)))
+      (is (map? tracker-out))
+      (is (contains? (:affected-files tracker-out) 0))
+      (is (contains? (:affected-files tracker-out) 1))
+      (is (contains? (:affected-files tracker-out) 2))
+      (is (contains? (:affected-tests tracker-out) 5))
+      (is (contains? (:affected-tests tracker-out) 6)))))

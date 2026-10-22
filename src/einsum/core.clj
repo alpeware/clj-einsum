@@ -65,6 +65,26 @@
   []
   (or *default-context* (init-backend! :uop-cpu {:quiet? true})))
 
+(defn create-context
+  "Creates and returns a new backend context for `opts` (e.g. `{:backend :interpreter}`).
+   Does not mutate the global default context."
+  ([] (create-context {:backend :interpreter}))
+  ([opts]
+   (let [target (or (:backend opts) :interpreter)]
+     (cond
+       (contains? #{:interpreter :interp} target)
+       {:backend :interpreter
+        :target :interpreter
+        :platform "interpreter"
+        :client nil
+        :destroy-fn (fn [_ _] nil)}
+
+       (contains? #{:uop :uop-cpu :uop-rocm} target)
+       (uop-rt/init-uop-context! target (assoc opts :quiet? true))
+
+       :else
+       (uop-rt/init-uop-context! :uop-cpu (assoc opts :quiet? true))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Classic Einsum Spec & Planning
 ;; -----------------------------------------------------------------------------

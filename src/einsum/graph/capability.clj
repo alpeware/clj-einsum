@@ -4,8 +4,9 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [einsum.agent.core :as agent-core]
-            [einsum.core :as einsum]
+            [einsum.core :as core]
             [einsum.graph.cas :as cas]
+            [einsum.logic.agent.state-tracker :as state-tracker]
             [einsum.models.gemma4.runtime :as gemma4-rt]))
 
 ;; =============================================================================
@@ -101,13 +102,15 @@
                                             :else
                                             [(str (or resolved-payload "")) nil])
                           t0 (System/nanoTime)
-                          res (try
-                                (eval-fn sci-ctx code-str (or turn timeout-ms))
-                                (catch clojure.lang.ArityException _
-                                  (try
-                                    (eval-fn code-str (or turn timeout-ms))
-                                    (catch clojure.lang.ArityException _
-                                      (eval-fn code-str)))))
+                          res (if (and (= eval-fn agent-core/eval-tool-code) (some? turn))
+                                (eval-fn sci-ctx code-str timeout-ms)
+                                (try
+                                  (eval-fn sci-ctx code-str (or turn timeout-ms))
+                                  (catch clojure.lang.ArityException _
+                                    (try
+                                      (eval-fn code-str (or turn timeout-ms))
+                                      (catch clojure.lang.ArityException _
+                                        (eval-fn code-str))))))
                           tool-ms (/ (- (System/nanoTime) t0) 1e6)
                           ret (assoc res :tool-ms tool-ms :code code-str :turn turn)]
                       {:result [ret]}))
@@ -276,11 +279,11 @@
                               cache (or (get @(:state this) :kernel-cache) (atom {}))
                               cache-key [ast b]
                               kernel (or (get @cache cache-key)
-                                         (let [ctx (einsum/init-backend! b)
-                                               k (einsum/compile-kernel ctx "forward_kernel" ast)]
+                                         (let [ctx (core/init-backend! b)
+                                               k (core/compile-kernel ctx "forward_kernel" ast)]
                                            (swap! cache assoc cache-key k)
                                            k))
-                              out (apply einsum/execute kernel resolved-inputs)]
+                              out (apply core/execute kernel resolved-inputs)]
                           {:logits [out] :out [out]})
 
                         ;; Default: if :ast is present, default to forward; else generate
@@ -298,9 +301,9 @@
                                                           x))
                                                       raw-inputs)
                                 b (or (:backend cap-attrs) :uop-cpu)
-                                ctx (einsum/init-backend! b)
-                                kernel (einsum/compile-kernel ctx "forward_kernel" ast)
-                                out (apply einsum/execute kernel resolved-inputs)]
+                                ctx (core/init-backend! b)
+                                kernel (core/compile-kernel ctx "forward_kernel" ast)
+                                out (apply core/execute kernel resolved-inputs)]
                             {:logits [out] :out [out]})
                           (let [prompt (if (map? payload) (:prompt payload) (str payload))
                                 t0 (System/nanoTime)
@@ -315,6 +318,68 @@
       :state state
       :start-fn start-fn
       :invoke-fn invoke-fn})))
+
+;; -----------------------------------------------------------------------------
+;; 2.5 :compute/state-tracker (In-VRAM Datalog Fixpoint State Tracker)
+;; -----------------------------------------------------------------------------
+
+(defmethod build-capability :compute/state-tracker
+  [cap-attrs device-ctx]
+  (let [id (:id cap-attrs)
+        tracker-atom (atom (:tracker-session cap-attrs))
+        state (atom {:device-ctx device-ctx
+                     :tracker-atom tracker-atom})
+        start-fn (fn [this]
+                   (when-not @tracker-atom
+                     (let [b (or (:backend cap-attrs) :interpreter)
+                           ctx (core/create-context {:backend b})
+                           n (or (:n cap-attrs) 16)
+                           session (state-tracker/init-state-tracker ctx n cap-attrs)]
+                       (reset! tracker-atom session)))
+                   (swap! (:state this) assoc :tracker-session @tracker-atom)
+                   this)
+        invoke-fn (fn [this _in-port payload cas-store]
+                    (let [effective-store (or cas-store (get @(:state this) :cas-store) (:cas-store device-ctx))
+                          resolved-payload (if (and effective-store (cas/cas-ptr? payload))
+                                             (cas/resolve-ptr effective-store payload)
+                                             payload)
+                          session (or @tracker-atom
+                                      (let [b (or (:backend cap-attrs) :interpreter)
+                                            ctx (core/create-context {:backend b})
+                                            n (or (:n cap-attrs) 16)
+                                            s (state-tracker/init-state-tracker ctx n cap-attrs)]
+                                        (reset! tracker-atom s)
+                                        (swap! (:state this) assoc :tracker-session s)
+                                        s))
+                          modified-set (cond
+                                         (and (map? resolved-payload) (contains? resolved-payload :modified))
+                                         (set (:modified resolved-payload))
+
+                                         (set? resolved-payload)
+                                         resolved-payload
+
+                                         (coll? resolved-payload)
+                                         (set resolved-payload)
+
+                                         (number? resolved-payload)
+                                         #{(long resolved-payload)}
+
+                                         :else
+                                         #{})
+                          res (state-tracker/step-state-tracker! session modified-set)]
+                      {:invalidated [res] :out [res]}))
+        stop-fn (fn [this]
+                  (reset! tracker-atom nil)
+                  (swap! (:state this) dissoc :tracker-session)
+                  nil)]
+    (make-capability-instance
+     {:id id
+      :type :compute/state-tracker
+      :attrs cap-attrs
+      :state state
+      :start-fn start-fn
+      :invoke-fn invoke-fn
+      :stop-fn stop-fn})))
 
 (defmethod build-capability :default
   [cap-attrs device-ctx]

@@ -56,7 +56,7 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
    :top-k 10
    :repetition-penalty 1.0
    :method nil
-   :backend :rocm
+   :backend :uop-rocm
    :precision :bf16
    :thinking false
    :out "scratch/output_agent_loop.txt"
