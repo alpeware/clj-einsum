@@ -2,6 +2,7 @@
   "Main CLI entrypoint for running the complete test suite or targeted sub-groups."
   (:require [einsum.agent-test]
             [einsum.core-test]
+            [einsum.graph.runtime-test]
             [einsum.hardware-test]
             [einsum.kb.device-test]
             [einsum.kb.rbac-test]
@@ -120,6 +121,7 @@
    'einsum.quant.turboquant-test
    'einsum.models.gemma4-test
    'einsum.core-test
+   'einsum.graph.runtime-test
    'experiments.gate3-evals.clojure-bench-test
    'experiments.gate3-evals.multipl-e-test
    'experiments.gate3-evals.prompt-tuning-v1-test
