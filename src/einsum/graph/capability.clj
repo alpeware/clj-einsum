@@ -101,7 +101,13 @@
                                             :else
                                             [(str (or resolved-payload "")) nil])
                           t0 (System/nanoTime)
-                          res (eval-fn sci-ctx code-str timeout-ms)
+                          res (try
+                                (eval-fn sci-ctx code-str (or turn timeout-ms))
+                                (catch clojure.lang.ArityException _
+                                  (try
+                                    (eval-fn code-str (or turn timeout-ms))
+                                    (catch clojure.lang.ArityException _
+                                      (eval-fn code-str)))))
                           tool-ms (/ (- (System/nanoTime) t0) 1e6)
                           ret (assoc res :tool-ms tool-ms :code code-str :turn turn)]
                       {:result [ret]}))

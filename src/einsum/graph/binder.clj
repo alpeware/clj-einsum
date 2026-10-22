@@ -112,34 +112,40 @@
          bound-caps (reduce
                      (fn [acc [req-key req-spec]]
                        (let [norm-key (keyword (name req-key))
-                             cap-entries (vals (:caps device-inst))
-                             matching-cap (some (fn [entry]
-                                                  (when (match-capability? req-spec (:attrs entry))
-                                                    entry))
-                                                cap-entries)]
-                         (cond
-                           matching-cap
-                           (let [has-overrides? (and (map? req-spec)
-                                                     (some #(contains? req-spec %)
-                                                           [:ast :in :out :generate-fn :eval-fn :session :sandbox :timeout-ms :backend]))
-                                 cap-inst (if has-overrides?
-                                            (let [specialized-attrs (merge (:attrs matching-cap) (dissoc req-spec :optional?))
-                                                  device-ctx {:cas-store (:cas-store device-inst) :device-id (:id device-inst)}]
-                                              (cap/start-cap! (cap/build-capability specialized-attrs device-ctx)))
-                                            (:instance matching-cap))]
-                             (-> acc
-                                 (assoc norm-key cap-inst)
-                                 (assoc (keyword "cap" (name req-key)) cap-inst)))
+                             override-cap (or (get-in opts [:capabilities req-key])
+                                              (get-in opts [:capabilities norm-key]))]
+                         (if override-cap
+                           (-> acc
+                               (assoc norm-key override-cap)
+                               (assoc (keyword "cap" (name req-key)) override-cap))
+                           (let [cap-entries (vals (:caps device-inst))
+                                 matching-cap (some (fn [entry]
+                                                      (when (match-capability? req-spec (:attrs entry))
+                                                        entry))
+                                                    cap-entries)]
+                             (cond
+                               matching-cap
+                               (let [has-overrides? (and (map? req-spec)
+                                                         (some #(contains? req-spec %)
+                                                               [:ast :in :out :generate-fn :eval-fn :session :sandbox :timeout-ms :backend]))
+                                     cap-inst (if has-overrides?
+                                                (let [specialized-attrs (merge (:attrs matching-cap) (dissoc req-spec :optional?))
+                                                      device-ctx {:cas-store (:cas-store device-inst) :device-id (:id device-inst)}]
+                                                  (cap/start-cap! (cap/build-capability specialized-attrs device-ctx)))
+                                                (:instance matching-cap))]
+                                 (-> acc
+                                     (assoc norm-key cap-inst)
+                                     (assoc (keyword "cap" (name req-key)) cap-inst)))
 
-                           (and (map? req-spec) (:optional? req-spec))
-                           acc
+                               (and (map? req-spec) (:optional? req-spec))
+                               acc
 
-                           :else
-                           (throw (ex-info "Unsatisfied capability requirement"
-                                           {:agent (:id agent-attrs)
-                                            :requirement req-key
-                                            :spec req-spec
-                                            :available-caps (vec (keys (:caps device-inst)))})))))
+                               :else
+                               (throw (ex-info "Unsatisfied capability requirement"
+                                               {:agent (:id agent-attrs)
+                                                :requirement req-key
+                                                :spec req-spec
+                                                :available-caps (vec (keys (:caps device-inst)))})))))))
                      {}
                      all-reqs)
          graph-opts (assoc (or opts {})

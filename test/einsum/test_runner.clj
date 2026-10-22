@@ -1,6 +1,7 @@
 (ns einsum.test-runner
   "Main CLI entrypoint for running the complete test suite or targeted sub-groups."
   (:require [einsum.agent-test]
+            [einsum.agent.graph-test]
             [einsum.core-test]
             [einsum.graph.binder-test]
             [einsum.graph.runtime-test]
@@ -124,6 +125,7 @@
    'einsum.core-test
    'einsum.graph.runtime-test
    'einsum.graph.binder-test
+   'einsum.agent.graph-test
    'experiments.gate3-evals.clojure-bench-test
    'experiments.gate3-evals.multipl-e-test
    'experiments.gate3-evals.prompt-tuning-v1-test

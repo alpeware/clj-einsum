@@ -806,236 +806,36 @@ Syntax rules: use square brackets for bindings and parameters: [x], [k v], vecto
   "Determines whether the blind nudge for Turn 2 should be emitted.
    Optimization 3 (Nudge Short-Circuit): Returns false if candidate code defining fn-name
    is already present in the Turn 1 reply."
-  [{:keys [turn max-turns new-tokens opts history consecutive-errors has-candidate?]}]
-  (and (< turn max-turns)
-       (pos? new-tokens)
-       (:nudge-on-no-tool opts)
-       (not has-candidate?)
-       (not (some #(= (:role %) :tool) history))
-       (not (some #(and (= (:role %) :user)
-                        (str/includes? (or (:content %) "") "Please test your Clojure implementation"))
-                  history))
-       (zero? consecutive-errors)))
+  [{:keys [turn max-turns new-tokens opts history consecutive-errors has-candidate?
+           nudged? nudge-on-blind-solution? clean-reply tool-code]}]
+  (let [nudge-enabled? (if (some? nudge-on-blind-solution?)
+                         (boolean nudge-on-blind-solution?)
+                         (boolean (get opts :nudge-on-no-tool false)))
+        already-nudged? (or (boolean nudged?)
+                            (some #(and (= (:role %) :user)
+                                        (str/includes? (or (:content %) "") "test your Clojure implementation"))
+                                  (or history [])))
+        candidate? (or (boolean has-candidate?)
+                       (and (string? clean-reply)
+                            (or (str/includes? clean-reply "(defn ")
+                                (str/includes? clean-reply "(def "))))]
+    (and (< (or turn 1) (or max-turns 5))
+         (pos? (or new-tokens 10))
+         (nil? tool-code)
+         nudge-enabled?
+         (not already-nudged?)
+         (not candidate?)
+         (not (some #(= (:role %) :tool) (or history [])))
+         (zero? (or consecutive-errors 0)))))
 
 (defn run-agent-loop
   "Runs autonomous agent loop with SCI Clojure tool calling across multiple turns.
-   Implements:
-   - Optimization 3: Nudge short-circuit (skips blind nudge if candidate code is present)
-   - Optimization 4: Early exit on public test pass (halts immediately when tool returns early-exit? true)."
-  ([session initial-prompt]
-   (run-agent-loop session initial-prompt nil nil))
-  ([session initial-prompt custom-sci-ctx]
-   (run-agent-loop session initial-prompt custom-sci-ctx nil))
-  ([session initial-prompt custom-sci-ctx custom-tool-eval-fn]
-   (let [{:keys [opts]} session
-         {:keys [system max-turns out quiet profile-out thinking tool-declaration max-consecutive-errors sandbox tool-eval-fn candidate-check-fn tool-syntax compact-history? compact-opts]} opts
-         should-compact? (if (contains? opts :compact-history?) (boolean compact-history?) true)
-         syntax (keyword (or tool-syntax :native))
-         tool-eval (or custom-tool-eval-fn tool-eval-fn eval-tool-code)
-         candidate-fn (or candidate-check-fn (constantly false))
-         thinking? (boolean thinking)
-         tool-decl (if (or (= syntax :xml) (= syntax :fenced))
-                     nil
-                     (or tool-declaration DEFAULT-TOOL-DECLARATION))
-         sys-prompt (or system
-                        (case syntax
-                          :xml DEFAULT-SYSTEM-PROMPT-XML
-                          :fenced DEFAULT-SYSTEM-PROMPT-FENCED
-                          DEFAULT-SYSTEM-PROMPT))
-         sci-ctx (or custom-sci-ctx
-                     (case sandbox
-                       :benchmark (create-benchmark-sci-ctx)
-                       (create-agent-sci-ctx)))
-         consecutive-error-limit (long (or max-consecutive-errors 3))
-         history (atom [{:role :user :content initial-prompt}])
-         transcript (atom [])
-         turn-telemetry (atom [])
-         loop-start-t (System/nanoTime)
-         scripted-atom (when-let [scripted (:scripted-responses opts)]
-                         (atom (vec scripted)))
-         gen-fn (or (:generate-fn opts)
-                    (when scripted-atom
-                      (fn [_sess _prompt]
-                        (let [resp (first @scripted-atom)]
-                          (when (seq @scripted-atom)
-                            (swap! scripted-atom subvec 1))
-                          (if (map? resp)
-                            resp
-                            {:text (or resp "") :prompt-tokens 10 :new-tokens 10}))))
-                    ;; Dynamically resolve gemma4-inf to keep einsum.agent.core decoupled
-                    (when-let [res-fn (try (requiring-resolve 'einsum.models.gemma4.runtime/generate-new-tokens-and-text)
-                                           (catch Throwable _ nil))]
-                      res-fn)
-                    (fn [sess prompt]
-                      (let [f (requiring-resolve 'tools.gemma4-inference/generate-new-tokens-and-text)]
-                        (f sess prompt))))]
-     (loop [turn 1
-            consecutive-errors 0]
-       (if (> turn max-turns)
-         (do
-           (when-not quiet (println (format "\n[Agent] Reached max-turns limit (%d)." max-turns)))
-           (print-and-save-telemetry! turn-telemetry loop-start-t quiet profile-out)
-           (when (seq out)
-             (spit out (str/join "\n\n" (map :content @transcript)))
-             (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
-           (with-meta @transcript {:turn-telemetry @turn-telemetry :history @history}))
-         (do
-           (when-not quiet (println "\n=================================================="))
-           (when-not quiet (println (format "=== Agent Turn %d/%d ===" turn max-turns)))
-           (when-not quiet (println "=================================================="))
-           (let [history-snapshot (if should-compact?
-                                    (compact-agent-history @history compact-opts)
-                                    @history)
-                 formatted-prompt (format-agent-chat-prompt sys-prompt history-snapshot 8 thinking? tool-decl syntax)
-                 _ (when-not quiet (println "Executing Gemma 4 Agent Forward Pass..."))
-                 t-gen-0 (System/nanoTime)
-                 gen-res (gen-fn session formatted-prompt)
-                 t-gen-1 (System/nanoTime)
-                 gen-ms (/ (- t-gen-1 t-gen-0) 1e6)
-                 new-gen (:text gen-res)
-                 prompt-tokens (long (or (:prompt-tokens gen-res) 0))
-                 new-tokens (long (or (:new-tokens gen-res) 0))
-                 tok-per-sec (if (pos? gen-ms) (/ (* new-tokens 1000.0) gen-ms) 0.0)
-                 model-reply (str/trim (str/replace (or new-gen "") #"<bos>|<eos>|<turn\|>|<\|turn>" ""))
-                 thinking-trace (extract-thinking-trace model-reply)
-                 final-response (strip-thinking-trace model-reply)
-                 tool-call (extract-tool-call model-reply syntax)]
-
-             (when (and thinking? (seq thinking-trace) (not quiet))
-               (println "\n--------------------------------------------------")
-               (println "[Agent Thought Process]:")
-               (println thinking-trace)
-               (println "--------------------------------------------------"))
-
-             (let [history-content (sanitize-history-model-content tool-call final-response model-reply)]
-               (swap! history conj {:role :model :content history-content}))
-
-             (swap! transcript conj {:turn turn
-                                     :role :model
-                                     :content (if (seq thinking-trace)
-                                                (str "[Thought Process]\n" thinking-trace "\n\n[Model Response]\n" final-response)
-                                                model-reply)
-                                     :thought thinking-trace
-                                     :response final-response
-                                     :raw model-reply
-                                     :tool-call tool-call})
-
-             (if-not tool-call
-               (let [has-candidate? (boolean (candidate-fn final-response))]
-                 (if (nudge-needed? {:turn turn
-                                     :max-turns max-turns
-                                     :new-tokens new-tokens
-                                     :opts opts
-                                     :history @history
-                                     :consecutive-errors consecutive-errors
-                                     :model-reply final-response
-                                     :has-candidate? has-candidate?})
-                   (let [nudge-msg (or (:nudge-prompt opts)
-                                       (case syntax
-                                         :xml "Please test your Clojure implementation by outputting code in <clojure>...</clojure>."
-                                         :fenced "Please test your Clojure implementation by outputting code in ```clojure ... ```."
-                                         "Please test your Clojure implementation by calling the eval_clojure tool."))]
-                     (when-not quiet (println (format "\n[Agent Loop Nudge (Turn %d)]: Emitting tool reminder." turn)))
-                     (swap! history conj {:role :user :content nudge-msg})
-                     (swap! transcript conj {:turn turn :role :user :content nudge-msg})
-                     (recur (inc turn) consecutive-errors))
-                   (do
-                     (swap! turn-telemetry conj {:turn turn
-                                                 :prompt-tokens prompt-tokens
-                                                 :new-tokens new-tokens
-                                                 :tok-per-sec tok-per-sec
-                                                 :model-ms gen-ms
-                                                 :tool-ms 0.0
-                                                 :total-turn-ms gen-ms})
-                     (when-not quiet
-                       (when (seq final-response)
-                         (println "\n[Agent Response]:")
-                         (println final-response))
-                       (if has-candidate?
-                         (println "\n[Agent] Candidate code present in response. Nudge short-circuited!")
-                         (println "\n[Agent] No further tool calls requested. Task completed!")))
-                     (print-and-save-telemetry! turn-telemetry loop-start-t quiet profile-out)
-                     (when (seq out)
-                       (spit out (str/join "\n\n" (map :content @transcript)))
-                       (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
-                     (with-meta @transcript {:turn-telemetry @turn-telemetry :history @history}))))
-
-               (if (>= consecutive-errors consecutive-error-limit)
-                 ;; Model attempted another tool call after error budget was exhausted
-                 (do
-                   (when-not quiet
-                     (println (format "\n[Agent] Consecutive tool error budget exhausted (%d/%d consecutive errors). Halting loop."
-                                      consecutive-errors consecutive-error-limit)))
-                   (swap! turn-telemetry conj {:turn turn
-                                               :prompt-tokens prompt-tokens
-                                               :new-tokens new-tokens
-                                               :tok-per-sec tok-per-sec
-                                               :model-ms gen-ms
-                                               :tool-ms 0.0
-                                               :total-turn-ms gen-ms})
-                   (print-and-save-telemetry! turn-telemetry loop-start-t quiet profile-out)
-                   (when (seq out)
-                     (spit out (str/join "\n\n" (map :content @transcript)))
-                     (when-not quiet (println (format "  ↳ Saved agent transcript to [%s]" out))))
-                   (with-meta @transcript {:turn-telemetry @turn-telemetry :history @history}))
-
-                 (let [tool-code (:code tool-call)
-                       tool-name (:name tool-call)
-                       _ (when-not quiet
-                           (println "\n--------------------------------------------------")
-                           (println (format "[Agent Tool Call (%s -> SCI Clojure)]:" tool-name))
-                           (println (or tool-code "<no code>"))
-                           (println "--------------------------------------------------"))
-                       t-tool-0 (System/nanoTime)
-                       eval-res (if (seq tool-code)
-                                  (try
-                                    (tool-eval sci-ctx tool-code turn)
-                                    (catch clojure.lang.ArityException e
-                                      (if (= 3 (.actual e))
-                                        (tool-eval sci-ctx tool-code)
-                                        (throw e))))
-                                  {:status :error :output "Error: No code provided to eval_clojure."})
-                       t-tool-1 (System/nanoTime)
-                       tool-ms (/ (- t-tool-1 t-tool-0) 1e6)
-                       turn-total-ms (+ gen-ms tool-ms)
-                       new-consecutive-errors (if (= (:status eval-res) :error)
-                                                (inc consecutive-errors)
-                                                0)
-                       error-budget-reached? (and (= (:status eval-res) :error)
-                                                  (>= new-consecutive-errors consecutive-error-limit))
-                       early-exit? (boolean (:early-exit? eval-res))
-                       augmented-res (if error-budget-reached?
-                                       (assoc eval-res :system_note
-                                              (format "Consecutive tool error limit (%d) reached. Tool execution is now disabled. Provide your final answer in plain text based on the observations collected so far without calling further tools."
-                                                      consecutive-error-limit))
-                                       eval-res)
-                       obs-str (format-tool-response tool-name augmented-res syntax)]
-
-                   (swap! turn-telemetry conj {:turn turn
-                                               :prompt-tokens prompt-tokens
-                                               :new-tokens new-tokens
-                                               :tok-per-sec tok-per-sec
-                                               :model-ms gen-ms
-                                               :tool-ms tool-ms
-                                               :total-turn-ms turn-total-ms})
-                   (when-not quiet
-                     (println "\n[Tool Observation Output]:")
-                     (println (:output eval-res))
-                     (println (format "  ↳ [Turn %d Latency: Model=%.2f ms (%d tok, %.1f tok/s), Tool=%.2f ms, Total=%.2f ms]"
-                                      turn gen-ms new-tokens tok-per-sec tool-ms turn-total-ms)))
-
-                   (swap! history conj {:role :tool :content obs-str})
-                   (swap! transcript conj {:turn turn :role :tool :content obs-str})
-                   (when (seq out)
-                     (spit out (str/join "\n\n" (map :content @transcript))))
-
-                   (if early-exit?
-                     (do
-                       (when-not quiet
-                         (println (format "\n[Agent Loop Early Exit (Turn %d)]: All public tests passed! Terminating loop." turn)))
-                       (print-and-save-telemetry! turn-telemetry loop-start-t quiet profile-out)
-                       (with-meta @transcript {:turn-telemetry @turn-telemetry
-                                               :history @history
-                                               :early-exit? true
-                                               :early-exit-reason :public-pass}))
-                     (recur (inc turn) new-consecutive-errors))))))))))))
+   Executes via Declarative Coding Agent Graph (einsum.agent.graph) while maintaining
+   100% backward compatibility with session callers."
+  ([session-or-fn initial-prompt]
+   (run-agent-loop session-or-fn initial-prompt nil nil))
+  ([session-or-fn initial-prompt custom-sci-ctx-or-opts]
+   (run-agent-loop session-or-fn initial-prompt custom-sci-ctx-or-opts nil))
+  ([session-or-fn initial-prompt custom-sci-ctx-or-opts custom-tool-eval-fn]
+   (let [exec-fn (requiring-resolve 'einsum.agent.graph/execute-agent-session)]
+     (exec-fn session-or-fn initial-prompt custom-sci-ctx-or-opts custom-tool-eval-fn))))
