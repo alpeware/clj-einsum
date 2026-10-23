@@ -464,4 +464,22 @@
           (is (= (:node-states executed) (:node-states replayed-parent)))
           (is (= (:outbox executed) (:outbox replayed-parent)))
           (is (= 2 (count (:sub-replays replayed-parent))))
-          (is (every? runtime/verify-event-log-chain (map :event-log (:sub-replays replayed-parent)))))))))
+          (is (every? runtime/verify-event-log-chain (map :event-log (:sub-replays replayed-parent)))))
+
+        ;; 7. Verify replay-graph fails loudly when :sub-event-log is present without :sub-hiccup
+        (let [stripped-log (mapv (fn [env]
+                                   (if (get-in env [:event/meta :sub-event-log])
+                                     (update env :event/meta dissoc :sub-hiccup)
+                                     env))
+                                 parent-log)]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                                #"Cannot replay :sub-event-log without :sub-hiccup"
+                                (runtime/replay-graph agent-ast stripped-log))))
+
+        ;; 8. Verify unified build-decode-policy shared across host and graph decode paths
+        (let [policy (gemma4-rt/build-decode-policy t2-session {:max-new-tokens 10 :eos-ids #{1 106 107}} [10 20] 8)]
+          (is (= 5 (:max-new-tokens policy)))
+          (is (= 1 (:eos-id policy)))
+          (is (= #{1 106 107} (:eos-ids policy)))
+          (is (true? ((:stop-token? policy) 106)))
+          (is (false? ((:stop-token? policy) 201))))))))

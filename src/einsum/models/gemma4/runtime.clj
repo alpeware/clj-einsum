@@ -765,13 +765,97 @@
       :vocab-size vocab-size
       :weight-dt weight-dt})))
 
+(defn build-decode-policy
+  "Builds a unified autoregressive sampling and stop-token policy map shared across
+   both the host KV-cache decode loop (`run-host-kv-decode-loop!`) and the fractal
+   graph decoder (`autoregressive-decoder-graph`):
+   - `:max-new-tokens`: bounded by `max-seq-len - 1 - prompt-count` when `max-seq-len` is present.
+   - `:eos-id`: primary EOS token ID from the tokenizer.
+   - `:eos-ids`: set of all stop token IDs (`GEMMA4-STOP-TOKEN-IDS` + `eos-id`, or custom `:eos-ids`).
+   - `:stop-token?`: predicate `(fn [tok-id])` returning true if `tok-id` is in `:eos-ids`.
+   - `:temperature`: sampling temperature (double).
+   - `:sample-fn`: optional custom `(fn [logits seen-tokens])` for `autoregressive-decoder-graph`.
+   - `:select-token-fn`: unified `(fn [logits-data seen-tokens])` returning the next token ID (long).
+   Note: Stop tokens (`<eos>`, `<end_of_turn>`, `<turn|>`) terminate decoding before being
+   appended to `:new-token-ids` across all decode paths (`:host`, `:graph`, `:vram-loop`)."
+  [session eff-opts clamped-prompt-ids max-seq-len]
+  (let [{:keys [tokenizer]} session
+        tok-eos-id (long (or (when tokenizer (eos-id tokenizer)) 1))
+        raw-max-new (long (or (:max-new-tokens eff-opts) 256))
+        has-seq-bound? (or (some? max-seq-len)
+                           (some? (:max-seq-len session))
+                           (some? (:max-seq-len eff-opts))
+                           (some? (get-in session [:config :max-seq-len])))
+        eff-seq-len (long (or max-seq-len (:max-seq-len session) (:max-seq-len eff-opts) 2048))
+        max-new-tokens (if has-seq-bound?
+                         (min raw-max-new (max 1 (- (dec eff-seq-len) (count clamped-prompt-ids))))
+                         raw-max-new)
+        eos-ids (cond
+                  (set? (:eos-ids eff-opts)) (:eos-ids eff-opts)
+                  (sequential? (:eos-ids eff-opts)) (set (:eos-ids eff-opts))
+                  :else (set (conj kernels/GEMMA4-STOP-TOKEN-IDS tok-eos-id)))
+        stop-token? (fn [tok-id] (contains? eos-ids (long tok-id)))
+        rep-pen (double (or (:repetition-penalty eff-opts) 1.0))
+        custom-sample-fn (:sample-fn eff-opts)
+        normalize-logits (fn ^floats [logits-data]
+                           (let [row (cond
+                                       (and (map? logits-data) (contains? logits-data :logits)) (:logits logits-data)
+                                       (and (map? logits-data) (contains? logits-data :data) (some? (:data logits-data))) (:data logits-data)
+                                       :else logits-data)]
+                             (if (instance? (Class/forName "[F") row)
+                               ^floats row
+                               (float-array (map float row)))))
+        graph-sample-fn (or custom-sample-fn
+                            (when (> rep-pen 1.0)
+                              (fn [logits seen-tokens]
+                                (sample-next-token (normalize-logits logits) eff-opts clamped-prompt-ids seen-tokens))))
+        select-token-fn (fn [logits-data seen-tokens]
+                          (long (if (fn? custom-sample-fn)
+                                  (custom-sample-fn logits-data seen-tokens)
+                                  (sample-next-token (normalize-logits logits-data) eff-opts clamped-prompt-ids seen-tokens))))]
+    {:max-new-tokens max-new-tokens
+     :eos-id tok-eos-id
+     :eos-ids eos-ids
+     :stop-token? stop-token?
+     :temperature (double (or (:temperature eff-opts) 0.0))
+     :sample-fn graph-sample-fn
+     :select-token-fn select-token-fn}))
+
+(defn- run-host-kv-decode-loop!
+  "Shared host-side autoregressive token loop consuming `build-decode-policy`.
+   Halts before appending stop tokens (`:stop-token?`) so `:new-token-ids` contains
+   content tokens only, matching `autoregressive-decoder-graph` and `run-vram-loop-generation`."
+  [{:keys [max-new-tokens stop-token? select-token-fn]}
+   prompt-count seq-len initial-logits step-logits-fn on-token-fn]
+  (let [max-tokens (long (or max-new-tokens 256))
+        limit-step (long (if seq-len (dec (long seq-len)) Long/MAX_VALUE))]
+    (if (or (nil? initial-logits) (<= max-tokens 0) (>= (long prompt-count) limit-step))
+      []
+      (loop [step (long prompt-count)
+             gen-tokens []
+             cur-logits initial-logits]
+        (let [next-id (long (select-token-fn cur-logits gen-tokens))]
+          (if (stop-token? next-id)
+            gen-tokens
+            (let [gen-tokens' (conj gen-tokens next-id)
+                  _ (when on-token-fn (on-token-fn next-id))
+                  next-step (inc step)]
+              (if (or (>= (count gen-tokens') max-tokens)
+                      (>= next-step limit-step))
+                gen-tokens'
+                (recur next-step
+                       gen-tokens'
+                       (step-logits-fn next-id step))))))))))
+
 (defn run-cached-kv-generation
   "Executes autoregressive generation with in-VRAM KV-Cache using single-token step executable
-   and 1-shot parallel prefill."
+   and 1-shot parallel prefill.
+   Note: Stop tokens (`GEMMA4-STOP-TOKEN-IDS` and tokenizer `eos-id`) terminate decoding before
+   being appended to the returned token vector, matching `autoregressive-decoder-graph`."
   ([session exec device-weights prompt-ids]
    (run-cached-kv-generation session exec device-weights prompt-ids nil))
   ([{:keys [tokenizer opts kv-state] :as session} exec device-weights prompt-ids max-seq-len]
-   (let [{:keys [max-new-tokens quiet mode]} opts
+   (let [{:keys [quiet mode]} opts
          is-agent? (= mode :agent)
          is-persistent? (some? kv-state)
          prefill-res (prefill-cached-kv-session! session exec device-weights prompt-ids max-seq-len)
@@ -780,52 +864,50 @@
                  t-prefill-end p-match seq-len num-outs x-arr pos-arr vocab-size weight-dt]}
          prefill-res]
      (try
-       (let [cur-tokens (atom (vec clamped-prompt-ids))
-             max-tokens (long (or max-new-tokens 256))]
-         ;; Phase 2: Autoregressive decode loop
-         (loop [step prompt-count
-                cur-logits last-logits]
-           (if (or (>= (- (count @cur-tokens) prompt-count) max-tokens)
-                   (>= step (dec seq-len)))
-             (when cur-logits (arena/destroy! session-arena cur-logits))
-             (let [logits-data (to-host-slice cur-logits 0 vocab-size vocab-size weight-dt)
-                   _ (arena/destroy! session-arena cur-logits)
-                   next-id (sample-next-token logits-data opts clamped-prompt-ids (subvec @cur-tokens prompt-count))]
-               (if (or (contains? kernels/GEMMA4-STOP-TOKEN-IDS next-id) (= next-id (eos-id tokenizer)))
-                 nil
-                 (do
-                   (swap! cur-tokens conj next-id)
-                   (when (and (not quiet) (not is-agent?))
-                     (print (decode tokenizer [next-id]))
-                     (flush))
-                   (let [new-log (step-cached-kv-session! session exec device-weights session-arena kv-buffers-atom x-arr pos-arr num-outs next-id step)]
-                     (recur (inc step) new-log)))))))
-         (let [t1 (System/nanoTime)
-               total-ms (/ (- t1 t0) 1e6)
-               prefill-ms (/ (- t-prefill-end t0) 1e6)
-               decode-ms (/ (- t1 t-prefill-end) 1e6)
-               gen-count (- (count @cur-tokens) prompt-count)
-               decode-tok-s (if (pos? decode-ms) (/ (* gen-count 1000.0) decode-ms) 0.0)]
-           (when is-persistent?
-             (reset! kv-state {:cached-tokens @cur-tokens
-                               :kv-buffers @kv-buffers-atom
-                               :prefill-ms prefill-ms
-                               :decode-ms decode-ms
-                               :decode-tok-s decode-tok-s
-                               :decode-ms-tok (if (pos? gen-count) (/ decode-ms (double gen-count)) 0.0)
-                               :gen-count gen-count
-                               :total-ms total-ms}))
-           (when-not quiet
-             (println)
-             (println "\n------------------------------------------------------------------")
-             (println "  Telemetry Benchmark Metrics (Tensor Logic KV-Cache):")
-             (println (format "    • Prefill Latency             : %8.2f ms (%d tokens, %d cached, %d new)"
-                              prefill-ms prompt-count p-match (- prompt-count p-match)))
-             (println (format "    • Decode Latency              : %8.2f ms (%d tokens)" decode-ms gen-count))
-             (println (format "    • Decode Speed                : %8.2f tok/s (%6.2f ms/tok)" decode-tok-s (if (pos? gen-count) (/ decode-ms gen-count) 0.0)))
-             (println (format "    • Total Generation Latency    : %8.2f ms" total-ms))
-             (println "------------------------------------------------------------------\n"))
-           @cur-tokens))
+       (let [policy (build-decode-policy session opts clamped-prompt-ids seq-len)
+             initial-logits (when last-logits
+                              (try
+                                (to-host-slice last-logits 0 vocab-size vocab-size weight-dt)
+                                (finally
+                                  (arena/destroy! session-arena last-logits))))
+             step-logits-fn (fn [next-id step-pos]
+                              (let [new-log (step-cached-kv-session! session exec device-weights session-arena kv-buffers-atom x-arr pos-arr num-outs next-id step-pos)]
+                                (try
+                                  (to-host-slice new-log 0 vocab-size vocab-size weight-dt)
+                                  (finally
+                                    (arena/destroy! session-arena new-log)))))
+             on-token-fn (when (and (not quiet) (not is-agent?))
+                           (fn [next-id]
+                             (print (decode tokenizer [next-id]))
+                             (flush)))
+             gen-tokens (run-host-kv-decode-loop! policy prompt-count seq-len initial-logits step-logits-fn on-token-fn)
+             all-tokens (into (vec clamped-prompt-ids) gen-tokens)
+             t1 (System/nanoTime)
+             total-ms (/ (- t1 t0) 1e6)
+             prefill-ms (/ (- t-prefill-end t0) 1e6)
+             decode-ms (/ (- t1 t-prefill-end) 1e6)
+             gen-count (count gen-tokens)
+             decode-tok-s (if (pos? decode-ms) (/ (* gen-count 1000.0) decode-ms) 0.0)]
+         (when is-persistent?
+           (reset! kv-state {:cached-tokens all-tokens
+                             :kv-buffers @kv-buffers-atom
+                             :prefill-ms prefill-ms
+                             :decode-ms decode-ms
+                             :decode-tok-s decode-tok-s
+                             :decode-ms-tok (if (pos? gen-count) (/ decode-ms (double gen-count)) 0.0)
+                             :gen-count gen-count
+                             :total-ms total-ms}))
+         (when-not quiet
+           (println)
+           (println "\n------------------------------------------------------------------")
+           (println "  Telemetry Benchmark Metrics (Tensor Logic KV-Cache):")
+           (println (format "    • Prefill Latency             : %8.2f ms (%d tokens, %d cached, %d new)"
+                            prefill-ms prompt-count p-match (- prompt-count p-match)))
+           (println (format "    • Decode Latency              : %8.2f ms (%d tokens)" decode-ms gen-count))
+           (println (format "    • Decode Speed                : %8.2f tok/s (%6.2f ms/tok)" decode-tok-s (if (pos? gen-count) (/ decode-ms gen-count) 0.0)))
+           (println (format "    • Total Generation Latency    : %8.2f ms" total-ms))
+           (println "------------------------------------------------------------------\n"))
+         all-tokens)
        (finally
          (when-not is-persistent?
            (when-let [bufs (seq @kv-buffers-atom)]
@@ -1270,24 +1352,8 @@
          {:keys [tokenizer opts]} session
          eff-opts (merge (:opts session) opts call-opts)
          {:keys [clamped-prompt-ids prompt-len max-seq-len]} (prepare-prompt-ids session prompt eff-opts)
-         raw-max-new (long (or (:max-new-tokens eff-opts) 200))
-         max-new-tokens (if (or (:max-seq-len session) (:max-seq-len eff-opts) (get-in session [:config :max-seq-len]))
-                          (min raw-max-new (max 1 (- (dec max-seq-len) (count clamped-prompt-ids))))
-                          raw-max-new)
-         eos-ids (cond
-                   (set? (:eos-ids eff-opts)) (:eos-ids eff-opts)
-                   (sequential? (:eos-ids eff-opts)) (set (:eos-ids eff-opts))
-                   :else (set (conj kernels/GEMMA4-STOP-TOKEN-IDS (eos-id tokenizer))))
-         rep-pen (double (or (:repetition-penalty eff-opts) 1.0))
-         sample-fn (or (:sample-fn eff-opts)
-                       (when (> rep-pen 1.0)
-                         (fn [logits seen-tokens]
-                           (sample-next-token logits eff-opts clamped-prompt-ids seen-tokens))))
-         decoder-opts {:max-new-tokens max-new-tokens
-                       :eos-ids eos-ids
-                       :eos-id (eos-id tokenizer)
-                       :temperature (double (or (:temperature eff-opts) 0.0))
-                       :sample-fn sample-fn}
+         {:keys [max-new-tokens] :as policy} (build-decode-policy session eff-opts clamped-prompt-ids max-seq-len)
+         decoder-opts (select-keys policy [:max-new-tokens :eos-ids :eos-id :temperature :sample-fn])
          decoder-hiccup ((requiring-resolve 'einsum.agent.graph/autoregressive-decoder-graph) decoder-opts)
          fwd-fn (session-forward-fn session eff-opts)
          device-hiccup [:device {:id :decoder-device}
@@ -1347,58 +1413,20 @@
       :sub-hiccup decoder-hiccup})))
 
 (defn- generate-host-forward-decode
+  "Runs the shared host KV decode loop (`run-host-kv-decode-loop!`) over `session-forward-fn`
+   when a session provides a `:forward-fn` override."
   [session prompt call-opts]
   (let [eff-opts (merge (:opts session) call-opts)
         {:keys [tokenizer]} session
         {:keys [clamped-prompt-ids prompt-len max-seq-len]} (prepare-prompt-ids session prompt eff-opts)
-        raw-max-new (long (or (:max-new-tokens eff-opts) 200))
-        max-new-tokens (if (or (:max-seq-len session) (:max-seq-len eff-opts) (get-in session [:config :max-seq-len]))
-                         (min raw-max-new (max 1 (- (dec max-seq-len) (count clamped-prompt-ids))))
-                         raw-max-new)
-        eos-ids (cond
-                  (set? (:eos-ids eff-opts)) (:eos-ids eff-opts)
-                  (sequential? (:eos-ids eff-opts)) (set (:eos-ids eff-opts))
-                  :else (set (conj kernels/GEMMA4-STOP-TOKEN-IDS (eos-id tokenizer))))
+        policy (build-decode-policy session eff-opts clamped-prompt-ids max-seq-len)
         fwd-fn (session-forward-fn session eff-opts)
-        rep-pen (double (or (:repetition-penalty eff-opts) 1.0))
-        sample-fn (or (:sample-fn eff-opts)
-                      (when (> rep-pen 1.0)
-                        (fn [logits seen-tokens]
-                          (sample-next-token logits eff-opts clamped-prompt-ids seen-tokens))))
-        greedy-fn (fn [logits]
-                    (if (fn? sample-fn)
-                      (sample-fn logits [])
-                      (let [row (cond
-                                  (and (map? logits) (contains? logits :logits)) (:logits logits)
-                                  (and (map? logits) (contains? logits :data) (some? (:data logits))) (:data logits)
-                                  :else logits)]
-                        (if (instance? (Class/forName "[F") row)
-                          (let [^floats arr row
-                                n (alength arr)]
-                            (loop [i 1 max-idx 0 max-val (aget arr 0)]
-                              (if (< i n)
-                                (let [v (aget arr i)]
-                                  (if (> v max-val)
-                                    (recur (inc i) i v)
-                                    (recur (inc i) max-idx max-val)))
-                                max-idx)))
-                          (let [indexed (map-indexed vector row)]
-                            (first (apply max-key second indexed)))))))
         t0 (System/nanoTime)
-        first-logits (fwd-fn clamped-prompt-ids)
+        initial-logits (fwd-fn clamped-prompt-ids)
         t-prefill-end (long (or (some-> fwd-fn meta :t-prefill-end-atom deref) (System/nanoTime)))
-        first-tok (long (greedy-fn first-logits))
-        gen-tokens (if (or (contains? eos-ids first-tok) (<= max-new-tokens 0))
-                     []
-                     (loop [toks [first-tok]]
-                       (if (or (>= (count toks) max-new-tokens)
-                               (contains? eos-ids (last toks)))
-                         (if (contains? eos-ids (last toks)) (pop toks) toks)
-                         (let [next-logits (fwd-fn {:inputs [(last toks)] :pos (+ (count clamped-prompt-ids) (count toks))})
-                               tok (long (if sample-fn (sample-fn next-logits toks) (greedy-fn next-logits)))]
-                           (if (contains? eos-ids tok)
-                             toks
-                             (recur (conj toks tok)))))))
+        step-logits-fn (fn [next-id step-pos]
+                         (fwd-fn {:inputs [next-id] :pos (inc step-pos)}))
+        gen-tokens (run-host-kv-decode-loop! policy (count clamped-prompt-ids) max-seq-len initial-logits step-logits-fn nil)
         t1 (System/nanoTime)
         t0-fwd (long (or (some-> fwd-fn meta :t0-atom deref) 0))
         eff-t0 (if (pos? t0-fwd) t0-fwd t0)
@@ -1424,7 +1452,15 @@
    {:text <decoded-new-text>
     :prompt-tokens <int>
     :new-tokens <int>
-    :new-token-ids <vec>}."
+    :new-token-ids <vec>
+    :prefill-ms <double>
+    :decode-ms <double>
+    :decode-tok-s <double>
+    :decode-ms-tok <double>
+    :total-ms <double>}.
+   Note: Across all decode paths (`:host`, `:graph`, `:vram-loop`), stop tokens
+   (`GEMMA4-STOP-TOKEN-IDS` and tokenizer `eos-id`) terminate decoding before being
+   appended to `:new-token-ids`."
   ([session prompt]
    (generate-new-tokens-and-text session prompt nil))
   ([session prompt call-opts]

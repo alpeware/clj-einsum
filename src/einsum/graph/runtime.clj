@@ -436,10 +436,14 @@
             (let [sub-event-log (get-in env [:event/meta :sub-event-log])
                   sub-hiccup (get-in env [:event/meta :sub-hiccup])
                   inst-with-sub (if (seq sub-event-log)
-                                  (let [effective-hiccup (or sub-hiccup
-                                                             ((requiring-resolve 'einsum.agent.graph/autoregressive-decoder-graph) {}))
-                                        sub-replayed (replay-graph effective-hiccup sub-event-log)]
-                                    (update inst :sub-replays (fnil conj []) sub-replayed))
+                                  (do
+                                    (when (nil? sub-hiccup)
+                                      (throw (ex-info "Cannot replay :sub-event-log without :sub-hiccup in :event/meta"
+                                                      {:tx (:event/tx env)
+                                                       :target (:event/target env)
+                                                       :meta (:event/meta env)})))
+                                    (let [sub-replayed (replay-graph sub-hiccup sub-event-log)]
+                                      (update inst :sub-replays (fnil conj []) sub-replayed)))
                                   inst)]
               (recur (rest envs) inst-with-sub))
 
