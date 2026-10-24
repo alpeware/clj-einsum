@@ -1410,6 +1410,7 @@
       :decode-ms-tok decode-ms-tok
       :total-ms total-ms
       :sub-event-log (:event-log stepped-inst)
+      :sub-decoder-opts (dissoc decoder-opts :sample-fn)
       :sub-hiccup decoder-hiccup})))
 
 (defn- generate-host-forward-decode

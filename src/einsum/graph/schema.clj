@@ -13,7 +13,9 @@
    [:cas/kind :keyword]
    [:cas/uri :string]
    [:cas/shape {:optional true} [:vector :int]]
-   [:cas/bytes {:optional true} :int]])
+   [:cas/bytes {:optional true} :int]
+   [:cas/argmax {:optional true} :int]
+   [:cas/decoder-opts {:optional true} :map]])
 
 (def EventEnvelopeSchema
   "Schema for a deterministic, hash-chained event envelope in the graph."

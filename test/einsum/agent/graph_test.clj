@@ -1,6 +1,7 @@
 (ns einsum.agent.graph-test
   "Unit and generative property tests for Declarative Coding Agent and Autoregressive Decoder Graphs."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.edn :as edn]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -459,8 +460,11 @@
         (is (= "The result is 391." (:final-answer final-out)))
         (is (runtime/verify-event-log-chain parent-log))
 
-        ;; 6. Replay the full parent graph deterministically with zero capabilities
-        (let [replayed-parent (runtime/replay-graph agent-ast parent-log)]
+        ;; 6. Replay the full parent graph deterministically with zero capabilities (both in-memory and after EDN serialization)
+        (let [edn-str (pr-str parent-log)
+              deserialized-parent-log (edn/read-string edn-str)
+              replayed-parent (runtime/replay-graph agent-ast deserialized-parent-log)]
+          (is (not (str/includes? edn-str "#object[")))
           (is (= (:node-states executed) (:node-states replayed-parent)))
           (is (= (:outbox executed) (:outbox replayed-parent)))
           (is (= 2 (count (:sub-replays replayed-parent))))
@@ -483,3 +487,70 @@
           (is (= #{1 106 107} (:eos-ids policy)))
           (is (true? ((:stop-token? policy) 106)))
           (is (false? ((:stop-token? policy) 201))))))))
+
+(deftest test-multi-turn-nested-decoder-subagent-isolation
+  (testing "Multi-turn nested autoregressive-decoder-graph resets :seen-tokens and :sub-event-log per turn and round-trips through pure EDN"
+    (let [seen-history (atom [])
+          step-counter (atom 0)
+          ;; Turn 1 emits [11 12 99(eos)]; Turn 2 emits [21 22 99(eos)]
+          seq-tokens [11 12 99 21 22 99]
+          custom-sample-fn (fn [logits seen-tokens]
+                             (swap! seen-history conj (vec seen-tokens))
+                             (cond
+                               (instance? (Class/forName "[F") logits)
+                               (let [^floats arr logits]
+                                 (first (apply max-key second (map-indexed vector arr))))
+                               (and (map? logits) (contains? logits :cas/argmax))
+                               (:cas/argmax logits)
+                               :else 99))
+          decoder-hiccup (graph/autoregressive-decoder-graph {:max-new-tokens 4
+                                                              :eos-id 99
+                                                              :sample-fn custom-sample-fn})
+          outer-agent
+          [:agent {:id :multi-turn-orchestrator
+                   :ins [:prompt-tokens]
+                   :outs [:final-tokens]
+                   :requires {:gpu {:type :compute/einsum}}}
+           decoder-hiccup
+           [:conn [:agent/in :prompt-tokens] [:autoregressive-decoder :tokens-in]]
+           [:conn [:autoregressive-decoder :tokens-out] [:agent/out :final-tokens]]]
+          mock-gpu (fn [_in-port _payload _cas-store]
+                     (let [idx (swap! step-counter inc)
+                           tok (nth seq-tokens (dec idx) 99)
+                           logits (float-array 128)]
+                       (aset logits (int tok) (float 50.0))
+                       {:logits [logits] :out [logits]}))
+          dev-ast [:device {:id :gpu-dev}
+                   [:cap {:id :gpu :type :compute/einsum}]]
+          bound (binder/bind-agent outer-agent dev-ast {:capabilities {:gpu mock-gpu}})
+          ;; Turn 1 invocation
+          after-t1 (-> bound
+                       (runtime/enqueue-input :prompt-tokens [1 2])
+                       runtime/run-graph!)
+          ;; Turn 2 invocation on the SAME outer graph instance
+          after-t2 (-> after-t1
+                       (runtime/enqueue-input :prompt-tokens [1 2 11 12])
+                       runtime/run-graph!)
+          outer-log (:event-log after-t2)
+          sub-logs (vec (keep #(get-in % [:event/meta :sub-event-log]) outer-log))]
+      ;; 1. Both turns produced their expected token sequences
+      (is (= [[11 12] [21 22]] (get-in after-t2 [:outbox :final-tokens])))
+      ;; 2. :logits-sampler reset :seen-tokens to [] at the start of Turn 2!
+      ;; Turn 1 steps see: [], [11], [11 12]; Turn 2 steps see: [], [21], [21 22]
+      (is (= [[] [11] [11 12] [] [21] [21 22]] @seen-history))
+      ;; 3. Each turn's :sub-event-log is isolated and starts cleanly at tx = 1 and GENESIS-HASH
+      (is (= 2 (count sub-logs)))
+      (doseq [slog sub-logs]
+        (is (= 1 (:event/tx (first slog))))
+        (is (= runtime/GENESIS-HASH (:event/prev-hash (first slog))))
+        (is (runtime/verify-event-log-chain slog)))
+      ;; 4. Pure EDN serialization & zero-blob cross-process replay
+      (let [edn-str (pr-str outer-log)
+            deserialized-outer-log (edn/read-string edn-str)]
+        (is (not (str/includes? edn-str "#object[")))
+        (is (runtime/verify-event-log-chain deserialized-outer-log))
+        (reset! seen-history [])
+        (let [replayed (runtime/replay-graph outer-agent deserialized-outer-log)]
+          (is (= (:outbox after-t2) (:outbox replayed)))
+          (is (= 2 (count (:sub-replays replayed))))
+          (is (= [[] [11] [11 12] [] [21] [21 22]] @seen-history)))))))

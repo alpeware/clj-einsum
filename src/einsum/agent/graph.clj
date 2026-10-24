@@ -334,6 +334,7 @@
 (defn- greedy-argmax
   [logits]
   (let [row (cond
+              (and (map? logits) (contains? logits :cas/argmax)) (long (:cas/argmax logits))
               (and (map? logits) (contains? logits :logits)) (greedy-argmax (:logits logits))
               (and (map? logits) (contains? logits :data) (some? (:data logits))) (:data logits)
               (and (vector? logits) (seq logits) (or (vector? (first logits)) (sequential? (first logits)))) (last logits)
@@ -349,6 +350,9 @@
                 (recur (inc i) i v)
                 (recur (inc i) max-idx max-val)))
             max-idx)))
+
+      (and (map? row) (contains? row :cas/argmax))
+      (long (:cas/argmax row))
 
       (sequential? row)
       (let [indexed (map-indexed vector row)]
@@ -412,17 +416,22 @@
       [:mealy {:id :logits-sampler
                :init-state {:temperature (or (:temperature opts) 0.0)
                             :seen-tokens []}
-               :ins [:logits]
+               :ins [:logits :reset]
                :outs [:token]
-               :step (fn [state _in-port payload]
-                       (let [sample-fn (:sample-fn opts)
-                             token (long (if sample-fn
-                                           (try
-                                             (sample-fn payload (:seen-tokens state))
-                                             (catch clojure.lang.ArityException _
-                                               (sample-fn payload)))
-                                           (greedy-argmax payload)))]
-                         [(update state :seen-tokens conj token) {:token [token]}]))}]
+               :step (fn [state in-port payload]
+                       (case in-port
+                         :reset
+                         [(assoc state :seen-tokens []) {}]
+
+                         :logits
+                         (let [sample-fn (:sample-fn opts)
+                               token (long (if sample-fn
+                                             (try
+                                               (sample-fn payload (:seen-tokens state))
+                                               (catch clojure.lang.ArityException _
+                                                 (sample-fn payload)))
+                                             (greedy-argmax payload)))]
+                           [(update state :seen-tokens conj token) {:token [token]}])))}]
       [:verify {:id :stop-gate
                 :ins [:in]
                 :outs [:continue :eos]
@@ -431,6 +440,7 @@
                           [:eos token]
                           [:continue token]))}]
       [:conn [:agent/in :tokens-in] [:seq-state :prompt-tokens]]
+      [:conn [:agent/in :tokens-in] [:logits-sampler :reset]]
       [:conn [:seq-state :step-in] [:cap/gpu :forward]]
       [:conn [:cap/gpu :logits] [:logits-sampler :logits]]
       [:conn [:logits-sampler :token] [:stop-gate :in]]

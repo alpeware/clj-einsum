@@ -23,6 +23,27 @@
     (nil? x) ""
     :else (str x)))
 
+(defn- canonicalize-for-hash
+  "Recursively replaces any raw Java primitive array in `payload` with its canonical
+   `{:cas/cid \"sha256:...\"}` map so `compute-event-hash` never depends on JVM object identity."
+  [payload]
+  (cond
+    (cas/primitive-array? payload)
+    {:cas/cid (cas/primitive-array-cid payload)}
+
+    (vector? payload)
+    (mapv canonicalize-for-hash payload)
+
+    (and (map? payload) (not (cas/cas-ptr? payload)))
+    (persistent!
+     (reduce-kv (fn [acc k v]
+                  (assoc! acc k (canonicalize-for-hash v)))
+                (transient {})
+                payload))
+
+    :else
+    payload))
+
 (defn compute-event-hash
   "Computes a deterministic SHA-256 event digest over the previous hash,
    source [src-node src-port], destination [dst-node dst-port], and payload."
@@ -31,7 +52,7 @@
    (str prev-hash ":"
         (namespace-or-name src-node) ":" (name src-port) "->"
         (namespace-or-name dst-node) ":" (name dst-port) ":"
-        (pr-str payload))))
+        (pr-str (canonicalize-for-hash payload)))))
 
 (defn verify-event-log-chain
   "Pure function verifying that event-log forms a valid, tamper-evident cryptographic hash chain.
@@ -195,7 +216,8 @@
 (defn- enqueue-message
   [graph-inst src-tuple dst-tuple payload]
   (let [next-tx (inc (:tx graph-inst))
-        env (make-envelope next-tx (:prev-hash graph-inst) src-tuple dst-tuple payload)]
+        clean-payload (cas/externalize-primitives! (:cas-store graph-inst) payload)
+        env (make-envelope next-tx (:prev-hash graph-inst) src-tuple dst-tuple clean-payload)]
     (-> graph-inst
         (assoc :tx next-tx
                :prev-hash (:event/hash env))
@@ -266,14 +288,20 @@
                 first-reply (first (:reply out-map))
                 has-sub-log? (and (map? first-reply) (:sub-event-log first-reply))
                 sub-log (when has-sub-log? (:sub-event-log first-reply))
-                sub-hiccup (when has-sub-log? (:sub-hiccup first-reply))
+                raw-sub-hiccup (when has-sub-log? (:sub-hiccup first-reply))
+                sub-decoder-opts (when has-sub-log? (:sub-decoder-opts first-reply))
+                sub-hiccup-meta (when raw-sub-hiccup
+                                  (let [ptr (cas/put! (:cas-store graph-inst) raw-sub-hiccup)]
+                                    (cond-> ptr
+                                      (map? sub-decoder-opts)
+                                      (assoc :cas/decoder-opts sub-decoder-opts))))
                 tx-idx (dec (:event/tx env))
                 parent-log (get graph-inst-popped :event-log)
                 parent-log-updated (if (and has-sub-log? (vector? parent-log) (<= 0 tx-idx) (< tx-idx (count parent-log)))
                                      (update-in parent-log [tx-idx :event/meta]
                                                 merge
                                                 (cond-> {:sub-event-log sub-log}
-                                                  sub-hiccup (assoc :sub-hiccup sub-hiccup)))
+                                                  sub-hiccup-meta (assoc :sub-hiccup sub-hiccup-meta)))
                                      parent-log)
                 inst-with-log (if has-sub-log?
                                 (assoc graph-inst-popped :event-log parent-log-updated)
@@ -282,7 +310,7 @@
                                 (update out-map :reply (fn [replies]
                                                          (mapv (fn [r]
                                                                  (if (map? r)
-                                                                   (dissoc r :sub-event-log :sub-hiccup)
+                                                                   (dissoc r :sub-event-log :sub-hiccup :sub-decoder-opts)
                                                                    r))
                                                                replies)))
                                 out-map)]
@@ -306,7 +334,8 @@
             (= (:type node) :mealy))
           (let [node (get-in graph-inst [:nodes dst-node])
                 curr-st (get-in graph-inst [:node-states dst-node])
-                [next-st out-map] ((:step node) curr-st dst-port payload)
+                resolved-payload (cas/resolve-payload (:cas-store graph-inst) payload)
+                [next-st out-map] ((:step node) curr-st dst-port resolved-payload)
                 inst-updated (assoc-in graph-inst-popped [:node-states dst-node] next-st)]
             (reduce-kv
              (fn [inst out-p msgs]
@@ -329,13 +358,14 @@
           (let [node (get-in graph-inst [:nodes dst-node])
                 has-st? (contains? node :init-state)
                 curr-st (when has-st? (get-in graph-inst [:node-states dst-node]))
+                resolved-payload (cas/resolve-payload (:cas-store graph-inst) payload)
                 raw-res (if has-st?
-                          ((:pred node) curr-st dst-port payload)
-                          ((:pred node) payload))
+                          ((:pred node) curr-st dst-port resolved-payload)
+                          ((:pred node) resolved-payload))
                 [next-st verify-out] (if (and has-st? (vector? raw-res) (== (count raw-res) 2) (map? (first raw-res)))
                                        raw-res
                                        [curr-st raw-res])
-                out-map (normalize-verify-output node verify-out payload)
+                out-map (normalize-verify-output node verify-out resolved-payload)
                 inst-updated (if has-st?
                                (assoc-in graph-inst-popped [:node-states dst-node] next-st)
                                graph-inst-popped)]
@@ -358,7 +388,12 @@
           (let [node (get-in graph-inst [:nodes dst-node])]
             (= (:type node) :agent))
           (let [sub-inst (get-in graph-inst [:node-states dst-node])
-                sub-inst-cleared (assoc sub-inst :outbox (zipmap (get-in sub-inst [:attrs :outs]) (repeat [])))
+                sub-inst-cleared (assoc sub-inst
+                                        :outbox (zipmap (get-in sub-inst [:attrs :outs]) (repeat []))
+                                        :queue clojure.lang.PersistentQueue/EMPTY
+                                        :tx 0
+                                        :prev-hash GENESIS-HASH
+                                        :event-log [])
                 sub-inst-stepped (-> sub-inst-cleared
                                      (enqueue-input dst-port payload)
                                      (run-graph! {:mode (:mode graph-inst)}))
@@ -413,77 +448,110 @@
 (defn replay-graph
   "Replays a recorded event-log against agent-hiccup with zero capabilities.
    Validates the cryptographic hash chain, walks all node transitions deterministically,
-   and reproduces the exact final :node-states and :outbox."
-  [agent-hiccup event-log]
-  (verify-event-log-chain event-log)
-  (let [initial-inst (compile-graph agent-hiccup {:capabilities {}})]
-    (loop [envs event-log
-           inst initial-inst]
-      (if (empty? envs)
-        (assoc inst
-               :event-log event-log
-               :tx (count event-log)
-               :prev-hash (if (seq event-log) (:event/hash (last event-log)) GENESIS-HASH))
-        (let [env (first envs)
-              [dst-node dst-port] (:event/target env)
-              payload (:event/payload env)]
-          (cond
-            (= dst-node :agent/out)
-            (recur (rest envs)
-                   (update-in inst [:outbox dst-port] conj payload))
+   and reproduces the exact final :node-states and :outbox.
+   Optional `opts` map may specify:
+     :cas-store           - CAS store for hydrating externalized primitive array pointers
+     :initial-node-states - map of prior node states (used when replaying multi-turn nested agents)"
+  ([agent-hiccup event-log]
+   (replay-graph agent-hiccup event-log {}))
+  ([agent-hiccup event-log opts]
+   (verify-event-log-chain event-log)
+   (let [base-inst (compile-graph agent-hiccup {:capabilities {}
+                                                :cas-store (:cas-store opts)})
+         initial-inst (if-let [init-states (:initial-node-states opts)]
+                        (update base-inst :node-states merge init-states)
+                        base-inst)]
+     (loop [envs event-log
+            inst initial-inst]
+       (if (empty? envs)
+         (assoc inst
+                :event-log event-log
+                :tx (count event-log)
+                :prev-hash (if (seq event-log) (:event/hash (last event-log)) GENESIS-HASH))
+         (let [env (first envs)
+               [dst-node dst-port] (:event/target env)
+               payload (:event/payload env)]
+           (cond
+             (= dst-node :agent/out)
+             (recur (rest envs)
+                    (update-in inst [:outbox dst-port] conj payload))
 
-            (= (namespace dst-node) "cap")
-            (let [sub-event-log (get-in env [:event/meta :sub-event-log])
-                  sub-hiccup (get-in env [:event/meta :sub-hiccup])
-                  inst-with-sub (if (seq sub-event-log)
-                                  (do
-                                    (when (nil? sub-hiccup)
-                                      (throw (ex-info "Cannot replay :sub-event-log without :sub-hiccup in :event/meta"
-                                                      {:tx (:event/tx env)
-                                                       :target (:event/target env)
-                                                       :meta (:event/meta env)})))
-                                    (let [sub-replayed (replay-graph sub-hiccup sub-event-log)]
-                                      (update inst :sub-replays (fnil conj []) sub-replayed)))
-                                  inst)]
-              (recur (rest envs) inst-with-sub))
+             (= (namespace dst-node) "cap")
+             (let [sub-event-log (get-in env [:event/meta :sub-event-log])
+                   raw-sub-hiccup (get-in env [:event/meta :sub-hiccup])
+                   resolved-sub-hiccup (cond
+                                         (and (vector? raw-sub-hiccup) (= :agent (first raw-sub-hiccup)))
+                                         raw-sub-hiccup
 
-            (let [node (get-in inst [:nodes dst-node])]
-              (= (:type node) :mealy))
-            (let [node (get-in inst [:nodes dst-node])
-                  curr-st (get-in inst [:node-states dst-node])
-                  [next-st _] ((:step node) curr-st dst-port payload)]
-              (recur (rest envs)
-                     (assoc-in inst [:node-states dst-node] next-st)))
+                                         (cas/cas-ptr? raw-sub-hiccup)
+                                         (or (cas/resolve-ptr (:cas-store inst) raw-sub-hiccup)
+                                             (when-let [d-opts (:cas/decoder-opts raw-sub-hiccup)]
+                                               ((requiring-resolve 'einsum.agent.graph/autoregressive-decoder-graph) d-opts)))
 
-            (let [node (get-in inst [:nodes dst-node])]
-              (= (:type node) :verify))
-            (let [node (get-in inst [:nodes dst-node])
-                  has-st? (contains? node :init-state)
-                  curr-st (when has-st? (get-in inst [:node-states dst-node]))
-                  raw-res (if has-st?
-                            ((:pred node) curr-st dst-port payload)
-                            ((:pred node) payload))
-                  [next-st _] (if (and has-st? (vector? raw-res) (== (count raw-res) 2) (map? (first raw-res)))
-                                raw-res
-                                [curr-st raw-res])]
-              (recur (rest envs)
-                     (if has-st?
-                       (assoc-in inst [:node-states dst-node] next-st)
-                       inst)))
+                                         :else nil)
+                   inst-with-sub (if (seq sub-event-log)
+                                   (do
+                                     (when (nil? resolved-sub-hiccup)
+                                       (throw (ex-info "Cannot replay :sub-event-log without :sub-hiccup in :event/meta"
+                                                       {:tx (:event/tx env)
+                                                        :target (:event/target env)
+                                                        :meta (:event/meta env)})))
+                                     (let [sub-replayed (replay-graph resolved-sub-hiccup
+                                                                      sub-event-log
+                                                                      {:cas-store (:cas-store inst)})]
+                                       (update inst :sub-replays (fnil conj []) sub-replayed)))
+                                   inst)]
+               (recur (rest envs) inst-with-sub))
 
-            (let [node (get-in inst [:nodes dst-node])]
-              (= (:type node) :agent))
-            (let [node (get-in inst [:nodes dst-node])
-                  sub-event-log (get-in env [:event/meta :sub-event-log])
-                  sub-inst-stepped (if (seq sub-event-log)
-                                     (replay-graph (:hiccup node) sub-event-log)
-                                     (let [sub-inst (get-in inst [:node-states dst-node])
-                                           sub-inst-cleared (assoc sub-inst :outbox (zipmap (get-in sub-inst [:attrs :outs]) (repeat [])))]
-                                       (-> sub-inst-cleared
-                                           (enqueue-input dst-port payload)
-                                           (run-graph! {:capabilities {}}))))]
-              (recur (rest envs)
-                     (assoc-in inst [:node-states dst-node] sub-inst-stepped)))
+             (let [node (get-in inst [:nodes dst-node])]
+               (= (:type node) :mealy))
+             (let [node (get-in inst [:nodes dst-node])
+                   curr-st (get-in inst [:node-states dst-node])
+                   resolved-payload (cas/resolve-payload (:cas-store inst) payload)
+                   [next-st _] ((:step node) curr-st dst-port resolved-payload)]
+               (recur (rest envs)
+                      (assoc-in inst [:node-states dst-node] next-st)))
 
-            :else
-            (recur (rest envs) inst)))))))
+             (let [node (get-in inst [:nodes dst-node])]
+               (= (:type node) :verify))
+             (let [node (get-in inst [:nodes dst-node])
+                   has-st? (contains? node :init-state)
+                   curr-st (when has-st? (get-in inst [:node-states dst-node]))
+                   resolved-payload (cas/resolve-payload (:cas-store inst) payload)
+                   raw-res (if has-st?
+                             ((:pred node) curr-st dst-port resolved-payload)
+                             ((:pred node) resolved-payload))
+                   [next-st _] (if (and has-st? (vector? raw-res) (== (count raw-res) 2) (map? (first raw-res)))
+                                 raw-res
+                                 [curr-st raw-res])]
+               (recur (rest envs)
+                      (if has-st?
+                        (assoc-in inst [:node-states dst-node] next-st)
+                        inst)))
+
+             (let [node (get-in inst [:nodes dst-node])]
+               (= (:type node) :agent))
+             (let [node (get-in inst [:nodes dst-node])
+                   sub-event-log (get-in env [:event/meta :sub-event-log])
+                   prior-sub-inst (get-in inst [:node-states dst-node])
+                   sub-inst-stepped (if (seq sub-event-log)
+                                      (replay-graph (:hiccup node)
+                                                    sub-event-log
+                                                    {:cas-store (:cas-store inst)
+                                                     :initial-node-states (:node-states prior-sub-inst)})
+                                      (let [sub-inst-cleared (assoc prior-sub-inst
+                                                                    :outbox (zipmap (get-in prior-sub-inst [:attrs :outs]) (repeat []))
+                                                                    :queue clojure.lang.PersistentQueue/EMPTY
+                                                                    :tx 0
+                                                                    :prev-hash GENESIS-HASH
+                                                                    :event-log [])]
+                                        (-> sub-inst-cleared
+                                            (enqueue-input dst-port payload)
+                                            (run-graph! {:capabilities {}}))))
+                   inst-with-sub (cond-> (assoc-in inst [:node-states dst-node] sub-inst-stepped)
+                                   (seq sub-event-log)
+                                   (update :sub-replays (fnil conj []) sub-inst-stepped))]
+               (recur (rest envs) inst-with-sub))
+
+             :else
+             (recur (rest envs) inst))))))))

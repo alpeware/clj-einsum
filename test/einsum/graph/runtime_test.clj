@@ -1,6 +1,8 @@
 (ns einsum.graph.runtime-test
   "Generative property and unit tests for the pure-Clojure Agent, Device, and Capability Graph Architecture."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -218,3 +220,65 @@
       (is (= short-str ext-short))
       (is (cas/cas-ptr? ext-long))
       (is (= long-str (cas/resolve-ptr store ext-long))))))
+
+(deftest test-primitive-array-cas-externalization-and-edn-roundtrip
+  (testing "Primitive arrays in graph messages are externalized to CAS pointers, producing pure EDN event logs and deterministic hashes across JVM instances"
+    (let [f-arr-1 (float-array [1.25 -3.5 9.75 4.0])
+          f-arr-2 (float-array [1.25 -3.5 9.75 4.0])
+          i-arr-1 (int-array [10 42 7])
+          ;; Two distinct JVM float-array instances with identical values produce identical event hashes
+          h1 (graph/compute-event-hash graph/GENESIS-HASH [:cap/gpu :logits] [:sampler :logits] f-arr-1)
+          h2 (graph/compute-event-hash graph/GENESIS-HASH [:cap/gpu :logits] [:sampler :logits] f-arr-2)]
+      (is (not (identical? f-arr-1 f-arr-2)))
+      (is (= h1 h2))
+
+      (let [agent-hiccup
+            [:agent {:id :prim-array-agent
+                     :ins [:trigger]
+                     :outs [:max-idx]
+                     :requires {:gpu :any}}
+             [:mealy {:id :requester
+                      :ins [:in]
+                      :outs [:fwd]
+                      :init-state {}
+                      :step (fn [s _ p] [s {:fwd [p]}])}]
+             [:mealy {:id :consumer
+                      :ins [:logits]
+                      :outs [:idx]
+                      :init-state {:seen []}
+                      :step (fn [s _ payload]
+                              (let [idx (cond
+                                          (instance? (Class/forName "[F") payload)
+                                          (let [^floats arr payload]
+                                            (first (apply max-key second (map-indexed vector arr))))
+                                          (and (map? payload) (contains? payload :cas/argmax))
+                                          (:cas/argmax payload)
+                                          :else -1)]
+                                [(update s :seen conj idx) {:idx [idx]}]))}]
+             [:conn [:agent/in :trigger] [:requester :in]]
+             [:conn [:requester :fwd] [:cap/gpu :forward]]
+             [:conn [:cap/gpu :logits] [:consumer :logits]]
+             [:conn [:consumer :idx] [:agent/out :max-idx]]]
+            mock-gpu (fn [_port _payload]
+                       {:logits [(float-array [1.25 -3.5 9.75 4.0])]})
+            inst (graph/compile-graph agent-hiccup {:capabilities {:gpu mock-gpu}})
+            executed (-> inst
+                         (graph/enqueue-input :trigger i-arr-1)
+                         graph/run-graph!)
+            event-log (:event-log executed)
+            serialized-edn (pr-str event-log)
+            deserialized-log (edn/read-string serialized-edn)]
+        (is (= [2] (get-in executed [:outbox :max-idx])))
+        ;; 1. Zero #object[...] tags in serialized EDN
+        (is (not (str/includes? serialized-edn "#object[")))
+        ;; 2. All envelopes in deserialized event-log validate against EventEnvelopeSchema and hash chain
+        (is (every? schema/valid-envelope? deserialized-log))
+        (is (graph/verify-event-log-chain deserialized-log))
+        ;; 3. Replay on deserialized EDN log with an EMPTY CAS store (simulating remote bitecho peer)
+        (let [replayed-unhydrated (graph/replay-graph agent-hiccup deserialized-log)]
+          (is (= (:outbox executed) (:outbox replayed-unhydrated)))
+          (is (= (:node-states executed) (:node-states replayed-unhydrated))))
+        ;; 4. Replay with hydrated CAS store
+        (let [replayed-hydrated (graph/replay-graph agent-hiccup deserialized-log {:cas-store (:cas-store executed)})]
+          (is (= (:outbox executed) (:outbox replayed-hydrated)))
+          (is (= (:node-states executed) (:node-states replayed-hydrated))))))))
