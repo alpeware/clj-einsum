@@ -228,9 +228,13 @@
           i-arr-1 (int-array [10 42 7])
           ;; Two distinct JVM float-array instances with identical values produce identical event hashes
           h1 (graph/compute-event-hash graph/GENESIS-HASH [:cap/gpu :logits] [:sampler :logits] f-arr-1)
-          h2 (graph/compute-event-hash graph/GENESIS-HASH [:cap/gpu :logits] [:sampler :logits] f-arr-2)]
+          h2 (graph/compute-event-hash graph/GENESIS-HASH [:cap/gpu :logits] [:sampler :logits] f-arr-2)
+          expected-le-bb (doto (.order (java.nio.ByteBuffer/allocate 16) java.nio.ByteOrder/LITTLE_ENDIAN)
+                           (-> .asFloatBuffer (.put f-arr-1)))
+          expected-le-cid (str "sha256:" (cas/sha256-bytes (.array expected-le-bb)))]
       (is (not (identical? f-arr-1 f-arr-2)))
       (is (= h1 h2))
+      (is (= expected-le-cid (cas/primitive-array-cid f-arr-1)))
 
       (let [agent-hiccup
             [:agent {:id :prim-array-agent

@@ -94,8 +94,11 @@
           :md (MessageDigest/getInstance "SHA-256")})))))
 
 (defn- digest-primitive-array
-  "Computes the big-endian SHA-256 hex digest, byte length, shape, and optional argmax
-   of a primitive array using a zero-allocation thread-local 16 KB L1-cache scratch buffer."
+  "Computes the canonical little-endian (ByteOrder/LITTLE_ENDIAN) SHA-256 hex digest,
+   byte length, shape, and optional argmax of a primitive array using a zero-allocation
+   thread-local 16 KB L1-cache scratch buffer.
+   Little-endian layout matches x86_64/ARM64 host memory, AMDGPU device memory, and
+   safetensors binary layout so host and device digests agree without byte-swapping."
   [val]
   (let [{:keys [^bytes ba ^java.nio.FloatBuffer fb ^java.nio.IntBuffer ib
                 ^java.nio.LongBuffer lb ^java.nio.DoubleBuffer db
@@ -190,7 +193,8 @@
       :else nil)))
 
 (defn primitive-array-cid
-  "Computes the deterministic 'sha256:<hex>' content identifier for a primitive array."
+  "Computes the deterministic 'sha256:<hex>' content identifier for a primitive array
+   over its canonical little-endian (ByteOrder/LITTLE_ENDIAN) byte representation."
   [val]
   (when-let [{:keys [hex]} (digest-primitive-array val)]
     (str "sha256:" hex)))
