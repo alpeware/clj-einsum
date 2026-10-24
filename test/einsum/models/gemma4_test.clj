@@ -10,6 +10,7 @@
             [einsum.models.gemma4.kernels :as kernels]
             [einsum.models.gemma4.runtime :as rt]
             [einsum.models.gemma4.weights :as weights]
+            [einsum.runtime.arena :as arena]
             [einsum.uop.core :as uop]
             [einsum.uop.lower :as uop-lower]
             [einsum.uop.schedule :as schedule]))
@@ -173,3 +174,85 @@
         (is (= 4 (count red-kernels)))
         (is (= 6 (count (:kernels s))))
         (is (every? #(== 4 (count (:out-shape (:rangeified %)))) (:kernels s)))))))
+
+(deftest test-precompiled-chunk-executable-short-prompt-prefill
+  (testing "Precompiled :chunked-prefill-executable (chunk-size=64) preserves target-chunk-sz=64 on sub-64 prompts and routes through :delta-chunk-executables without dispatching 64-token exec on a short buffer, while bespoke sessions clamp to prompt-count"
+    (let [ctx {:backend :uop :uop-target :cpu}
+          cfg {:num-layers 1
+               :num-kv-shared-layers 0
+               :vocab-size 16
+               :weight-dtype :f32
+               :max-seq-len 128}
+          exec-1 {:id :exec-1}
+          exec-16 {:id :exec-16}
+          exec-32 {:id :exec-32}
+          exec-64 {:id :exec-64}
+          delta-execs (into (sorted-map-by >) {64 exec-64 32 exec-32 16 exec-16})
+          short-prompt (vec (range 1 23)) ;; 22 tokens (< 64)
+          compile-calls (atom [])
+          dispatched-calls (atom [])]
+      (with-redefs [arena/device-buffer
+                    (fn
+                      ([host-data shape dtype]
+                       {:dtype dtype :shape (vec shape) :data host-data})
+                      ([_arena host-data shape dtype]
+                       {:dtype dtype :shape (vec shape) :data host-data}))
+                    kernels/compile-gemma4-chunked-prefill-executable
+                    (fn [_sess max-seq csz]
+                      (swap! compile-calls conj {:max-seq-len max-seq :chunk-size csz})
+                      {:id (keyword (str "bespoke-" csz))})
+                    kernels/allocate-kv-cache-buffers
+                    (fn [_sess _seq-len _arena]
+                      [{:id :k0} {:id :v0}])
+                    weights/allocate-device-weights
+                    (fn [_sess] [{:id :w0}])
+                    rt/execute-step-executable
+                    (fn [_ctx ex step-inputs _num-outs]
+                      (let [x-buf (first step-inputs)
+                            pos-buf (second step-inputs)
+                            pos-val (aget ^ints (:data pos-buf) 0)]
+                        (swap! dispatched-calls conj {:exec-id (:id ex)
+                                                      :x-shape (:shape x-buf)
+                                                      :pos pos-val})
+                        [{:id :logits :pos pos-val} {:id :k-out} {:id :v-out}]))]
+        ;; 1. Precompiled session (chunk-size=64, prompt=22 tokens):
+        ;;    Must NOT clamp target-chunk-sz to 22 or dispatch :exec-64 on [1 22];
+        ;;    must route all 22 tokens via :delta-chunk-executables (:exec-16 at pos 0 and suffix pos 6).
+        (let [precompiled-session {:ctx ctx
+                                   :config cfg
+                                   :opts {:chunk-size 64 :quiet true}
+                                   :session-arena (arena/create-arena ctx)
+                                   :device-weights [{:id :w0}]
+                                   :executable exec-1
+                                   :chunked-prefill-executable exec-64
+                                   :delta-chunk-executables delta-execs}
+              resolved (rt/resolve-active-session precompiled-session (:opts precompiled-session) short-prompt 128)
+              active-sess (:active-session resolved)
+              prefill-res (rt/prefill-cached-kv-session! active-sess exec-1 [{:id :w0}] short-prompt 128)]
+          (is (= exec-64 (:chunked-prefill-executable active-sess)))
+          (is (nil? (:tail-prefill-executable active-sess)))
+          (is (empty? @compile-calls))
+          (is (= [{:exec-id :exec-16 :x-shape [1 16] :pos 0}
+                  {:exec-id :exec-16 :x-shape [1 16] :pos 6}]
+                 @dispatched-calls))
+          (is (= {:id :logits :pos 6} (:last-logits prefill-res))))
+
+        ;; 2. Bespoke session (no precompiled :chunked-prefill-executable, chunk-size=64, prompt=22 tokens):
+        ;;    Must clamp target-chunk-sz to (min 22 64) = 22 and compile/dispatch a 22-token chunk executable.
+        (reset! compile-calls [])
+        (reset! dispatched-calls [])
+        (let [bespoke-session {:ctx ctx
+                               :config cfg
+                               :opts {:chunk-size 64 :quiet true}
+                               :session-arena (arena/create-arena ctx)
+                               :device-weights [{:id :w0}]
+                               :executable exec-1}
+              resolved (rt/resolve-active-session bespoke-session (:opts bespoke-session) short-prompt 128)
+              active-sess (:active-session resolved)
+              prefill-res (rt/prefill-cached-kv-session! active-sess exec-1 [{:id :w0}] short-prompt 128)]
+          (is (= [{:max-seq-len 128 :chunk-size 22}] @compile-calls))
+          (is (= {:id :bespoke-22} (:chunked-prefill-executable active-sess)))
+          (is (nil? (:tail-prefill-executable active-sess)))
+          (is (= [{:exec-id :bespoke-22 :x-shape [1 22] :pos 0}]
+                 @dispatched-calls))
+          (is (= {:id :logits :pos 0} (:last-logits prefill-res))))))))

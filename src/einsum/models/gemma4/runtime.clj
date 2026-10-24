@@ -520,8 +520,9 @@
          kv-buffers-atom (atom initial-kv)
          x-arr (int-array 1)
          pos-arr (int-array 1)
-         configured-chunk-sz (long (or (:chunk-size opts) (:chunk-size config) 512))
-         target-chunk-sz (if (:chunked-prefill-executable session)
+         configured-chunk-sz (long (or (:compiled-chunk-size session) (:chunk-size opts) (:chunk-size config) 512))
+         target-chunk-sz (if (or (:compiled-chunk-size session)
+                                 (seq (:delta-chunk-executables session)))
                            configured-chunk-sz
                            (min prompt-count configured-chunk-sz))
          chunk-exec (or (:chunked-prefill-executable session)
@@ -1057,6 +1058,7 @@
             :exec exec
             :prefill-executable prefill-exec
             :chunked-prefill-executable chunked-prefill-exec
+            :compiled-chunk-size primary-chunk-sz
             :step-executable step-exec
             :delta-chunk-executables delta-chunk-execs
             :kv-state (atom nil)
@@ -1178,8 +1180,10 @@
                                       (seq (:cached-tokens prior-cache))
                                       (seq (:kv-buffers prior-cache))
                                       (pos? (common-prefix-len (:cached-tokens prior-cache) prompt-ids))))
-        configured-chunk-sz (long (or (:chunk-size opts) (:chunk-size (:config session)) 512))
-        target-chunk-sz (if (:chunked-prefill-executable session)
+        configured-chunk-sz (long (or (:compiled-chunk-size session) (:chunk-size opts) (:chunk-size (:config session)) 512))
+        target-chunk-sz (if (or (:chunked-prefill-executable session)
+                                (:compiled-chunk-size session)
+                                (seq (:delta-chunk-executables session)))
                           configured-chunk-sz
                           (min prompt-count configured-chunk-sz))
         num-full-chunks (if (pos? target-chunk-sz) (quot prompt-count target-chunk-sz) 0)
@@ -1199,11 +1203,13 @@
                                          (> tail-len 1))
                                 (profile/with-profile metrics-atom "graph_compilation"
                                   (kernels/compile-gemma4-chunked-prefill-executable session max-seq-len tail-len)))))
-        active-session (assoc session
-                              :prefill-executable prefill-exec
-                              :chunked-prefill-executable chunked-prefill-exec
-                              :tail-prefill-executable tail-prefill-exec
-                              :step-executable step-exec)
+        active-session (cond-> (assoc session
+                                      :prefill-executable prefill-exec
+                                      :chunked-prefill-executable chunked-prefill-exec
+                                      :tail-prefill-executable tail-prefill-exec
+                                      :step-executable step-exec)
+                         (and chunked-prefill-exec (pos? target-chunk-sz))
+                         (assoc :compiled-chunk-size target-chunk-sz))
         device-weights (binding [profile/*active-trace-spans* trace-spans-atom]
                          (if reuse-weights?
                            (:device-weights session)
