@@ -520,7 +520,10 @@
          kv-buffers-atom (atom initial-kv)
          x-arr (int-array 1)
          pos-arr (int-array 1)
-         target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size config) 512)))
+         configured-chunk-sz (long (or (:chunk-size opts) (:chunk-size config) 512))
+         target-chunk-sz (if (:chunked-prefill-executable session)
+                           configured-chunk-sz
+                           (min prompt-count configured-chunk-sz))
          chunk-exec (or (:chunked-prefill-executable session)
                         (when (and (zero? p-match)
                                    (or uop? (nil? prefill-exec) (> seq-len (cfg/max-safe-prefill-seq-len config)))
@@ -1175,7 +1178,10 @@
                                       (seq (:cached-tokens prior-cache))
                                       (seq (:kv-buffers prior-cache))
                                       (pos? (common-prefix-len (:cached-tokens prior-cache) prompt-ids))))
-        target-chunk-sz (min prompt-count (long (or (:chunk-size opts) (:chunk-size (:config session)) 512)))
+        configured-chunk-sz (long (or (:chunk-size opts) (:chunk-size (:config session)) 512))
+        target-chunk-sz (if (:chunked-prefill-executable session)
+                          configured-chunk-sz
+                          (min prompt-count configured-chunk-sz))
         num-full-chunks (if (pos? target-chunk-sz) (quot prompt-count target-chunk-sz) 0)
         tail-len (- prompt-count (* num-full-chunks target-chunk-sz))
         chunked-prefill-exec (binding [profile/*active-trace-spans* trace-spans-atom]

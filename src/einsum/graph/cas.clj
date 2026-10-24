@@ -7,15 +7,17 @@
 ;; 1. Cryptographic Digest Helpers
 ;; -----------------------------------------------------------------------------
 
+(def ^:private ^java.util.HexFormat hex-format (java.util.HexFormat/of))
+
+(defn- digest->hex
+  ^String [^bytes digest]
+  (.formatHex hex-format digest))
+
 (defn sha256-bytes
   "Computes a 64-character lowercase hexadecimal SHA-256 digest of byte array b."
   [^bytes b]
-  (let [md (MessageDigest/getInstance "SHA-256")
-        digest (.digest md b)
-        sb (StringBuilder. 64)]
-    (doseq [x digest]
-      (.append sb (format "%02x" (bit-and x 0xff))))
-    (.toString sb)))
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (digest->hex (.digest md b))))
 
 (defn sha256-str
   "Computes a 64-character lowercase hexadecimal SHA-256 digest of string s (UTF-8)."
@@ -77,71 +79,121 @@
               (recur (inc i) max-idx max-val)))
           max-idx)))))
 
-(defn- serialize-primitive-array
-  "Serializes a primitive array into a big-endian byte array and returns
-   {:bytes <byte[]> :kind <kw> :shape [<len>] :argmax <int-or-nil>}."
+(def ^:private ^ThreadLocal tl-scratch
+  (ThreadLocal/withInitial
+   (reify java.util.function.Supplier
+     (get [_]
+       (let [ba (byte-array 16384)
+             bb (.order (java.nio.ByteBuffer/wrap ba) java.nio.ByteOrder/LITTLE_ENDIAN)]
+         {:ba ba
+          :fb (.asFloatBuffer bb)
+          :ib (.asIntBuffer bb)
+          :lb (.asLongBuffer bb)
+          :db (.asDoubleBuffer bb)
+          :sb (.asShortBuffer bb)
+          :md (MessageDigest/getInstance "SHA-256")})))))
+
+(defn- digest-primitive-array
+  "Computes the big-endian SHA-256 hex digest, byte length, shape, and optional argmax
+   of a primitive array using a zero-allocation thread-local 16 KB L1-cache scratch buffer."
   [val]
-  (cond
-    (instance? float-array-class val)
-    (let [arr ^floats val
-          n (alength arr)
-          bb (java.nio.ByteBuffer/allocate (* 4 n))]
-      (.put (.asFloatBuffer bb) arr)
-      {:bytes (.array bb)
-       :kind :tensor/f32
-       :shape [n]
-       :argmax (when (pos? n) (int (argmax-float-array arr)))})
+  (let [{:keys [^bytes ba ^java.nio.FloatBuffer fb ^java.nio.IntBuffer ib
+                ^java.nio.LongBuffer lb ^java.nio.DoubleBuffer db
+                ^java.nio.ShortBuffer sb ^MessageDigest md]} (.get tl-scratch)]
+    (.reset md)
+    (cond
+      (instance? float-array-class val)
+      (let [arr ^floats val
+            n (alength arr)]
+        (loop [off 0]
+          (when (< off n)
+            (let [chunk (min 4096 (- n off))]
+              (.clear fb)
+              (.put fb arr off chunk)
+              (.update md ba 0 (* 4 chunk))
+              (recur (+ off chunk)))))
+        {:hex (digest->hex (.digest md))
+         :bytes-cnt (* 4 n)
+         :kind :tensor/f32
+         :shape [n]
+         :argmax (when (pos? n) (int (argmax-float-array arr)))})
 
-    (instance? int-array-class val)
-    (let [arr ^ints val
-          n (alength arr)
-          bb (java.nio.ByteBuffer/allocate (* 4 n))]
-      (.put (.asIntBuffer bb) arr)
-      {:bytes (.array bb)
-       :kind :tensor/i32
-       :shape [n]
-       :argmax (when (pos? n) (int (argmax-int-array arr)))})
+      (instance? int-array-class val)
+      (let [arr ^ints val
+            n (alength arr)]
+        (loop [off 0]
+          (when (< off n)
+            (let [chunk (min 4096 (- n off))]
+              (.clear ib)
+              (.put ib arr off chunk)
+              (.update md ba 0 (* 4 chunk))
+              (recur (+ off chunk)))))
+        {:hex (digest->hex (.digest md))
+         :bytes-cnt (* 4 n)
+         :kind :tensor/i32
+         :shape [n]
+         :argmax (when (pos? n) (int (argmax-int-array arr)))})
 
-    (instance? long-array-class val)
-    (let [arr ^longs val
-          n (alength arr)
-          bb (java.nio.ByteBuffer/allocate (* 8 n))]
-      (.put (.asLongBuffer bb) arr)
-      {:bytes (.array bb)
-       :kind :tensor/i64
-       :shape [n]})
+      (instance? long-array-class val)
+      (let [arr ^longs val
+            n (alength arr)]
+        (loop [off 0]
+          (when (< off n)
+            (let [chunk (min 2048 (- n off))]
+              (.clear lb)
+              (.put lb arr off chunk)
+              (.update md ba 0 (* 8 chunk))
+              (recur (+ off chunk)))))
+        {:hex (digest->hex (.digest md))
+         :bytes-cnt (* 8 n)
+         :kind :tensor/i64
+         :shape [n]})
 
-    (instance? double-array-class val)
-    (let [arr ^doubles val
-          n (alength arr)
-          bb (java.nio.ByteBuffer/allocate (* 8 n))]
-      (.put (.asDoubleBuffer bb) arr)
-      {:bytes (.array bb)
-       :kind :tensor/f64
-       :shape [n]})
+      (instance? double-array-class val)
+      (let [arr ^doubles val
+            n (alength arr)]
+        (loop [off 0]
+          (when (< off n)
+            (let [chunk (min 2048 (- n off))]
+              (.clear db)
+              (.put db arr off chunk)
+              (.update md ba 0 (* 8 chunk))
+              (recur (+ off chunk)))))
+        {:hex (digest->hex (.digest md))
+         :bytes-cnt (* 8 n)
+         :kind :tensor/f64
+         :shape [n]})
 
-    (instance? short-array-class val)
-    (let [arr ^shorts val
-          n (alength arr)
-          bb (java.nio.ByteBuffer/allocate (* 2 n))]
-      (.put (.asShortBuffer bb) arr)
-      {:bytes (.array bb)
-       :kind :tensor/i16
-       :shape [n]})
+      (instance? short-array-class val)
+      (let [arr ^shorts val
+            n (alength arr)]
+        (loop [off 0]
+          (when (< off n)
+            (let [chunk (min 8192 (- n off))]
+              (.clear sb)
+              (.put sb arr off chunk)
+              (.update md ba 0 (* 2 chunk))
+              (recur (+ off chunk)))))
+        {:hex (digest->hex (.digest md))
+         :bytes-cnt (* 2 n)
+         :kind :tensor/i16
+         :shape [n]})
 
-    (bytes? val)
-    (let [arr ^bytes val]
-      {:bytes arr
-       :kind :bytes/raw
-       :shape [(alength arr)]})
+      (bytes? val)
+      (let [arr ^bytes val
+            n (alength arr)]
+        {:hex (sha256-bytes arr)
+         :bytes-cnt n
+         :kind :bytes/raw
+         :shape [n]})
 
-    :else nil))
+      :else nil)))
 
 (defn primitive-array-cid
   "Computes the deterministic 'sha256:<hex>' content identifier for a primitive array."
   [val]
-  (when-let [{:keys [^bytes bytes]} (serialize-primitive-array val)]
-    (str "sha256:" (sha256-bytes bytes))))
+  (when-let [{:keys [hex]} (digest-primitive-array val)]
+    (str "sha256:" hex)))
 
 ;; -----------------------------------------------------------------------------
 ;; 3. Store Construction & Operations
@@ -170,18 +222,23 @@
   ([store val]
    (put! store val {}))
   ([store val opts]
-   (let [prim-info (serialize-primitive-array val)
-         raw-bytes (cond
-                     prim-info (:bytes prim-info)
-                     (string? val) (.getBytes ^String val "UTF-8")
-                     :else (.getBytes (pr-str val) "UTF-8"))
-         cid (or (:cid opts) (str "sha256:" (sha256-bytes raw-bytes)))
+   (let [prim-info (digest-primitive-array val)
+         raw-bytes (when-not prim-info
+                     (if (string? val)
+                       (.getBytes ^String val "UTF-8")
+                       (.getBytes (pr-str val) "UTF-8")))
+         cid (or (:cid opts)
+                 (if prim-info
+                   (str "sha256:" (:hex prim-info))
+                   (str "sha256:" (sha256-bytes raw-bytes))))
          hash-part (if (.startsWith cid "sha256:") (subs cid 7) cid)
          kind (or (:kind opts)
                   (:kind prim-info)
                   (if (string? val) :text/utf8 :edn/value))
          uri (or (:uri opts) (str "mem://cas/" hash-part))
-         bytes-cnt (or (:bytes opts) (alength ^bytes raw-bytes))
+         bytes-cnt (or (:bytes opts)
+                       (:bytes-cnt prim-info)
+                       (alength ^bytes raw-bytes))
          shape (or (:shape opts) (:shape prim-info))
          argmax (or (:argmax opts) (:argmax prim-info))
          ptr (cond-> {:cas/cid cid
